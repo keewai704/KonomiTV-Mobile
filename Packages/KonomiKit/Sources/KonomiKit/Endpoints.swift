@@ -169,43 +169,101 @@ enum Endpoints {
 
     // MARK: - Streaming
 
+    /// `GET /api/streams/video/{video_id}/{quality}/playlist?session_id=..&type=..[&cache_key=..]`
+    ///
+    /// `type=master` returns the audio-group master playlist; the media
+    /// playlists (`primary-audio` / `secondary-audio`) are what the master
+    /// playlist points at. The segment URIs inside a media playlist are
+    /// relative, so AVPlayer resolves them against this URL.
     static func videoPlaylist(
         baseURL: URL,
         videoID: Int,
-        quality: StreamQuality,
-        sessionID: String
+        apiQuality: String,
+        sessionID: String,
+        playlistType: VideoPlaylistType = .master,
+        cacheKey: String? = nil
     ) -> URL {
-        url(
+        var query: [URLQueryItem] = [
+            URLQueryItem(name: "session_id", value: sessionID),
+            URLQueryItem(name: "type", value: playlistType.rawValue),
+        ]
+        if let cacheKey, !cacheKey.isEmpty {
+            query.append(URLQueryItem(name: "cache_key", value: cacheKey))
+        }
+        return url(
             baseURL: baseURL,
-            path: ["streams", "video", String(videoID), quality.videoSafe.rawValue, "playlist"],
-            query: [
-                URLQueryItem(name: "session_id", value: sessionID),
-                URLQueryItem(name: "type", value: "master"),
-            ]
+            path: ["streams", "video", String(videoID), apiQuality, "playlist"],
+            query: query
         )
     }
 
+    /// `GET /api/streams/video/{video_id}/{quality}/segment?session_id=..&sequence=..&cache_key=..&audio=..`
+    ///
+    /// Only needed when a segment URL is built by hand; the media playlist
+    /// already contains relative segment URIs.
+    static func videoSegment(
+        baseURL: URL,
+        videoID: Int,
+        apiQuality: String,
+        sessionID: String,
+        sequence: Int,
+        audio: AudioSelection = .primary,
+        cacheKey: String? = nil
+    ) -> URL {
+        var query: [URLQueryItem] = [
+            URLQueryItem(name: "session_id", value: sessionID),
+            URLQueryItem(name: "sequence", value: String(max(sequence, 0))),
+            URLQueryItem(name: "audio", value: audio.rawValue),
+        ]
+        if let cacheKey, !cacheKey.isEmpty {
+            query.append(URLQueryItem(name: "cache_key", value: cacheKey))
+        }
+        return url(
+            baseURL: baseURL,
+            path: ["streams", "video", String(videoID), apiQuality, "segment"],
+            query: query
+        )
+    }
+
+    /// `PUT /api/streams/video/{video_id}/{quality}/keep-alive?session_id=..`
     static func videoKeepAlive(
         baseURL: URL,
         videoID: Int,
-        quality: StreamQuality,
+        apiQuality: String,
         sessionID: String
     ) -> URL {
         url(
             baseURL: baseURL,
-            path: ["streams", "video", String(videoID), quality.videoSafe.rawValue, "keep-alive"],
+            path: ["streams", "video", String(videoID), apiQuality, "keep-alive"],
             query: [URLQueryItem(name: "session_id", value: sessionID)]
         )
     }
 
+    /// `GET /api/streams/live/{display_channel_id}/{quality}/mpegts`
     static func liveStream(
         baseURL: URL,
         displayChannelID: String,
-        quality: StreamQuality
+        apiQuality: String
     ) -> URL {
         url(
             baseURL: baseURL,
-            path: ["streams", "live", displayChannelID, quality.rawValue, "mpegts"]
+            path: ["streams", "live", displayChannelID, apiQuality, "mpegts"]
+        )
+    }
+
+    /// `GET /api/streams/live/{display_channel_id}/{quality}/events`
+    ///
+    /// A Server-Sent Events stream. KonomiKit only builds the URL; the app
+    /// reads it with `URLSession.bytes` and feeds the bytes to
+    /// `ServerSentEventParser`.
+    static func liveEvents(
+        baseURL: URL,
+        displayChannelID: String,
+        apiQuality: String
+    ) -> URL {
+        url(
+            baseURL: baseURL,
+            path: ["streams", "live", displayChannelID, apiQuality, "events"]
         )
     }
 }

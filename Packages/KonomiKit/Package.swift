@@ -13,9 +13,10 @@ let package = Package(
     ],
     targets: [
         .target(name: "KonomiKit"),
-        .target(name: "KonomiStreaming"),
+        // KonomiStreaming reuses the shared `AudioSelection` model from KonomiKit.
+        .target(name: "KonomiStreaming", dependencies: ["KonomiKit"]),
         .testTarget(name: "KonomiKitTests", dependencies: ["KonomiKit"]),
-        .testTarget(name: "KonomiStreamingTests", dependencies: ["KonomiStreaming"]),
+        .testTarget(name: "KonomiStreamingTests", dependencies: ["KonomiStreaming", "KonomiKit"]),
     ],
     swiftLanguageModes: [.v6]
 )

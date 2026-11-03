@@ -1,4 +1,5 @@
 import Foundation
+import KonomiKit
 
 /// One HLS media segment produced by `LiveSegmenter`.
 public struct TSSegment: Sendable, Hashable {
@@ -6,17 +7,26 @@ public struct TSSegment: Sendable, Hashable {
     public let duration: Double
     public let data: Data
     public let discontinuity: Bool
+    /// PMT that was in effect when the segment was cut. Carried so an audio
+    /// track selection can be applied later, when the segment is served.
+    public let pmt: PMT?
+    /// PID of `pmt`.
+    public let pmtPID: Int?
 
     public init(
         sequence: Int,
         duration: Double,
         data: Data,
-        discontinuity: Bool = false
+        discontinuity: Bool = false,
+        pmt: PMT? = nil,
+        pmtPID: Int? = nil
     ) {
         self.sequence = sequence
         self.duration = duration
         self.data = data
         self.discontinuity = discontinuity
+        self.pmt = pmt
+        self.pmtPID = pmtPID
     }
 
     public var byteCount: Int {
@@ -26,6 +36,41 @@ public struct TSSegment: Sendable, Hashable {
     /// Number of 188-byte TS packets in the segment.
     public var packetCount: Int {
         data.count / TSPacket.packetSize
+    }
+
+    /// Audio tracks described by the segment's PMT, if known.
+    public var audioTrackInfo: LiveAudioTrackInfo? {
+        guard let pmt, let pmtPID else { return nil }
+        return LiveAudioTrackInfo(pmt: pmt, pmtPID: pmtPID)
+    }
+
+    /// True when the program carries a secondary audio stream, i.e. when the
+    /// app should offer 主音声 / 副音声.
+    public var hasSecondaryAudio: Bool {
+        audioTrackInfo?.hasSecondaryAudio ?? false
+    }
+
+    /// Returns a copy of the segment restricted to one audio stream.
+    ///
+    /// Segments with a single audio stream (or without a known PMT) are
+    /// returned unchanged.
+    public func filtered(audio selection: AudioSelection) -> TSSegment {
+        guard let pmt, let pmtPID else { return self }
+        let filteredData = LiveAudioFilter.filteredSegment(
+            data,
+            selection: selection,
+            pmt: pmt,
+            pmtPID: pmtPID
+        )
+        guard filteredData != data else { return self }
+        return TSSegment(
+            sequence: sequence,
+            duration: duration,
+            data: filteredData,
+            discontinuity: discontinuity,
+            pmt: pmt,
+            pmtPID: pmtPID
+        )
     }
 }
 
@@ -103,6 +148,18 @@ public struct LiveSegmenter: Sendable {
     /// Latest PMT parsed from the stream, if any.
     public var programMapTable: PMT? {
         pmt
+    }
+
+    /// Audio tracks of the current program (main audio first). Nil until a PMT
+    /// with at least one audio stream has been seen.
+    public var audioTrackInfo: LiveAudioTrackInfo? {
+        guard let pmt, let pmtPID else { return nil }
+        return LiveAudioTrackInfo(pmt: pmt, pmtPID: pmtPID)
+    }
+
+    /// True when the current program carries a secondary audio stream.
+    public var hasSecondaryAudio: Bool {
+        audioTrackInfo?.hasSecondaryAudio ?? false
     }
 
     // MARK: - Packet handling
@@ -220,7 +277,9 @@ public struct LiveSegmenter: Sendable {
             sequence: nextSequence,
             duration: max(duration, 0.001),
             data: segmentBuffer,
-            discontinuity: segmentDiscontinuity
+            discontinuity: segmentDiscontinuity,
+            pmt: pmt,
+            pmtPID: pmtPID
         )
         nextSequence += 1
         segmentBuffer.removeAll(keepingCapacity: true)

@@ -322,7 +322,11 @@ final class APIClientTests: XCTestCase {
 
     func testVideoKeepAliveURL() {
         let client = APIClient(baseURL: serverBaseURL)
-        let url = client.videoKeepAliveURL(videoID: 42, quality: .p720HEVC, sessionID: "sid")
+        let url = client.videoKeepAliveURL(
+            videoID: 42,
+            profile: StreamingProfile(quality: .p720, dataSaver: true),
+            sessionID: "sid"
+        )
         XCTAssertEqual(url.path, "/api/streams/video/42/720p-hevc/keep-alive")
         let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         XCTAssertEqual(components?.queryItems?.first { $0.name == "session_id" }?.value, "sid")

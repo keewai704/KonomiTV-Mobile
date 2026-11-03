@@ -42,9 +42,58 @@ STREAM_CHUNK_SIZE = TS_PACKET_SIZE * 64
 
 JST = timezone(timedelta(hours=9))
 
-BASE_QUALITIES = ("1080p-60fps", "1080p", "720p", "480p", "360p", "240p")
+# ライブストリーム イベント API: Standby を返してから ONAir になるまでの待ち時間 (秒)
+LIVE_EVENTS_STANDBY_SECONDS = 0.5
+# ライブストリーム イベント API: clients_update を流す間隔 (秒)
+LIVE_EVENTS_UPDATE_INTERVAL = 2.0
+# clients_update を何回流すごとに keep-alive のコメントを挟むか
+LIVE_EVENTS_PING_INTERVAL_TICKS = 3
+
+# 実サーバー (server/app/constants.py の QUALITY) と同じ並びのベース画質
+BASE_QUALITIES = (
+    "1080p-60fps", "1080p", "810p", "720p", "540p", "480p", "360p", "240p",
+)
 VALID_VIDEO_QUALITIES = set(BASE_QUALITIES) | {q + "-hevc" for q in BASE_QUALITIES}
 VALID_LIVE_QUALITIES = VALID_VIDEO_QUALITIES | {"original"}
+
+# 画質ごとの (映像ビットレート最大, 音声ビットレート) 。定数は constants.py と同じ (Kbps)
+QUALITY_BITRATES = {
+    "1080p-60fps": (13000, 256),
+    "1080p-60fps-hevc": (5200, 192),
+    "1080p": (13000, 256),
+    "1080p-hevc": (4500, 192),
+    "810p": (7600, 192),
+    "810p-hevc": (3700, 192),
+    "720p": (6200, 192),
+    "720p-hevc": (3000, 192),
+    "540p": (4100, 192),
+    "540p-hevc": (2100, 192),
+    "480p": (2800, 192),
+    "480p-hevc": (1750, 192),
+    "360p": (1800, 128),
+    "360p-hevc": (1250, 128),
+    "240p": (650, 128),
+    "240p-hevc": (650, 128),
+}
+
+# API パスの品質指定の末尾に付くエンコードオプション (-10bit は本クライアントでは使わないが受け付ける)
+QUALITY_OPTION_SUFFIXES = ("-24fps", "-10bit")
+
+
+def split_api_quality(quality: str) -> tuple[str, bool]:
+    """Split "720p-hevc-24fps" into its base quality and the 24fps flag.
+
+    Mirrors server/app/streams/StreamEncodingOptions.py: the suffixes are peeled
+    off from the end so a base quality that itself ends with -hevc still works.
+    """
+    base_quality = quality
+    is_24fps_mode = False
+    for suffix in QUALITY_OPTION_SUFFIXES:
+        if base_quality.endswith(suffix):
+            base_quality = base_quality[: -len(suffix)]
+            if suffix == "-24fps":
+                is_24fps_mode = True
+    return base_quality, is_24fps_mode
 
 # 1x1 のダミー画像 (PNG / WebP)
 PNG_BYTES = base64.b64decode(
@@ -128,6 +177,10 @@ class MockServerState:
         self.settings_put_count = 0
         self.video_delete_count = 0
         self.deleted_video_ids: list[int] = []
+        # 直近にリクエストされた品質・プレイリスト種別 (UI テストの検証用)
+        self.last_live_quality: str | None = None
+        self.last_video_quality: str | None = None
+        self.last_video_playlist_type: str | None = None
         # クライアント設定はプロセスが生きている間だけ保持する (実サーバーでは DB に保存される)
         self.client_settings: dict = copy.deepcopy(client_settings or {})
 
@@ -150,6 +203,16 @@ class MockServerState:
             self.video_delete_count += 1
             self.deleted_video_ids.append(video_id)
 
+    def record_live_quality(self, quality: str) -> None:
+        with self.lock:
+            self.last_live_quality = quality
+
+    def record_video_quality(self, quality: str, playlist_type: str | None = None) -> None:
+        with self.lock:
+            self.last_video_quality = quality
+            if playlist_type is not None:
+                self.last_video_playlist_type = playlist_type
+
     def record_settings_put(self, settings: dict) -> None:
         with self.lock:
             self.settings_put_count += 1
@@ -164,6 +227,9 @@ class MockServerState:
                 "settings_put_count": self.settings_put_count,
                 "video_delete_count": self.video_delete_count,
                 "deleted_video_ids": list(self.deleted_video_ids),
+                "last_live_quality": self.last_live_quality,
+                "last_video_quality": self.last_video_quality,
+                "last_video_playlist_type": self.last_video_playlist_type,
             }
 
 
@@ -818,7 +884,9 @@ class MockHandler(BaseHTTPRequestHandler):
     def _valid_quality(quality: str, allow_original: bool) -> bool:
         if quality == "original":
             return allow_original
-        return quality in VALID_VIDEO_QUALITIES
+        # 810p / 540p と -hevc / -24fps / -10bit のサフィックスを受け付ける
+        base_quality, _ = split_api_quality(quality)
+        return base_quality in VALID_VIDEO_QUALITIES
 
     def _handle_videos(self, parts: list[str], query: dict, fixtures: dict) -> None:
         videos = fixtures["videos"]
@@ -1209,6 +1277,8 @@ class MockHandler(BaseHTTPRequestHandler):
             self._unprocessable()
             return
 
+        state.record_video_quality(quality)
+
         if action == "playlist":
             session_id = (query.get("session_id") or [""])[0]
             playlist_type = (query.get("type") or ["primary-audio"])[0]
@@ -1219,6 +1289,7 @@ class MockHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"detail": "Invalid playlist type"}, 422)
                 return
+            state.record_video_quality(quality, playlist_type)
             self._send_bytes(body.encode("utf-8"), "application/vnd.apple.mpegurl")
             return
 
@@ -1262,14 +1333,28 @@ class MockHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _build_master_playlist(session_id: str, quality: str) -> str:
-        # 実サーバーと同じく CODECS / RESOLUTION は宣言しない
-        bandwidth = 8_000_000 if quality.startswith("1080p") else 4_000_000
+        """Master playlist with a 主音声 / 副音声 audio group.
+
+        Same shape as VideoStreamsRouter.py: the audio group is declared with
+        EXT-X-MEDIA so AVPlayer shows both tracks natively, and the variant
+        points at the primary-audio media playlist. CODECS / RESOLUTION are not
+        declared, like the real server.
+        """
+        base_quality, _ = split_api_quality(quality)
+        video_kbps, audio_kbps = QUALITY_BITRATES.get(base_quality, (8000, 192))
+        # MPEG-TS の多重化オーバーヘッドを10%見込み、映像と2本分の音声を収容できる帯域幅
+        bandwidth = round((video_kbps * 1000 + audio_kbps * 1000 * 2) * 1.1)
+        playlist_uri = f"playlist?session_id={quote(session_id, safe='')}"
         return (
             "#EXTM3U\n"
-            "#EXT-X-VERSION:3\n"
-            "#EXT-X-STREAM-INF:BANDWIDTH=%d\n"
-            "playlist?session_id=%s&type=primary-audio\n"
-        ) % (bandwidth, quote(session_id, safe=""))
+            "#EXT-X-VERSION:6\n"
+            '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="主音声",'
+            'DEFAULT=YES,AUTOSELECT=YES,LANGUAGE="jpn"\n'
+            '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="副音声",'
+            f'DEFAULT=NO,AUTOSELECT=YES,LANGUAGE="jpn",URI="{playlist_uri}&type=secondary-audio"\n'
+            f'#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AUDIO="audio"\n'
+            f"{playlist_uri}&type=primary-audio\n"
+        )
 
     @staticmethod
     def _source_playlist_entries(fixtures: dict) -> list[str]:
@@ -1317,11 +1402,14 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def _handle_live_stream(self, parts: list[str], state: MockServerState,
                             fixtures: dict) -> None:
-        # /streams/live/{display_channel_id}/{quality}/mpegts
-        if len(parts) != 5 or parts[4] != "mpegts":
+        # /streams/live/{display_channel_id}/{quality}/{mpegts|events}
+        if len(parts) != 5 or parts[0] != "streams" or parts[1] != "live":
             self._not_found()
             return
-        display_channel_id, quality = parts[2], parts[3]
+        display_channel_id, quality, action = parts[2], parts[3], parts[4]
+        if action not in ("mpegts", "events"):
+            self._not_found()
+            return
 
         channels = fixtures["channels"]
         known = any(
@@ -1332,8 +1420,14 @@ class MockHandler(BaseHTTPRequestHandler):
         if not known:
             self._not_found()
             return
-        if quality not in VALID_LIVE_QUALITIES:
+        if not self._valid_live_quality(quality):
             self._unprocessable()
+            return
+
+        state.record_live_quality(quality)
+
+        if action == "events":
+            self._serve_live_events(state)
             return
 
         sample = fixtures["sample_ts"]
@@ -1354,6 +1448,98 @@ class MockHandler(BaseHTTPRequestHandler):
             pass
         finally:
             state.live_disconnected()
+
+    # -- ライブストリーム イベント (Server-Sent Events) ---------------------
+
+    @staticmethod
+    def _valid_live_quality(quality: str) -> bool:
+        if quality == "original":
+            return True
+        base_quality, _ = split_api_quality(quality)
+        return base_quality in VALID_VIDEO_QUALITIES
+
+    @staticmethod
+    def _live_status_payload(status: str, detail: str, started_at: float,
+                             updated_at: float, client_count: int) -> str:
+        """JSON body of a live stream status event (schemas.LiveStreamStatus)."""
+        return json.dumps({
+            "status": status,
+            "detail": detail,
+            "started_at": started_at,
+            "updated_at": updated_at,
+            "client_count": client_count,
+        }, ensure_ascii=False)
+
+    def _serve_live_events(self, state: MockServerState) -> None:
+        """Live stream event stream (text/event-stream).
+
+        Mirrors LiveStreamsRouter.LiveStreamEventAPI: an initial_update event on
+        connect, then status_update when the status changes, detail_update when
+        only the detail changes and clients_update when only the viewer count
+        changes. The real server only writes when something changed and relies
+        on sse_starlette's periodic ping comment, so this mock sends a comment
+        ping every few seconds to keep the connection alive.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        def write(payload: str) -> None:
+            self.wfile.write(payload.encode("utf-8"))
+            self.wfile.flush()
+
+        def write_event(name: str, body: str) -> None:
+            write(f"event: {name}\ndata: {body}\n\n")
+
+        started_at = time.time()
+        state.live_connected()
+        try:
+            client_count = state.snapshot()["live_active"]
+            # 初回接続時は必ず現在のステータスを返す
+            write_event("initial_update", self._live_status_payload(
+                "Standby", "エンコードタスクを起動しています…",
+                started_at, started_at, client_count,
+            ))
+
+            # エンコードタスクが立ち上がるまでの待ちを再現する
+            if self._sleep_until_disconnected(LIVE_EVENTS_STANDBY_SECONDS):
+                return
+            now = time.time()
+            write_event("status_update", self._live_status_payload(
+                "ONAir", "ライブストリームは ONAir です。",
+                started_at, now, max(client_count, 1),
+            ))
+
+            # 以降は視聴者数の変化と keep-alive のコメントだけを流す
+            tick = 0
+            while True:
+                if self._sleep_until_disconnected(LIVE_EVENTS_UPDATE_INTERVAL):
+                    return
+                tick += 1
+                if tick % LIVE_EVENTS_PING_INTERVAL_TICKS == 0:
+                    write(": keep-alive\n\n")
+                now = time.time()
+                viewers = max(state.snapshot()["live_active"], 1)
+                write_event("clients_update", self._live_status_payload(
+                    "ONAir", "ライブストリームは ONAir です。",
+                    started_at, now, viewers,
+                ))
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            state.live_disconnected()
+
+    def _sleep_until_disconnected(self, seconds: float) -> bool:
+        """Sleep in small steps; returns True when the client went away."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self._client_disconnected():
+                return True
+            time.sleep(min(0.05, max(deadline - time.monotonic(), 0)))
+        return self._client_disconnected()
 
     def _client_disconnected(self) -> bool:
         """Best-effort detection of a closed client socket (FIN or RST)."""

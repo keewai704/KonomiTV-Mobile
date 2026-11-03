@@ -407,6 +407,272 @@ class MockServerTestCase(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# ストリーミング (拡張画質 / master プレイリスト / ライブイベント SSE)
+# ---------------------------------------------------------------------------
+
+class MockServerStreamingTestCase(unittest.TestCase):
+    """Streaming endpoint tests (fresh server per class)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = mock_server.create_server("127.0.0.1", 0)
+        cls.host, cls.port = cls.server.server_address[:2]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def request(self, method: str, path: str, body: bytes | None = None,
+                headers: dict | None = None):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            hdrs = {"Accept": "*/*"}
+            if headers:
+                hdrs.update(headers)
+            conn.request(method, path, body=body, headers=hdrs)
+            response = conn.getresponse()
+            data = response.read()
+            return response.status, dict(response.getheaders()), data
+        finally:
+            conn.close()
+
+    def get_json(self, path: str, headers: dict | None = None):
+        status, response_headers, data = self.request("GET", path, headers=headers)
+        return status, response_headers, json.loads(data.decode("utf-8"))
+
+    def stats(self) -> dict:
+        status, _, payload = self.get_json("/__mock/stats")
+        self.assertEqual(status, 200)
+        return payload
+
+    # -- 拡張画質 ----------------------------------------------------------
+
+    def test_live_accepts_extended_quality_names(self) -> None:
+        for quality in (
+            "810p", "540p", "810p-hevc", "540p-hevc-24fps",
+            "1080p-60fps-hevc", "720p-hevc-10bit-24fps", "original",
+        ):
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+            response = None
+            try:
+                conn.request("GET", f"/api/streams/live/gr011/{quality}/mpegts")
+                response = conn.getresponse()
+                self.assertEqual(response.status, 200, quality)
+                self.assertEqual(response.getheader("Content-Type"), "video/mp2t")
+                data = response.read(188)
+                self.assertEqual(len(data), 188, quality)
+                self.assertEqual(data[0], 0x47, quality)
+            finally:
+                if response is not None:
+                    response.close()
+                conn.close()
+            self.assertEqual(self.stats()["last_live_quality"], quality)
+
+    def test_live_rejects_unknown_quality(self) -> None:
+        for quality in ("2160p", "810p-hevc-30fps", "1080p-24fps-hevc"):
+            status, _, payload = self.get_json(
+                f"/api/streams/live/gr011/{quality}/mpegts"
+            )
+            self.assertEqual(status, 422, quality)
+            self.assertIn("detail", payload)
+
+    def test_video_accepts_extended_quality_names(self) -> None:
+        for quality in ("810p", "540p-hevc", "810p-hevc-24fps", "1080p-60fps-hevc"):
+            status, headers, body = self.request(
+                "GET",
+                f"/api/streams/video/1/{quality}/playlist?session_id=sid&type=master",
+            )
+            self.assertEqual(status, 200, quality)
+            self.assertIn("mpegurl", headers.get("Content-Type", ""))
+            self.assertTrue(body.decode("utf-8").startswith("#EXTM3U"), quality)
+            self.assertEqual(self.stats()["last_video_quality"], quality)
+
+    # -- master プレイリスト ------------------------------------------------
+
+    def test_video_master_playlist_has_audio_group(self) -> None:
+        session_id = "abc12345"
+        path = (
+            f"/api/streams/video/1/810p-hevc-24fps/playlist"
+            f"?session_id={session_id}&type=master"
+        )
+        status, headers, body = self.request("GET", path)
+        self.assertEqual(status, 200)
+        self.assertIn("mpegurl", headers.get("Content-Type", ""))
+        master = body.decode("utf-8")
+        lines = master.splitlines()
+
+        self.assertEqual(lines[0], "#EXTM3U")
+        self.assertIn("#EXT-X-VERSION:6", lines)
+
+        media_lines = [line for line in lines if line.startswith("#EXT-X-MEDIA:")]
+        self.assertEqual(len(media_lines), 2)
+        self.assertIn('NAME="主音声"', media_lines[0])
+        self.assertIn("DEFAULT=YES", media_lines[0])
+        self.assertNotIn("URI=", media_lines[0])
+        self.assertIn('NAME="副音声"', media_lines[1])
+        self.assertIn("DEFAULT=NO", media_lines[1])
+        self.assertIn(
+            f'URI="playlist?session_id={session_id}&type=secondary-audio"',
+            media_lines[1],
+        )
+
+        stream_inf = next(line for line in lines if line.startswith("#EXT-X-STREAM-INF:"))
+        self.assertIn('AUDIO="audio"', stream_inf)
+        bandwidth = int(stream_inf.split("BANDWIDTH=")[1].split(",")[0])
+        # 810p-hevc: 3700K 映像 + 192K 音声 x2 に 10% の多重化オーバーヘッド
+        self.assertEqual(bandwidth, round((3700 * 1000 + 192 * 1000 * 2) * 1.1))
+
+        variant = next(line for line in lines if line and not line.startswith("#"))
+        self.assertEqual(variant, f"playlist?session_id={session_id}&type=primary-audio")
+
+        stats = self.stats()
+        self.assertEqual(stats["last_video_quality"], "810p-hevc-24fps")
+        self.assertEqual(stats["last_video_playlist_type"], "master")
+
+    def test_video_audio_media_playlists(self) -> None:
+        session_id = "abc12345"
+        for playlist_type in ("primary-audio", "secondary-audio"):
+            path = (
+                f"/api/streams/video/1/720p/playlist"
+                f"?session_id={session_id}&type={playlist_type}"
+            )
+            status, headers, body = self.request("GET", path)
+            self.assertEqual(status, 200, playlist_type)
+            self.assertIn("mpegurl", headers.get("Content-Type", ""))
+            media = body.decode("utf-8")
+            self.assertIn("#EXTM3U", media)
+            self.assertIn(f"session_id={session_id}", media)
+            self.assertIn("segment?", media)
+            self.assertEqual(self.stats()["last_video_playlist_type"], playlist_type)
+
+            segment_uri = next(
+                line for line in media.splitlines()
+                if line and not line.startswith("#")
+            )
+            segment_url = urljoin(path, segment_uri)
+            status, headers, data = self.request("GET", segment_url)
+            self.assertEqual(status, 200, playlist_type)
+            self.assertEqual(headers.get("Content-Type"), "video/mp2t")
+            self.assertEqual(data[0], 0x47)
+
+    def test_video_playlist_rejects_invalid_type(self) -> None:
+        status, _, payload = self.get_json(
+            "/api/streams/video/1/720p/playlist?session_id=sid&type=tertiary-audio"
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("detail", payload)
+
+    # -- ライブイベント (SSE) ----------------------------------------------
+
+    def _read_sse_events(self, response, count: int) -> list[dict]:
+        """Read `count` complete SSE events from an open response."""
+        events: list[dict] = []
+        current: dict = {}
+        while len(events) < count:
+            raw = response.fp.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8").rstrip("\r\n")
+            if line == "":
+                if current:
+                    events.append(current)
+                    current = {}
+                continue
+            if line.startswith(":"):
+                continue
+            field, _, value = line.partition(":")
+            if value.startswith(" "):
+                value = value[1:]
+            if field == "event":
+                current["event"] = value
+            elif field == "data":
+                current["data"] = current.get("data", "") + value
+        return events
+
+    def test_live_events_streams_standby_then_onair(self) -> None:
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        response = None
+        try:
+            conn.request("GET", "/api/streams/live/gr011/1080p/events")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertIn(
+                "text/event-stream", response.getheader("Content-Type", "")
+            )
+            events = self._read_sse_events(response, 2)
+        finally:
+            if response is not None:
+                response.close()
+            conn.close()
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["event"], "initial_update")
+        self.assertEqual(events[1]["event"], "status_update")
+
+        first = json.loads(events[0]["data"])
+        second = json.loads(events[1]["data"])
+        self.assertEqual(first["status"], "Standby")
+        self.assertIn("エンコードタスク", first["detail"])
+        self.assertEqual(second["status"], "ONAir")
+        self.assertEqual(second["detail"], "ライブストリームは ONAir です。")
+        for payload in (first, second):
+            for field in ("status", "detail", "started_at", "updated_at", "client_count"):
+                self.assertIn(field, payload)
+            self.assertIsInstance(payload["started_at"], (int, float))
+            self.assertIsInstance(payload["updated_at"], (int, float))
+            self.assertIsInstance(payload["client_count"], int)
+            self.assertGreaterEqual(payload["client_count"], 1)
+        self.assertGreaterEqual(second["updated_at"], first["updated_at"])
+
+        self.assertEqual(self.stats()["last_live_quality"], "1080p")
+
+        # 切断後は視聴者数が 0 に戻る
+        deadline = time.monotonic() + 3.0
+        active = None
+        while time.monotonic() < deadline:
+            active = self.stats()["live_active"]
+            if active == 0:
+                break
+            time.sleep(0.1)
+        self.assertEqual(active, 0)
+
+    def test_live_events_keeps_sending_clients_updates(self) -> None:
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        response = None
+        try:
+            conn.request("GET", "/api/streams/live/bs101/540p-hevc/events")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            events = self._read_sse_events(response, 3)
+        finally:
+            if response is not None:
+                response.close()
+            conn.close()
+
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["initial_update", "status_update", "clients_update"],
+        )
+        clients = json.loads(events[2]["data"])
+        self.assertEqual(clients["status"], "ONAir")
+        self.assertGreaterEqual(clients["client_count"], 1)
+        self.assertEqual(self.stats()["last_live_quality"], "540p-hevc")
+
+    def test_live_events_rejects_unknown_channel_and_quality(self) -> None:
+        status, _, payload = self.get_json("/api/streams/live/zz999/1080p/events")
+        self.assertEqual(status, 404)
+        self.assertIn("detail", payload)
+
+        status, _, payload = self.get_json("/api/streams/live/gr011/2160p/events")
+        self.assertEqual(status, 422)
+        self.assertIn("detail", payload)
+
+
+# ---------------------------------------------------------------------------
 # 追加エンドポイント (シリーズ / 番組表 / 番組検索 / クライアント設定 / ダウンロード)
 # ---------------------------------------------------------------------------
 

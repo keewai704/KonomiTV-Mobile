@@ -295,17 +295,34 @@ public struct APIClient: Sendable {
 
     // MARK: - Recorded playback
 
+    /// Keeps a recorded-playback session alive (`PUT .../keep-alive`).
+    public func keepAlive(
+        videoID: Int,
+        profile: StreamingProfile,
+        sessionID: String
+    ) async throws {
+        let request = makeRequest(
+            path: [
+                "streams", "video", String(videoID),
+                profile.apiQuality(), "keep-alive",
+            ],
+            query: [URLQueryItem(name: "session_id", value: sessionID)],
+            method: "PUT"
+        )
+        _ = try await sendRaw(request)
+    }
+
+    /// Convenience overload for callers that only pick a base quality.
     public func keepAlive(
         videoID: Int,
         quality: StreamQuality,
         sessionID: String
     ) async throws {
-        let request = makeRequest(
-            path: ["streams", "video", String(videoID), quality.videoSafe.rawValue, "keep-alive"],
-            query: [URLQueryItem(name: "session_id", value: sessionID)],
-            method: "PUT"
+        try await keepAlive(
+            videoID: videoID,
+            profile: StreamingProfile(quality: quality.videoSafe),
+            sessionID: sessionID
         )
-        _ = try await sendRaw(request)
     }
 
     // MARK: - URL builders
@@ -323,40 +340,143 @@ public struct APIClient: Sendable {
         Endpoints.videoDownload(baseURL: baseURL, id: id)
     }
 
+    /// Recorded-video HLS playlist URL.
+    ///
+    /// The default `playlistType` is `master`, whose `EXT-X-MEDIA` audio
+    /// group exposes 主音声 / 副音声 to AVPlayer natively.
     public func videoPlaylistURL(
         videoID: Int,
-        quality: StreamQuality,
-        sessionID: String
+        profile: StreamingProfile,
+        sessionID: String,
+        playlistType: VideoPlaylistType = .master,
+        cacheKey: String? = nil
     ) -> URL {
         Endpoints.videoPlaylist(
             baseURL: baseURL,
             videoID: videoID,
-            quality: quality,
-            sessionID: sessionID
+            apiQuality: profile.apiQuality(),
+            sessionID: sessionID,
+            playlistType: playlistType,
+            cacheKey: cacheKey
+        )
+    }
+
+    /// Convenience overload for callers that only pick a base quality.
+    public func videoPlaylistURL(
+        videoID: Int,
+        quality: StreamQuality,
+        sessionID: String,
+        playlistType: VideoPlaylistType = .master,
+        cacheKey: String? = nil
+    ) -> URL {
+        videoPlaylistURL(
+            videoID: videoID,
+            profile: StreamingProfile(quality: quality.videoSafe),
+            sessionID: sessionID,
+            playlistType: playlistType,
+            cacheKey: cacheKey
+        )
+    }
+
+    /// Recorded-video HLS segment URL (normally read from the media playlist).
+    public func videoSegmentURL(
+        videoID: Int,
+        profile: StreamingProfile,
+        sessionID: String,
+        sequence: Int,
+        audio: AudioSelection = .primary,
+        cacheKey: String? = nil
+    ) -> URL {
+        Endpoints.videoSegment(
+            baseURL: baseURL,
+            videoID: videoID,
+            apiQuality: profile.apiQuality(),
+            sessionID: sessionID,
+            sequence: sequence,
+            audio: audio,
+            cacheKey: cacheKey
         )
     }
 
     public func videoKeepAliveURL(
         videoID: Int,
-        quality: StreamQuality,
+        profile: StreamingProfile,
         sessionID: String
     ) -> URL {
         Endpoints.videoKeepAlive(
             baseURL: baseURL,
             videoID: videoID,
-            quality: quality,
+            apiQuality: profile.apiQuality(),
             sessionID: sessionID
         )
     }
 
+    /// Convenience overload for callers that only pick a base quality.
+    public func videoKeepAliveURL(
+        videoID: Int,
+        quality: StreamQuality,
+        sessionID: String
+    ) -> URL {
+        videoKeepAliveURL(
+            videoID: videoID,
+            profile: StreamingProfile(quality: quality.videoSafe),
+            sessionID: sessionID
+        )
+    }
+
+    /// Live MPEG-TS stream URL.
     public func liveStreamURL(
         displayChannelID: String,
-        quality: StreamQuality
+        profile: StreamingProfile,
+        isRadioChannel: Bool = false
     ) -> URL {
         Endpoints.liveStream(
             baseURL: baseURL,
             displayChannelID: displayChannelID,
-            quality: quality
+            apiQuality: profile.apiQuality(isRadioChannel: isRadioChannel)
+        )
+    }
+
+    /// Convenience overload for callers that only pick a base quality.
+    public func liveStreamURL(
+        displayChannelID: String,
+        quality: StreamQuality,
+        isRadioChannel: Bool = false
+    ) -> URL {
+        liveStreamURL(
+            displayChannelID: displayChannelID,
+            profile: StreamingProfile(quality: quality),
+            isRadioChannel: isRadioChannel
+        )
+    }
+
+    /// Live stream event stream (Server-Sent Events) URL.
+    ///
+    /// Read it with `URLSession.bytes(for:)` and feed the bytes to
+    /// `ServerSentEventParser`; `LiveStreamEvent.decode(_:)` turns each event
+    /// into a model.
+    public func liveEventsURL(
+        displayChannelID: String,
+        profile: StreamingProfile,
+        isRadioChannel: Bool = false
+    ) -> URL {
+        Endpoints.liveEvents(
+            baseURL: baseURL,
+            displayChannelID: displayChannelID,
+            apiQuality: profile.apiQuality(isRadioChannel: isRadioChannel)
+        )
+    }
+
+    /// Convenience overload for callers that only pick a base quality.
+    public func liveEventsURL(
+        displayChannelID: String,
+        quality: StreamQuality,
+        isRadioChannel: Bool = false
+    ) -> URL {
+        liveEventsURL(
+            displayChannelID: displayChannelID,
+            profile: StreamingProfile(quality: quality),
+            isRadioChannel: isRadioChannel
         )
     }
 

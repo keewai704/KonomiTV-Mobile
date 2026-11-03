@@ -1,4 +1,5 @@
 import Foundation
+import KonomiKit
 
 /// Thread-safe store of recent live segments, keyed by sequence number.
 public actor SegmentStore {
@@ -52,6 +53,26 @@ public actor SegmentStore {
 
     public func segment(sequence: Int) -> TSSegment? {
         storage.first { $0.sequence == sequence }
+    }
+
+    /// Segment as it should be served for the given audio track.
+    ///
+    /// Segments are stored once and unfiltered; the 主音声 / 副音声 filter is
+    /// applied here so switching takes effect with the next request without
+    /// restarting the upstream stream. With a single audio stream the stored
+    /// segment is returned unchanged.
+    public func segment(sequence: Int, audio: AudioSelection) -> TSSegment? {
+        storage.first { $0.sequence == sequence }?.filtered(audio: audio)
+    }
+
+    /// Audio tracks of the most recent segment, if its PMT is known.
+    public var audioTrackInfo: LiveAudioTrackInfo? {
+        storage.last?.audioTrackInfo
+    }
+
+    /// True when the app should offer 主音声 / 副音声 for this stream.
+    public var hasSecondaryAudio: Bool {
+        audioTrackInfo?.hasSecondaryAudio ?? false
     }
 
     public func snapshot() -> [TSSegment] {
