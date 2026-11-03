@@ -3382,5 +3382,409 @@ class ReservationMockTestCase(unittest.TestCase):
         self.assertEqual(self.stats()["reservation_add_count"], 0)
 
 
+class AccountMaintenanceMockTestCase(unittest.TestCase):
+    """Accounts, server settings and maintenance (fresh server per class)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = mock_server.create_server("127.0.0.1", 0)
+        cls.host, cls.port = cls.server.server_address[:2]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    # -- helpers -----------------------------------------------------------
+
+    def request(self, method: str, path: str, body: bytes | None = None,
+                headers: dict | None = None):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            hdrs = {"Accept": "*/*"}
+            if headers:
+                hdrs.update(headers)
+            conn.request(method, path, body=body, headers=hdrs)
+            response = conn.getresponse()
+            data = response.read()
+            return response.status, dict(response.getheaders()), data
+        finally:
+            conn.close()
+
+    def get_json(self, path: str, headers: dict | None = None):
+        status, response_headers, data = self.request("GET", path, headers=headers)
+        return status, response_headers, json.loads(data.decode("utf-8"))
+
+    def send_json(self, method: str, path: str, payload, headers: dict | None = None):
+        status, _, data = self.request(
+            method, path,
+            body=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", **(headers or {})},
+        )
+        decoded = json.loads(data.decode("utf-8")) if data else None
+        return status, decoded
+
+    def reset(self) -> None:
+        status, _, _ = self.request("POST", "/__mock/reset")
+        self.assertEqual(status, 200)
+
+    def stats(self) -> dict:
+        status, _, payload = self.get_json("/__mock/stats")
+        self.assertEqual(status, 200)
+        return payload
+
+    def login(self, username: str, password: str) -> str:
+        body = f"username={quote(username)}&password={quote(password)}".encode("utf-8")
+        status, _, data = self.request(
+            "POST", "/api/users/token", body=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        self.assertEqual(status, 200, data)
+        return json.loads(data.decode("utf-8"))["access_token"]
+
+    @staticmethod
+    def admin_headers() -> dict:
+        return {"Authorization": "Bearer " + mock_server.MOCK_ACCESS_TOKEN}
+
+    # -- accounts ----------------------------------------------------------
+
+    def test_register_and_login(self) -> None:
+        self.reset()
+        status, created = self.send_json(
+            "POST", "/api/users", {"username": "newbie", "password": "pass1234"}
+        )
+        self.assertEqual(status, 201, created)
+        self.assertEqual(created["name"], "newbie")
+        self.assertFalse(created["is_admin"])
+        self.assertNotIn("password", created)
+
+        status, duplicated = self.send_json(
+            "POST", "/api/users", {"username": "newbie", "password": "pass1234"}
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(duplicated["detail"], "Specified username is duplicated")
+
+        status, reserved = self.send_json(
+            "POST", "/api/users", {"username": "me", "password": "pass1234"}
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(reserved["detail"], "Specified username is not permitted")
+
+        token = self.login("newbie", "pass1234")
+        self.assertNotEqual(token, mock_server.MOCK_ACCESS_TOKEN)
+        status, _, me = self.get_json(
+            "/api/users/me", headers={"Authorization": "Bearer " + token}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(me["name"], "newbie")
+
+        status, wrong = self.send_json(
+            "POST", "/api/users", {"username": "newbie", "password": "pass1234"}
+        )
+        self.assertEqual(status, 422)
+
+        bad_status, _, _ = self.request(
+            "POST", "/api/users/token",
+            body=b"username=newbie&password=wrong",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        self.assertEqual(bad_status, 401)
+
+        stats = self.stats()
+        self.assertEqual(stats["user_create_count"], 1)
+        self.assertEqual(stats["created_usernames"], ["newbie"])
+
+    def test_update_current_account_and_icon(self) -> None:
+        self.reset()
+        headers = self.admin_headers()
+
+        status, _ = self.send_json(
+            "PUT", "/api/users/me", {"username": "renamed"}, headers=headers
+        )
+        self.assertEqual(status, 204)
+        status, _, me = self.get_json("/api/users/me", headers=headers)
+        self.assertEqual(me["name"], "renamed")
+        self.assertEqual(self.stats()["user_update_count"], 1)
+
+        # 現在のパスワードはログインで検証できる
+        self.login("renamed", "test")
+
+        status, _ = self.send_json(
+            "PUT", "/api/users/me", {"password": "newpass1"}, headers=headers
+        )
+        self.assertEqual(status, 204)
+        self.login("renamed", "newpass1")
+
+        png = captures_mock.build_capture_png(7, width=32, height=32)
+        boundary = "----mockboundary"
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="image"; filename="icon.png"\r\n'
+            "Content-Type: image/png\r\n\r\n"
+        ).encode("utf-8") + png + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        status, _, _ = self.request(
+            "PUT", "/api/users/me/icon", body=body,
+            headers={
+                **headers,
+                "Content-Type": "multipart/form-data; boundary=" + boundary,
+            },
+        )
+        self.assertEqual(status, 204)
+
+        status, response_headers, downloaded = self.request(
+            "GET", "/api/users/me/icon", headers=headers
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("image/png", response_headers.get("Content-Type", ""))
+        self.assertEqual(downloaded, png)
+
+        stats = self.stats()
+        self.assertEqual(stats["user_icon_update_count"], 1)
+        self.assertEqual(stats["last_user_icon"]["content_type"], "image/png")
+        self.assertEqual(stats["last_user_icon"]["filename"], "icon.png")
+
+        # JPEG 以外は拒否する
+        status, _, _ = self.request(
+            "PUT", "/api/users/me/icon", body=b"x",
+            headers={**headers, "Content-Type": "text/plain"},
+        )
+        self.assertEqual(status, 422)
+
+    def test_admin_user_management(self) -> None:
+        self.reset()
+        headers = self.admin_headers()
+        status, _, users = self.get_json("/api/users", headers=headers)
+        self.assertEqual(status, 200)
+        names = [user["name"] for user in users]
+        self.assertIn("テストユーザー", names)
+        self.assertIn("ビューア", names)
+        for user in users:
+            self.assertNotIn("password", user)
+            self.assertIn("is_admin", user)
+
+        viewer_token = self.login("ビューア", "viewer")
+        viewer_headers = {"Authorization": "Bearer " + viewer_token}
+        status, _, _ = self.request("GET", "/api/users", headers=viewer_headers)
+        self.assertEqual(status, 403)
+
+        # 最後の管理者は剥奪できない
+        primary = quote("テストユーザー")
+        status, error = self.send_json(
+            "PUT", "/api/users/" + primary, {"is_admin": False}, headers=headers
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("no more admins", error["detail"])
+
+        status, _ = self.send_json(
+            "PUT", "/api/users/" + quote("ビューア"), {"is_admin": True}, headers=headers
+        )
+        self.assertEqual(status, 204)
+
+        status, _, _ = self.request(
+            "DELETE", "/api/users/" + quote("ビューア"), headers=headers
+        )
+        self.assertEqual(status, 204)
+        status, _, users = self.get_json("/api/users", headers=headers)
+        self.assertNotIn("ビューア", [user["name"] for user in users])
+
+        # ビューアを削除したので、また管理者は1人だけになる
+        status, error = self.send_json(
+            "PUT", "/api/users/" + primary, {"is_admin": False}, headers=headers
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("no more admins", error["detail"])
+
+        stats = self.stats()
+        self.assertEqual(stats["user_admin_update_count"], 1)
+        self.assertEqual(stats["user_delete_count"], 1)
+        self.assertEqual(stats["deleted_usernames"], ["ビューア"])
+
+    def test_delete_own_account(self) -> None:
+        self.reset()
+        status, _ = self.send_json(
+            "POST", "/api/users", {"username": "leaver", "password": "pass1234"}
+        )
+        self.assertEqual(status, 201)
+        token = self.login("leaver", "pass1234")
+        headers = {"Authorization": "Bearer " + token}
+
+        status, _, _ = self.request("DELETE", "/api/users/me", headers=headers)
+        self.assertEqual(status, 204)
+        status, _, _ = self.request("GET", "/api/users/me", headers=headers)
+        self.assertEqual(status, 401)
+        self.assertEqual(self.stats()["user_delete_count"], 1)
+
+    # -- server settings ---------------------------------------------------
+
+    def test_server_settings_get_and_put(self) -> None:
+        self.reset()
+        status, _, settings = self.get_json("/api/settings/server")
+        self.assertEqual(status, 200)
+        self.assertEqual(settings["general"]["backend"], "EDCB")
+        self.assertEqual(settings["server"]["port"], 7000)
+        self.assertIn("recorded_folders", settings["video"])
+        self.assertIn("upload_folders", settings["capture"])
+
+        settings["server"]["port"] = 7100
+        settings["video"]["recorded_folders"] = ["/record", "/record2"]
+        status, _ = self.send_json(
+            "PUT", "/api/settings/server", settings, headers=self.admin_headers()
+        )
+        self.assertEqual(status, 204)
+        status, _, updated = self.get_json("/api/settings/server")
+        self.assertEqual(updated["server"]["port"], 7100)
+        self.assertEqual(updated["video"]["recorded_folders"], ["/record", "/record2"])
+
+        stats = self.stats()
+        self.assertEqual(stats["server_settings_put_count"], 1)
+        self.assertEqual(stats["last_server_settings"]["server"]["port"], 7100)
+
+        # 未ログイン (管理者でない) の保存は拒否する
+        status, _, _ = self.request(
+            "PUT", "/api/settings/server",
+            body=json.dumps(settings).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 401)
+
+        settings["server"]["port"] = 80
+        status, error = self.send_json(
+            "PUT", "/api/settings/server", settings, headers=self.admin_headers()
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("port", error["detail"])
+
+    # -- maintenance -------------------------------------------------------
+
+    def test_maintenance_task_run_and_status(self) -> None:
+        self.reset()
+        headers = self.admin_headers()
+
+        status, _, idle = self.get_json("/api/maintenance/batch-scan/status")
+        self.assertEqual(status, 200)
+        self.assertFalse(idle["is_running"])
+
+        status, _, _ = self.request(
+            "POST", "/api/maintenance/batch-scan/run", headers=headers
+        )
+        self.assertEqual(status, 204)
+        status, _, running = self.get_json("/api/maintenance/batch-scan/status")
+        self.assertTrue(running["is_running"])
+        self.assertEqual(running["total_count"], 8)
+
+        # 実行中の再実行は 429
+        status, error = self.send_json(
+            "POST", "/api/maintenance/batch-scan/run", {}
+        )
+        self.assertEqual(status, 429)
+        self.assertIn("already running", error["detail"])
+
+        deadline = time.time() + 10
+        finished = None
+        while time.time() < deadline:
+            status, _, finished = self.get_json("/api/maintenance/batch-scan/status")
+            if finished["is_running"] is False:
+                break
+            time.sleep(0.2)
+        self.assertIsNotNone(finished)
+        self.assertFalse(finished["is_running"])
+        self.assertEqual(finished["processed_count"], 8)
+        self.assertEqual(finished["total_count"], 8)
+
+        for task in ("background-analysis", "capture-scan", "database-vacuum"):
+            status, _, _ = self.request(
+                "POST", f"/api/maintenance/{task}/run", headers=headers
+            )
+            self.assertEqual(status, 204)
+            status, _, _ = self.get_json(f"/api/maintenance/{task}/status")
+            self.assertEqual(status, 200)
+
+        status, _, _ = self.request(
+            "POST", "/api/maintenance/update-database", headers=headers
+        )
+        self.assertEqual(status, 204)
+        status, _, _ = self.request("POST", "/api/maintenance/restart", headers=headers)
+        self.assertEqual(status, 204)
+        status, _, _ = self.request("POST", "/api/maintenance/shutdown", headers=headers)
+        self.assertEqual(status, 204)
+
+        stats = self.stats()
+        self.assertEqual(stats["maintenance_run_counts"]["batch-scan"], 1)
+        self.assertEqual(stats["maintenance_update_database_count"], 1)
+        self.assertEqual(stats["maintenance_restart_count"], 1)
+        self.assertEqual(stats["maintenance_shutdown_count"], 1)
+
+    def test_maintenance_log_stream(self) -> None:
+        self.reset()
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            conn.request(
+                "GET", "/api/maintenance/logs/server",
+                headers={**self.admin_headers(), "Accept": "text/event-stream"},
+            )
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertIn("text/event-stream", response.getheader("Content-Type", ""))
+            # ストリームは閉じないので、log_update が届くまで少しずつ読む
+            data = b""
+            deadline = time.time() + 5
+            while time.time() < deadline and b"event: log_update" not in data:
+                chunk = response.read1(1024)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            conn.close()
+        text = data.decode("utf-8", "replace")
+        self.assertIn("event: initial_log_update", text)
+        self.assertIn("KonomiTV Server (mock) started", text)
+        self.assertIn("event: log_update", text)
+
+        status, _, _ = self.request("GET", "/api/maintenance/logs/server")
+        self.assertEqual(status, 401)
+
+    def test_program_search_records_condition(self) -> None:
+        self.reset()
+        status, payload = self.send_json(
+            "POST", "/api/programs/search",
+            {
+                "keyword": "",
+                "genre_ranges": [{"major": "ドラマ", "middle": "国内ドラマ"}],
+                "broadcast_type": "FreeOnly",
+                "duration_range_min": 10,
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertGreater(payload["total"], 0)
+        stats = self.stats()
+        self.assertEqual(stats["program_search_count"], 1)
+        condition = stats["last_program_search_condition"]
+        self.assertEqual(
+            condition["genre_ranges"], [{"major": "ドラマ", "middle": "国内ドラマ"}]
+        )
+        self.assertEqual(condition["broadcast_type"], "FreeOnly")
+        self.assertEqual(condition["duration_range_min"], 10)
+
+        # 日時条件: 全曜日 0:00〜23:59 は全件、除外指定なら 0 件
+        full_week = {
+            "start_day_of_week": 0, "start_hour": 0, "start_minute": 0,
+            "end_day_of_week": 6, "end_hour": 23, "end_minute": 59,
+        }
+        status, matched = self.send_json(
+            "POST", "/api/programs/search", {"date_ranges": [full_week]}
+        )
+        self.assertEqual(status, 200)
+        self.assertGreater(matched["total"], 0)
+        status, excluded = self.send_json(
+            "POST", "/api/programs/search",
+            {"date_ranges": [full_week], "is_exclude_date_ranges": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(excluded["total"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

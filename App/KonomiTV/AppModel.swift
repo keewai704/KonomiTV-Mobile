@@ -118,6 +118,8 @@ enum SectionRoute: Hashable, Sendable {
     case live(LiveChannel)
     case video(RecordedProgram)
     case videoList
+    case seriesList
+    case series(Int)
     case timetable
     case mylist
     case history
@@ -128,6 +130,12 @@ enum SectionRoute: Hashable, Sendable {
     case reservationConditions
     case settings
     case pinnedChannels
+    case accountSettings
+    case adminUsers
+    case serverSettings
+    case maintenance
+    case serverLogs(String)
+    case about
 }
 
 /// Broadcast type (or the pinned channels) selected by the channel pickers.
@@ -240,6 +248,10 @@ final class AppModel {
     /// Whether settings are synced with the server. Local only, like the web
     /// client's `sync_settings` key.
     private(set) var syncSettings = true
+
+    /// Bumped whenever the avatar of the logged in account may have changed
+    /// (login, upload), so icon views reload it.
+    private(set) var accountIconRevision = 0
 
     /// Whether the configured server has the captures library (v0.15+).
     /// KonomiTV v0.14.1 answers 404 to every captures endpoint except the
@@ -504,7 +516,51 @@ final class AppModel {
         guard let token, !token.isEmpty, let client else { return }
         if let refreshed = try? await client.withToken(token).me() {
             user = refreshed
+            accountIconRevision += 1
         }
+    }
+
+    /// Creates an account and logs in with it, like the web client's register
+    /// screen (the first account of a server becomes its administrator).
+    func register(username: String, password: String) async throws {
+        guard let client else { throw APIError.invalidServerURL }
+        _ = try await client.createUser(username: username, password: password)
+        try await login(username: username, password: password)
+    }
+
+    /// Renames the logged in account (`PUT /api/users/me`).
+    func updateAccountName(_ username: String) async throws {
+        guard let client else { throw APIError.invalidServerURL }
+        try await client.updateUser(username: username)
+        await refreshUser()
+    }
+
+    /// Changes the password, after verifying the current one against
+    /// `POST /api/users/token` (the server's update route does not ask for it,
+    /// but the account screen requires it).
+    func changePassword(current: String, new: String) async throws {
+        guard let client, let user else { throw APIError.invalidServerURL }
+        do {
+            _ = try await client.login(username: user.name, password: current)
+        } catch let error as APIError where error.statusCode == 401 {
+            throw APIError.unauthorized("現在のパスワードが正しくありません。")
+        }
+        try await client.updateUser(password: new)
+    }
+
+    /// Uploads a new avatar for the logged in account.
+    func updateAccountIcon(image: Data, contentType: String) async throws {
+        guard let client else { throw APIError.invalidServerURL }
+        try await client.updateUserIcon(image: image, contentType: contentType)
+        accountIconRevision += 1
+    }
+
+    /// Deletes the logged in account and logs out (the token stops working).
+    func deleteAccount() async throws {
+        guard let client else { throw APIError.invalidServerURL }
+        try await client.deleteUser()
+        logout()
+        resetNavigation()
     }
 
     /// Adds a Niconico user ID to the mute list (comment context menu).
@@ -639,6 +695,38 @@ final class AppModel {
     func removeFromMylist(videoID: Int) {
         mutateSettings { settings in
             settings.removeMylistItem(type: .recordedProgram, id: videoID)
+        }
+    }
+
+    /// IDs of the My List entries that point at series, newest added first.
+    var mylistSeriesIDs: [Int] {
+        settings.mylist
+            .filter { $0.type == .series }
+            .sorted { $0.createdAt > $1.createdAt }
+            .map(\.id)
+    }
+
+    func isInMylist(seriesID: Int) -> Bool {
+        settings.isInMylist(type: .series, id: seriesID)
+    }
+
+    /// Adds or removes the series and returns the new membership.
+    @discardableResult
+    func toggleMylist(seriesID: Int) -> Bool {
+        var isMember = false
+        mutateSettings { settings in
+            isMember = settings.toggleMylistItem(
+                type: .series,
+                id: seriesID,
+                now: Date().timeIntervalSince1970
+            )
+        }
+        return isMember
+    }
+
+    func removeFromMylist(seriesID: Int) {
+        mutateSettings { settings in
+            settings.removeMylistItem(type: .series, id: seriesID)
         }
     }
 

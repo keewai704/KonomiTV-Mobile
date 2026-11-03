@@ -30,8 +30,11 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import caption_injector
 import captures_mock
+import maintenance_mock
 import reservations_mock
+import settings_mock
 import twitter_mock
+import users_mock
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FIXTURE_DIR = os.path.join(BASE_DIR, "fixtures")
@@ -111,6 +114,34 @@ QUALITY_BITRATES = {
 # API パスの品質指定の末尾に付くエンコードオプション (-10bit は本クライアントでは使わないが受け付ける)
 QUALITY_OPTION_SUFFIXES = ("-24fps", "-10bit")
 
+
+def _public_user(user: dict) -> dict:
+    """A user as UsersRouter returns it (never the password)."""
+    return {key: copy.deepcopy(value) for key, value in user.items() if key != "password"}
+
+def _matches_date_range(start_time: datetime, date_range: dict) -> bool:
+    """Whether a program start falls in one ProgramSearchConditionDate range."""
+    try:
+        start_minutes = (
+            int(date_range["start_day_of_week"]) * 1440
+            + int(date_range["start_hour"]) * 60
+            + int(date_range["start_minute"])
+        )
+        end_minutes = (
+            int(date_range["end_day_of_week"]) * 1440
+            + int(date_range["end_hour"]) * 60
+            + int(date_range["end_minute"])
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    # Python's weekday() is Monday=0; the API uses Sunday=0.
+    weekday = (start_time.weekday() + 1) % 7
+    program_minutes = weekday * 1440 + start_time.hour * 60 + start_time.minute
+    if start_minutes <= end_minutes:
+        return start_minutes <= program_minutes <= end_minutes
+    # A range that wraps around the end of the week (e.g. Sunday 22:00 to
+    # Monday 03:59) matches both ends.
+    return program_minutes >= start_minutes or program_minutes <= end_minutes
 
 def split_api_quality(quality: str) -> tuple[str, bool]:
     """Split "720p-hevc-24fps" into its base quality and the 24fps flag.
@@ -340,6 +371,34 @@ class MockServerState:
         self.reservation_condition_deleted_ids: list[int] = []
         self.last_reservation_condition: dict | None = None
         self.reservation_presets_fetch_count = 0
+        # ユーザーアカウント (users_mock が初期化・更新する)
+        self.users: list[dict] = []
+        self.access_tokens: dict[str, int] = {}
+        self.primary_token: str = ""
+        self.primary_user_id: int = 1
+        self.user_icons: dict[int, bytes] = {}
+        self.user_create_count = 0
+        self.created_usernames: list[str] = []
+        self.user_update_count = 0
+        self.last_user_update: dict | None = None
+        self.user_icon_update_count = 0
+        self.last_user_icon: dict | None = None
+        self.user_delete_count = 0
+        self.deleted_usernames: list[str] = []
+        self.user_admin_update_count = 0
+        # サーバー設定 (settings_mock が初期化する)
+        self.server_settings: dict = {}
+        self.server_settings_put_count = 0
+        self.last_server_settings: dict | None = None
+        # メンテナンス (maintenance_mock が初期化する)
+        self.maintenance_tasks: dict[str, dict] = {}
+        self.maintenance_run_counts: dict[str, int] = {}
+        self.maintenance_update_database_count = 0
+        self.maintenance_restart_count = 0
+        self.maintenance_shutdown_count = 0
+        # 番組検索 (UI テストがリクエストボディを検証する)
+        self.program_search_count = 0
+        self.last_program_search_condition: dict | None = None
 
     def record_keepalive(self, video_id: str) -> None:
         with self.lock:
@@ -565,6 +624,27 @@ class MockServerState:
                 "reservation_condition_deleted_ids": list(self.reservation_condition_deleted_ids),
                 "last_reservation_condition": copy.deepcopy(self.last_reservation_condition),
                 "reservation_presets_fetch_count": self.reservation_presets_fetch_count,
+                "user_create_count": self.user_create_count,
+                "created_usernames": list(self.created_usernames),
+                "user_update_count": self.user_update_count,
+                "last_user_update": copy.deepcopy(self.last_user_update),
+                "user_icon_update_count": self.user_icon_update_count,
+                "last_user_icon": copy.deepcopy(self.last_user_icon),
+                "user_delete_count": self.user_delete_count,
+                "deleted_usernames": list(self.deleted_usernames),
+                "user_admin_update_count": self.user_admin_update_count,
+                "users": [_public_user(user) for user in self.users],
+                "server_settings_put_count": self.server_settings_put_count,
+                "last_server_settings": copy.deepcopy(self.last_server_settings),
+                "maintenance_tasks": copy.deepcopy(self.maintenance_tasks),
+                "maintenance_run_counts": dict(self.maintenance_run_counts),
+                "maintenance_update_database_count": self.maintenance_update_database_count,
+                "maintenance_restart_count": self.maintenance_restart_count,
+                "maintenance_shutdown_count": self.maintenance_shutdown_count,
+                "program_search_count": self.program_search_count,
+                "last_program_search_condition": copy.deepcopy(
+                    self.last_program_search_condition
+                ),
             }
 
 
@@ -1297,18 +1377,28 @@ class MockHandler(BaseHTTPRequestHandler):
             return authorization[len("bearer "):].strip()
         return ""
 
+    def _current_user(self, fixtures: dict) -> dict | None:
+        """The account behind the bearer token, or None."""
+        token = self._bearer_token()
+        if not token:
+            return None
+        state = self.server.state  # type: ignore[attr-defined]
+        user_id = state.access_tokens.get(token)
+        if user_id is None:
+            return None
+        return next((user for user in state.users if user.get("id") == user_id), None)
+
     def _require_user(self, fixtures: dict) -> dict | None:
         """Log in check: returns the user, or sends 401 and returns None."""
-        if self._bearer_token() != MOCK_ACCESS_TOKEN:
+        user = self._current_user(fixtures)
+        if user is None:
             self._send_json({"detail": "Unauthorized"}, 401)
             return None
-        return fixtures["user"]
+        return user
 
     def _optional_user(self, fixtures: dict) -> dict | None:
         """Optional login check: the user, or None when there is no valid token."""
-        if self._bearer_token() != MOCK_ACCESS_TOKEN:
-            return None
-        return fixtures["user"]
+        return self._current_user(fixtures)
 
     def _require_admin(self, fixtures: dict) -> dict | None:
         """Admin check: returns the user, or sends 401/403 and returns None."""
@@ -1455,6 +1545,21 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_client_settings_get(fixtures, state)
             return
 
+        if parts == ["settings", "server"]:
+            settings_mock.handle(self, "GET", parts, query, fixtures, state)
+            return
+
+        if parts and parts[0] == "maintenance":
+            if not maintenance_mock.handle(self, "GET", parts, query, fixtures, state):
+                self._not_found()
+            return
+
+        # アカウント (UsersRouter)
+        if parts and parts[0] == "users":
+            if not users_mock.handle(self, "GET", parts, query, fixtures, state):
+                self._not_found()
+            return
+
         # 録画予約・キーワード自動予約条件・録画設定プリセット (EDCB バックエンド専用 API)
         if parts and parts[0] == "recording":
             reservations_mock.handle(self, "GET", parts, query, fixtures, state)
@@ -1472,10 +1577,6 @@ class MockHandler(BaseHTTPRequestHandler):
                 self._handle_live_stream(parts, state, fixtures)
                 return
 
-        if parts == ["users", "me"]:
-            self._handle_users_me(fixtures)
-            return
-
         self._not_found()
 
     def _dispatch_put(self) -> None:
@@ -1488,6 +1589,15 @@ class MockHandler(BaseHTTPRequestHandler):
 
         if parts == ["settings", "client"]:
             self._handle_client_settings_put(fixtures, state)
+            return
+
+        if parts == ["settings", "server"]:
+            settings_mock.handle(self, "PUT", parts, query, fixtures, state)
+            return
+
+        if parts and parts[0] == "users":
+            if not users_mock.handle(self, "PUT", parts, query, fixtures, state):
+                self._not_found()
             return
 
         if parts and parts[0] in ("twitter", "bluesky"):
@@ -1558,20 +1668,16 @@ class MockHandler(BaseHTTPRequestHandler):
             captures_mock.handle(self, "POST", parts, self._query(), fixtures, state)
             return
 
-        if parts == ["users", "token"]:
-            length = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(length) if length > 0 else b""
-            form = parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True)
-            username = (form.get("username") or [""])[0]
-            password = (form.get("password") or [""])[0]
-            if username == "test" and password == "test":
-                self._send_json(
-                    {"access_token": MOCK_ACCESS_TOKEN, "token_type": "bearer"}
-                )
-            else:
-                self._send_json(
-                    {"detail": "ユーザー名またはパスワードが正しくありません。"}, 401
-                )
+        if parts and parts[0] == "users":
+            state = self.server.state  # type: ignore[attr-defined]
+            if not users_mock.handle(self, "POST", parts, self._query(), fixtures, state):
+                self._not_found()
+            return
+
+        if parts and parts[0] == "maintenance":
+            state = self.server.state  # type: ignore[attr-defined]
+            if not maintenance_mock.handle(self, "POST", parts, self._query(), fixtures, state):
+                self._not_found()
             return
 
         if parts == ["programs", "search"]:
@@ -1637,6 +1743,11 @@ class MockHandler(BaseHTTPRequestHandler):
             captures_mock.handle(self, "DELETE", parts, self._query(), fixtures, state)
             return
 
+        if parts and parts[0] == "users":
+            if not users_mock.handle(self, "DELETE", parts, self._query(), fixtures, state):
+                self._not_found()
+            return
+
         # /api/videos/{video_id}: 管理者のみ。削除した録画番組はプロセスの生存期間中は戻らない。
         if len(parts) == 2 and parts[0] == "videos":
             user = self._require_admin(fixtures)
@@ -1694,6 +1805,9 @@ class MockHandler(BaseHTTPRequestHandler):
         server.state = MockServerState(  # type: ignore[attr-defined]
             fixtures["client_settings_default"]
         )
+        users_mock.reset(server.state, fixtures["user"], MOCK_ACCESS_TOKEN)
+        settings_mock.reset(server.state)
+        maintenance_mock.reset(server.state)
         self._send_json({"status": "ok"})
 
     # -- 各エンドポイント (API) ----------------------------------------------
@@ -1979,6 +2093,10 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def _handle_program_search(self, condition: dict, fixtures: dict) -> None:
         """Simple program search over generated EPG data (today and tomorrow)."""
+        state = self.server.state  # type: ignore[attr-defined]
+        with state.lock:
+            state.program_search_count += 1
+            state.last_program_search_condition = copy.deepcopy(condition)
         now = now_jst()
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -1999,6 +2117,8 @@ class MockHandler(BaseHTTPRequestHandler):
         broadcast_type = str(condition.get("broadcast_type") or "All")
         duration_min = condition.get("duration_range_min")
         duration_max = condition.get("duration_range_max")
+        date_ranges = condition.get("date_ranges") or []
+        is_exclude_date_ranges = bool(condition.get("is_exclude_date_ranges", False))
 
         keywords = [word for word in keyword.replace("　", " ").split(" ") if word]
         excludes = [word for word in exclude_keyword.replace("　", " ").split(" ") if word]
@@ -2052,6 +2172,16 @@ class MockHandler(BaseHTTPRequestHandler):
                 continue
             if duration_max is not None and duration_minutes > float(duration_max):
                 continue
+
+            # 放送日時範囲: 開始曜日・時刻から終了曜日・時刻まで (曜日は 0=日曜日)
+            if date_ranges:
+                start_time = datetime.fromisoformat(program["start_time"])
+                matched = any(
+                    _matches_date_range(start_time, date_range)
+                    for date_range in date_ranges
+                )
+                if matched == is_exclude_date_ranges:
+                    continue
 
             result.append(program)
 
@@ -2763,7 +2893,12 @@ class MockHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if user_access_token != MOCK_ACCESS_TOKEN:
+        user_id = state.access_tokens.get(user_access_token)
+        user = next(
+            (entry for entry in state.users if entry.get("id") == user_id),
+            None,
+        )
+        if user is None:
             self._send_oauth_callback_html(
                 status=401,
                 detail="Unauthorized",
@@ -2771,7 +2906,6 @@ class MockHandler(BaseHTTPRequestHandler):
             )
             return
 
-        user = fixtures["user"]
         user["niconico_user_id"] = MOCK_NICONICO_USER_ID
         user["niconico_user_name"] = MOCK_NICONICO_USER_NAME
         user["niconico_user_premium"] = MOCK_NICONICO_USER_PREMIUM
@@ -2831,13 +2965,6 @@ class MockHandler(BaseHTTPRequestHandler):
         )
         self._send_bytes(html.encode("utf-8"), "text/html; charset=utf-8", status=status)
 
-    def _handle_users_me(self, fixtures: dict) -> None:
-        if self._require_user(fixtures) is None:
-            return
-        # Twitter / Bluesky の連携アカウントと紐付けを含めて返す
-        self._send_json(twitter_mock.user_payload(fixtures, self))
-
-
 # ---------------------------------------------------------------------------
 # サーバ
 # ---------------------------------------------------------------------------
@@ -2855,6 +2982,9 @@ def create_server(host: str = "0.0.0.0", port: int = 7010) -> MockHTTPServer:
     server.state = MockServerState(  # type: ignore[attr-defined]
         server.fixtures["client_settings_default"]  # type: ignore[attr-defined]
     )
+    users_mock.reset(server.state, server.fixtures["user"], MOCK_ACCESS_TOKEN)  # type: ignore[attr-defined]
+    settings_mock.reset(server.state)  # type: ignore[attr-defined]
+    maintenance_mock.reset(server.state)  # type: ignore[attr-defined]
     return server
 
 

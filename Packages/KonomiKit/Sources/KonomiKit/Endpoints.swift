@@ -344,6 +344,50 @@ enum Endpoints {
         url(baseURL: baseURL, path: ["recording", "presets"])
     }
 
+    // MARK: - Users
+
+    /// `GET/POST /api/users` (the list is admin only).
+    static func users(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["users"])
+    }
+
+    /// `GET/PUT/DELETE /api/users/{username}` (admin only).
+    static func user(baseURL: URL, username: String) -> URL {
+        url(baseURL: baseURL, path: ["users", username])
+    }
+
+    /// `GET /api/users/me/icon` or `GET /api/users/{username}/icon`.
+    static func userIcon(baseURL: URL, username: String?) -> URL {
+        if let username {
+            return url(baseURL: baseURL, path: ["users", username, "icon"])
+        }
+        return url(baseURL: baseURL, path: ["users", "me", "icon"])
+    }
+
+    /// `PUT /api/users/me/icon` (multipart/form-data, file field `image`).
+    static func userIconUpdate(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["users", "me", "icon"])
+    }
+
+    // MARK: - Server settings
+
+    /// `GET/PUT /api/settings/server`.
+    static func serverSettings(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["settings", "server"])
+    }
+
+    // MARK: - Maintenance
+
+    /// `GET /api/maintenance/logs/{log_type}` (Server-Sent Events).
+    static func maintenanceLogs(baseURL: URL, logType: MaintenanceLogType) -> URL {
+        url(baseURL: baseURL, path: ["maintenance", "logs", logType.rawValue])
+    }
+
+    /// A maintenance route below `/api/maintenance`.
+    static func maintenance(baseURL: URL, path: [String] = []) -> URL {
+        url(baseURL: baseURL, path: ["maintenance"] + path)
+    }
+
     // MARK: - Images
 
     static func logo(baseURL: URL, channelID: String) -> URL {

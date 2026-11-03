@@ -18,10 +18,26 @@ struct LiveChannelsView: View {
     @State private var isSearching = false
     @State private var searchError: String?
 
+    /// The program search condition edited by the filter sheet. The keyword is
+    /// filled in from the search field when a search runs.
+    @State private var searchCondition = ProgramSearchCondition()
+    @State private var showsFilterSheet = false
+    @State private var filterRevision = 0
+
     private var isCompact: Bool { horizontalSizeClass == .compact }
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var activeFilterCount: Int {
+        ProgramSearchFilterSummary.activeCount(searchCondition)
+    }
+
+    /// Filters alone (a genre, a channel, ...) are a valid search without a
+    /// keyword, like the web client's "空欄可" search field.
+    private var isSearchActive: Bool {
+        !trimmedQuery.isEmpty || activeFilterCount > 0
     }
 
     var body: some View {
@@ -33,8 +49,24 @@ struct LiveChannelsView: View {
                 prompt: "番組を検索"
             )
             .task { await load() }
-            .task(id: trimmedQuery) { await search() }
+            .task(id: "\(trimmedQuery)-\(filterRevision)") { await search() }
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        // The sheet edits a copy; start it from the current
+                        // search field so both stay in sync.
+                        searchCondition.keyword = trimmedQuery
+                        showsFilterSheet = true
+                    } label: {
+                        Image(systemName: "line.3.horizontal.decrease.circle")
+                    }
+                    .accessibilityLabel("検索条件")
+                    .accessibilityValue(
+                        activeFilterCount == 0 ? "指定なし" : "\(activeFilterCount) 件"
+                    )
+                    .accessibilityIdentifier("search.filter.button")
+                }
+
                 if isCompact {
                     ToolbarItem(placement: .topBarTrailing) {
                         NavigationLink(value: SectionRoute.timetable) {
@@ -43,6 +75,19 @@ struct LiveChannelsView: View {
                         .accessibilityIdentifier("live.timetable")
                     }
                 }
+            }
+            .sheet(isPresented: $showsFilterSheet) {
+                ProgramSearchFilterSheet(
+                    channels: channels?.allChannels ?? [],
+                    condition: searchCondition,
+                    onApply: { condition in
+                        searchCondition = condition
+                        if condition.keyword != trimmedQuery {
+                            query = condition.keyword
+                        }
+                        filterRevision += 1
+                    }
+                )
             }
     }
 
@@ -94,7 +139,7 @@ struct LiveChannelsView: View {
 
     @ViewBuilder
     private var content: some View {
-        if !trimmedQuery.isEmpty {
+        if isSearchActive {
             searchResultsView
         } else if let channels, !channels.isEmpty {
             channelList
@@ -170,7 +215,15 @@ struct LiveChannelsView: View {
                 Text(searchError)
             }
         } else if searchResults.isEmpty {
-            ContentUnavailableView.search(text: trimmedQuery)
+            if trimmedQuery.isEmpty {
+                ContentUnavailableView(
+                    "条件に一致する番組がありません",
+                    systemImage: "magnifyingglass",
+                    description: Text("検索条件を変えてお試しください。")
+                )
+            } else {
+                ContentUnavailableView.search(text: trimmedQuery)
+            }
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -251,11 +304,12 @@ struct LiveChannelsView: View {
         }
     }
 
-    /// Searches the EPG with the keyword, like the web client's 番組検索 screen
-    /// (title and description of the programs that have not ended yet).
+    /// Searches the EPG with the keyword and the filter sheet's condition,
+    /// like the web client's 番組検索 screen. Filters alone are enough for a
+    /// search; the empty state is the channel list.
     private func search() async {
         let keyword = trimmedQuery
-        guard !keyword.isEmpty else {
+        guard isSearchActive else {
             searchResults = []
             searchError = nil
             isSearching = false
@@ -270,8 +324,13 @@ struct LiveChannelsView: View {
         isSearching = true
         searchError = nil
 
+        var condition = searchCondition
+        condition.isEnabled = true
+        condition.keyword = keyword
+        condition.note = ""
+
         do {
-            let result = try await client.searchPrograms(.keyword(keyword))
+            let result = try await client.searchPrograms(condition)
             guard !Task.isCancelled, keyword == trimmedQuery else { return }
             searchResults = result.programs
         } catch {

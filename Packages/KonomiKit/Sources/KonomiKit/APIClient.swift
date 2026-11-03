@@ -558,6 +558,30 @@ public struct APIClient: Sendable {
         )
     }
 
+    /// Builds a JSON request body for a route. Throws `APIError.decoding` when
+    /// the body cannot be encoded, so callers surface the same error as a
+    /// response that failed to decode.
+    func makeEncodedRequest<T: Encodable>(
+        path: [String],
+        method: String,
+        body: T,
+        authorized: Bool = true
+    ) throws -> URLRequest {
+        let data: Data
+        do {
+            data = try JSONCoding.encode(body)
+        } catch {
+            throw APIError.decoding(error.localizedDescription)
+        }
+        return makeRequest(
+            path: path,
+            method: method,
+            body: data,
+            contentType: "application/json",
+            authorized: authorized
+        )
+    }
+
     /// Builds a request for a URL that was assembled by hand (endpoints whose
     /// path parameter itself contains slashes, like a Bluesky AT URI).
     func makeRequest(

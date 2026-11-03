@@ -390,8 +390,22 @@ struct VideoDetailView: View {
 
     private var seriesSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("シリーズ")
-                .font(.headline)
+            if let series {
+                NavigationLink(value: SectionRoute.series(series.id)) {
+                    HStack(spacing: 6) {
+                        Text("シリーズ")
+                            .font(.headline)
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("video.series.link")
+            } else {
+                Text("シリーズ")
+                    .font(.headline)
+            }
 
             ForEach(seriesEpisodes) { episode in
                 NavigationLink(value: SectionRoute.video(episode)) {

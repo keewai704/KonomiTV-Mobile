@@ -226,6 +226,10 @@ struct RootView: View {
             VideoDetailView(model: model, video: video)
         case .videoList:
             VideoListView(model: model)
+        case .seriesList:
+            SeriesListScreen(model: model)
+        case .series(let id):
+            SeriesDetailScreen(model: model, seriesID: id)
         case .timetable:
             TimeTableScreen(model: model)
         case .mylist:
@@ -246,6 +250,21 @@ struct RootView: View {
             SettingsView(model: model)
         case .pinnedChannels:
             PinnedChannelsView(model: model)
+        case .accountSettings:
+            AccountSettingsScreen(model: model)
+        case .adminUsers:
+            AdminUsersScreen(model: model)
+        case .serverSettings:
+            ServerSettingsScreen(model: model)
+        case .maintenance:
+            MaintenanceScreen(model: model)
+        case .serverLogs(let logType):
+            ServerLogScreen(
+                model: model,
+                initialLogType: MaintenanceLogType(rawValue: logType) ?? .server
+            )
+        case .about:
+            AboutScreen(model: model)
         }
     }
 }

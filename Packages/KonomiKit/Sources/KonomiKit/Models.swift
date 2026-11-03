@@ -962,6 +962,18 @@ public struct VersionInfo: Codable, Sendable, Hashable {
         backend = container.lenient(String.self, forKey: .backend) ?? ""
         encoder = container.lenient(String.self, forKey: .encoder) ?? ""
     }
+
+    /// Whether a newer release exists, with the web client's rule
+    /// (`VersionStore.is_update_available`): a release server is outdated when
+    /// it differs from the latest tag, a `-dev` build when its base version
+    /// equals the latest tag.
+    public var isUpdateAvailable: Bool {
+        guard let latestVersion, !latestVersion.isEmpty else { return false }
+        if version.contains("-dev") {
+            return version.replacingOccurrences(of: "-dev", with: "") == latestVersion
+        }
+        return version != latestVersion
+    }
 }
 
 // MARK: - Users

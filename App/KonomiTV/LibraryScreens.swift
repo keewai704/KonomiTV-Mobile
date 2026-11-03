@@ -6,6 +6,7 @@ struct MyListScreen: View {
     let model: AppModel
 
     @State private var items: [RecordedProgram] = []
+    @State private var seriesItems: [Series] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
 
@@ -16,24 +17,46 @@ struct MyListScreen: View {
         return items.filter { ids.contains($0.id) && !model.isVideoDeleted(id: $0.id) }
     }
 
+    /// The loaded series, restricted to what is still in the My List.
+    private var visibleSeries: [Series] {
+        let ids = Set(model.mylistSeriesIDs)
+        return seriesItems.filter { ids.contains($0.id) }
+    }
+
     var body: some View {
-        LibraryVideoGrid(
-            model: model,
-            items: visibleItems,
-            gridIdentifier: "mylist.grid",
-            itemPrefix: "mylist.item",
-            isLoading: isLoading,
-            errorMessage: errorMessage,
-            emptyTitle: "マイリストは空です",
-            emptySystemImage: "bookmark",
-            progress: { _ in nil },
-            removeTitle: "マイリストから削除",
-            onRemove: { video in
-                model.removeFromMylist(videoID: video.id)
-                items.removeAll { $0.id == video.id }
-            },
-            onRetry: { Task { await load() } }
-        )
+        VStack(spacing: 0) {
+            if !visibleSeries.isEmpty {
+                MylistSeriesStrip(
+                    model: model,
+                    seriesList: visibleSeries,
+                    onRemove: { series in
+                        model.removeFromMylist(seriesID: series.id)
+                        seriesItems.removeAll { $0.id == series.id }
+                    }
+                )
+                Divider()
+            }
+
+            LibraryVideoGrid(
+                model: model,
+                items: visibleItems,
+                gridIdentifier: "mylist.grid",
+                itemPrefix: "mylist.item",
+                isLoading: isLoading,
+                errorMessage: errorMessage,
+                emptyTitle: visibleSeries.isEmpty
+                    ? "マイリストは空です"
+                    : "録画番組はマイリストにありません",
+                emptySystemImage: "bookmark",
+                progress: { _ in nil },
+                removeTitle: "マイリストから削除",
+                onRemove: { video in
+                    model.removeFromMylist(videoID: video.id)
+                    items.removeAll { $0.id == video.id }
+                },
+                onRetry: { Task { await load() } }
+            )
+        }
         .navigationTitle("マイリスト")
         .task { await load() }
     }
@@ -44,9 +67,23 @@ struct MyListScreen: View {
             return
         }
 
-        isLoading = items.isEmpty
+        isLoading = items.isEmpty && seriesItems.isEmpty
         errorMessage = nil
         defer { isLoading = false }
+
+        let seriesIDs = model.mylistSeriesIDs
+        if seriesIDs.isEmpty {
+            seriesItems = []
+        } else {
+            var loaded: [Series] = []
+            for id in seriesIDs {
+                if let series = try? await client.series(id: id) {
+                    loaded.append(series)
+                }
+            }
+            guard !Task.isCancelled else { return }
+            seriesItems = loaded
+        }
 
         let ids = model.mylistVideoIDs
         guard !ids.isEmpty else {

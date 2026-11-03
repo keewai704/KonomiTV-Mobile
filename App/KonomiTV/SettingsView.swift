@@ -20,6 +20,7 @@ struct SettingsView: View {
             qualitySection
             jikkyoSection
             accountSection
+            administrationSection
             televisionSection
             timetableSection
             historySection
@@ -131,17 +132,32 @@ struct SettingsView: View {
     private var accountSection: some View {
         Section("アカウント") {
             if let user = model.user {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text("ユーザー名")
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    UserAvatarView(
+                        client: model.client,
+                        username: nil,
+                        revision: model.accountIconRevision,
+                        size: 44
+                    )
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(user.name)
+                            .font(.headline)
+                            .accessibilityIdentifier("settings.userName")
+                        if user.isAdmin {
+                            Text("管理者")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Spacer(minLength: 0)
-                    Text(user.name)
-                        .multilineTextAlignment(.trailing)
-                        .accessibilityIdentifier("settings.userName")
                 }
-                if user.isAdmin {
-                    LabeledContent("権限", value: "管理者")
+
+                NavigationLink {
+                    AccountSettingsScreen(model: model)
+                } label: {
+                    Label("アカウント設定", systemImage: "person.crop.circle")
                 }
+                .accessibilityIdentifier("settings.account")
 
                 Toggle("設定をデバイス間で同期する", isOn: syncSettingsBinding)
                     .accessibilityIdentifier("settings.syncSettings")
@@ -176,6 +192,41 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
+
+                NavigationLink {
+                    RegisterScreen(model: model)
+                } label: {
+                    Label("アカウントを作成", systemImage: "person.badge.plus")
+                }
+                .accessibilityIdentifier("settings.register.link")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var administrationSection: some View {
+        if model.user?.isAdmin == true {
+            Section("サーバー管理") {
+                NavigationLink {
+                    AdminUsersScreen(model: model)
+                } label: {
+                    Label("ユーザー管理", systemImage: "person.2")
+                }
+                .accessibilityIdentifier("admin.users.link")
+
+                NavigationLink {
+                    ServerSettingsScreen(model: model)
+                } label: {
+                    Label("サーバー設定", systemImage: "server.rack")
+                }
+                .accessibilityIdentifier("settings.server.link")
+
+                NavigationLink {
+                    MaintenanceScreen(model: model)
+                } label: {
+                    Label("メンテナンス", systemImage: "wrench.and.screwdriver")
+                }
+                .accessibilityIdentifier("maintenance.link")
             }
         }
     }
@@ -224,7 +275,23 @@ struct SettingsView: View {
     private var informationSection: some View {
         if let version = model.version {
             Section("サーバー情報") {
-                LabeledContent("バージョン", value: version.version)
+                NavigationLink {
+                    AboutScreen(model: model)
+                } label: {
+                    LabeledContent("バージョン", value: version.version)
+                }
+                .accessibilityIdentifier("settings.about")
+
+                if version.isUpdateAvailable {
+                    Label(
+                        "アップデートがあります (version \(version.latestVersion ?? ""))",
+                        systemImage: "arrow.down.circle"
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.tint)
+                    .accessibilityIdentifier("settings.about.update")
+                }
+
                 LabeledContent("環境", value: version.environment)
                 LabeledContent("バックエンド", value: version.backend)
                 LabeledContent("エンコーダー", value: version.encoder)

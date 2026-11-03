@@ -43,6 +43,14 @@ struct VideosHomeView: View {
                         itemPrefix: "videos.recent"
                     )
 
+                    NavigationLink(value: SectionRoute.seriesList) {
+                        Label("シリーズ", systemImage: "rectangle.stack")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.horizontal)
+                    .accessibilityIdentifier("videos.seriesLink")
+
                     if !history.isEmpty {
                         section(
                             title: "視聴履歴",

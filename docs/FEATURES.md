@@ -20,7 +20,7 @@ API が 404 を返すサーバーでは画面に出しません。
 | 放送種別ごとのチャンネル一覧・現在と次の番組 | `GET /api/channels` | ✅ |
 | ピン留めチャンネル（並べ替え・設定画面） | クライアント設定 `pinned_channel_ids` | ✅ |
 | 実況勢いでの並べ替え | `tv_channel_sort_by_jikkyo_force` | ✅ |
-| チャンネル・番組検索（`/tv/search`） | `POST /api/programs/search`（キーワード検索のみ） | ✅ |
+| チャンネル・番組検索（`/tv/search`） | `POST /api/programs/search`（キーワード・除外キーワード・ジャンル・チャンネル・放送日時・番組長・放送種別） | ✅ |
 | ライブ視聴 | `GET /api/streams/live/{id}/{quality}/mpegts` | ✅ |
 | 視聴中の状態（Standby / ONAir など）と視聴人数 | `GET /api/streams/live/{id}/{quality}/events`（SSE） | ✅ |
 | チャンネル切り替え（上下・リモコンパネル） | — | ✅ |
@@ -34,7 +34,8 @@ API が 404 を返すサーバーでは画面に出しません。
 | --- | --- | --- |
 | 番組表（放送種別・日付・ジャンル色・ショッピング番組の減光） | `GET /api/programs/timetable` | ✅ |
 | 番組表からの録画予約（予約・プリセット指定・設定変更・キャンセル、予約マーカー） | `/api/recording/reservations/*` | ✅ |
-| 番組検索（条件フィルター） | `GET /api/programs/search` | 🚧 1 |
+| 番組検索（条件フィルター） | `POST /api/programs/search` | ✅ |
+| 番組検索の条件シート（キーワード・除外キーワード・番組名のみ・大小文字・あいまい／正規表現・ジャンルと除外・チャンネル・放送日時と除外・番組長・無料／有料） | `POST /api/programs/search` | ✅ |
 
 ## ビデオ
 
@@ -42,8 +43,8 @@ API が 404 を返すサーバーでは画面に出しません。
 | --- | --- | --- |
 | 録画番組一覧・無限スクロール・検索 | `GET /api/videos`, `/api/videos/search` | ✅ |
 | 並び順の切り替え | `order` クエリ | ✅ |
-| シリーズ一覧・検索・詳細 | `GET /api/series`, `/api/series/search`, `/api/series/{id}` | 🚧 1（ビデオ詳細のシリーズ欄のみ） |
-| マイリスト（番組・シリーズ） | クライアント設定 `mylist`（録画番組のみ） | ✅ |
+| シリーズ一覧・検索・詳細（放送期間ごとのエピソード） | `GET /api/series`, `/api/series/search`, `/api/series/{id}` | ✅ |
+| マイリスト（番組・シリーズ） | クライアント設定 `mylist`（`RecordedProgram` と `Series`） | ✅ |
 | 視聴履歴・続きから再生 | クライアント設定 `watched_history` | ✅ |
 | 録画ファイル情報 | `GET /api/videos/{id}` | ✅ |
 | 管理者: 録画ファイル削除・メタデータ再解析・サムネイル再生成 | `DELETE /api/videos/{id}` ほか | ✅ |
@@ -114,10 +115,15 @@ API が 404 を返すサーバーでは画面に出しません。
 | 機能 | API | 状態 |
 | --- | --- | --- |
 | ログイン・ログアウト | `POST /api/users/token` | ✅ |
-| アカウント作成 | `POST /api/users` | 🚧 8 |
-| ユーザー名・パスワード変更、アイコン、アカウント削除 | `/api/users/me*` | 🚧 8 |
+| アカウント作成（作成後すぐログイン、最初のアカウントは管理者） | `POST /api/users` | ✅ |
+| ユーザー名・パスワード変更（現在のパスワード・新しいパスワード・確認）、アカウント削除 | `/api/users/me` | ✅ |
+| アイコン画像のアップロード（PhotosPicker、JPEG / PNG） | `GET/PUT /api/users/me/icon` | ✅ |
+| アイコン画像の初期状態へのリセット | — | ⚠️ サーバーにアイコン削除 API がないため、選択の取り消し（アップロード前の状態に戻す）のみ |
+| アイコンの表示（設定・アカウント・ユーザー管理） | `GET /api/users/me/icon`, `GET /api/users/{name}/icon` | ✅ |
 | ニコニコ・Twitter・Bluesky アカウント連携 | `/api/niconico/*`, `/api/twitter/*`, `/api/bluesky/*` | ✅ |
 | 設定の同期 | `GET/PUT /api/settings/client` | ✅ |
-| 管理者: ユーザー管理 | `/api/users`, `/api/users/{name}` | 🚧 8 |
-| 管理者: サーバー設定 | `GET/PUT /api/settings/server` | 🚧 8 |
-| 管理者: メンテナンス（ログ、DB 更新、スキャン、再起動、終了） | `/api/maintenance/*` | 🚧 8 |
+| 管理者: ユーザー管理（一覧・アイコン・管理者権限の付与／剥奪・削除） | `GET /api/users`, `PUT/DELETE /api/users/{name}` | ✅ |
+| 管理者: 他ユーザーのユーザー名・パスワード変更 | — | ⚠️ サーバーの管理用 API が管理者権限の変更のみ許可しているため（本人のアカウント設定から変更） |
+| 管理者: サーバー設定（全般・サーバー・テレビ・ビデオ・キャプチャ、再起動が必要な旨の表示） | `GET/PUT /api/settings/server` | ✅ |
+| 管理者: メンテナンス（サーバーログ／アクセスログの SSE 表示・追従、DB 更新、一括スキャン・バックグラウンド解析・キャプチャスキャン・DB 最適化の実行と進捗、再起動・終了と再接続状態） | `/api/maintenance/*` | ✅ |
+| バージョン情報（サーバーのバージョン・最新バージョン・アップデート通知） | `GET /api/version` | ✅ |
