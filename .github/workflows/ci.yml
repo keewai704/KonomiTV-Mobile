@@ -84,6 +84,15 @@ jobs:
           echo "Mock server did not become ready" >&2
           exit 1
 
+      # Booting ahead of xcodebuild avoids "Timed out while launching
+      # application" on the first UI test of a cold simulator.
+      - name: Boot simulator
+        run: |
+          udid=$(xcrun simctl list devices available -j \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in d.items() if k.endswith("iOS-26-5") for x in v if x["name"]==sys.argv[1]))' "${{ matrix.device }}")
+          xcrun simctl boot "$udid" || true
+          xcrun simctl bootstatus "$udid" -b
+
       - name: Run UI tests
         env:
           TEST_RUNNER_KONOMITV_SERVER_URL: http://127.0.0.1:7010

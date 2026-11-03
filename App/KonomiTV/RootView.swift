@@ -67,8 +67,11 @@ struct RootView: View {
             List(selection: sidebarSelection) {
                 ForEach(AppSection.allCases) { section in
                     Label(section.title, systemImage: section.systemImage)
-                        .tag(section)
+                        // One element per row, so the identifier is not also
+                        // attached to the (non-hittable) icon image.
+                        .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("sidebar.\(section.rawValue)")
+                        .tag(section)
                 }
             }
             .navigationTitle("KonomiTV")
