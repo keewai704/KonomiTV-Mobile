@@ -127,13 +127,34 @@ enum ChannelSelection: Hashable, Sendable {
 /// `UserDefaults` keys shared by the views' `@AppStorage` properties.
 enum PreferenceKeys {
     static let serverURL = "serverURL"
-    static let liveQuality = "liveQuality"
-    static let videoQuality = "videoQuality"
     /// Client settings (My List, watch history, pinned channels, ...) as JSON.
     static let clientSettings = "clientSettings"
     /// Whether the client settings are synced with the server. Local only: the
     /// web client has the same switch as a non-synced `sync_settings` key.
     static let syncSettings = "syncSettings"
+
+    // Streaming quality profile keys, named like the web client's local-only
+    // settings (they are deliberately not part of ClientSettings).
+    static let tvStreamingQuality = "tv_streaming_quality"
+    static let tvStreamingQualityCellular = "tv_streaming_quality_cellular"
+    static let tvDataSaverMode = "tv_data_saver_mode"
+    static let tvDataSaverModeCellular = "tv_data_saver_mode_cellular"
+    static let tvLowLatencyMode = "tv_low_latency_mode"
+    static let tvLowLatencyModeCellular = "tv_low_latency_mode_cellular"
+    static let tv24fpsMode = "tv_24fps_mode"
+    static let tv24fpsModeCellular = "tv_24fps_mode_cellular"
+
+    static let videoStreamingQuality = "video_streaming_quality"
+    static let videoStreamingQualityCellular = "video_streaming_quality_cellular"
+    static let videoDataSaverMode = "video_data_saver_mode"
+    static let videoDataSaverModeCellular = "video_data_saver_mode_cellular"
+    static let video24fpsMode = "video_24fps_mode"
+    static let video24fpsModeCellular = "video_24fps_mode_cellular"
+
+    /// Keys of the quality picker that older builds stored under different
+    /// names. Migrated once by `QualityPreferences.migrate`.
+    static let legacyLiveQuality = "liveQuality"
+    static let legacyVideoQuality = "videoQuality"
 }
 
 /// Application wide state: configured server, session user, client settings and
@@ -177,6 +198,10 @@ final class AppModel {
 
     /// App-wide playback. Owned here so it survives view transitions.
     let playback = PlaybackController()
+
+    /// App-wide network path monitor: playback starts with the cellular
+    /// quality profile when the device is on a cellular connection.
+    let networkMonitor = NetworkMonitor()
 
     @ObservationIgnored private let defaults: UserDefaults
     /// Seconds of continuous playback before a video enters the watch history.
@@ -545,6 +570,20 @@ final class AppModel {
     func removePinnedChannel(id: String) {
         mutateSettings { settings in
             settings.pinnedChannelIDs = settings.pinnedChannelIDs.filter { $0 != id }
+        }
+    }
+
+    /// Switches the live channel of the screen that is currently on top of the
+    /// live stack, so picture-in-picture restore and back navigation keep
+    /// pointing at the new channel.
+    func switchLiveChannel(_ channel: LiveChannel) {
+        if let index = livePath.lastIndex(where: { route in
+            if case .live = route { return true }
+            return false
+        }) {
+            livePath[index] = .live(channel)
+        } else {
+            livePath.append(.live(channel))
         }
     }
 

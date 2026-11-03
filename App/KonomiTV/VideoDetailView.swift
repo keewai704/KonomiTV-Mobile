@@ -10,7 +10,6 @@ struct VideoDetailView: View {
     let video: RecordedProgram
 
     @Environment(\.dismiss) private var dismiss
-    @AppStorage(PreferenceKeys.videoQuality) private var qualityRaw: String = StreamQuality.p1080.rawValue
 
     @State private var detail: RecordedProgram?
     @State private var series: Series?
@@ -25,10 +24,6 @@ struct VideoDetailView: View {
 
     private var playbackItem: PlaybackItem { .video(video) }
 
-    private var quality: StreamQuality {
-        StreamQuality(rawValue: qualityRaw)?.videoSafe ?? .p1080
-    }
-
     private var isInMylist: Bool { model.isInMylist(videoID: video.id) }
 
     private var isAdmin: Bool { model.user?.isAdmin == true }
@@ -38,6 +33,7 @@ struct VideoDetailView: View {
     var body: some View {
         AdaptivePlayerLayout(
             player: { playerArea },
+            belowPlayer: { sceneStrip },
             info: { info }
         )
         .navigationTitle(current.title)
@@ -47,6 +43,7 @@ struct VideoDetailView: View {
         .task { await loadDetail() }
         .onAppear { model.playback.viewAppeared(for: playbackItem) }
         .onDisappear { model.playback.viewDisappeared(for: playbackItem) }
+        .background(playerShortcuts)
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .fileInfo:
@@ -74,6 +71,8 @@ struct VideoDetailView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
+            qualityMenu
+
             Button {
                 model.toggleMylist(videoID: video.id)
             } label: {
@@ -130,6 +129,30 @@ struct VideoDetailView: View {
         }
     }
 
+    // MARK: - Menus
+
+    /// In-player quality menu: switching restarts the video stream with the
+    /// new base quality and resumes at the current position.
+    private var qualityMenu: some View {
+        Menu {
+            ForEach(StreamQuality.videoQualities, id: \.self) { quality in
+                Button {
+                    model.playback.switchQuality(quality)
+                } label: {
+                    if model.playback.profile.quality == quality {
+                        Label(quality.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(quality.displayName)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+        }
+        .accessibilityIdentifier("player.quality")
+        .accessibilityLabel("画質")
+    }
+
     // MARK: - Views
 
     @ViewBuilder
@@ -142,6 +165,19 @@ struct VideoDetailView: View {
                 ProgressView()
                     .tint(.white)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var sceneStrip: some View {
+        if let client = model.client,
+           let tile = current.recordedVideo.thumbnailInfo?.tile {
+            VideoSceneStrip(
+                playback: model.playback,
+                videoID: current.id,
+                tile: tile,
+                client: client
+            )
         }
     }
 
@@ -240,6 +276,40 @@ struct VideoDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    // MARK: - Keyboard shortcuts
+
+    /// iPadOS lists these while ⌘ is held. Space, arrows, mute, restart, full
+    /// screen and PiP only exist on player screens, so they live here.
+    private var playerShortcuts: some View {
+        Group {
+            shortcut(.space, action: model.playback.togglePlayPause)
+            shortcut(.leftArrow, action: { model.playback.seek(by: -5) })
+            shortcut(.rightArrow, action: { model.playback.seek(by: 5) })
+            shortcut(.leftArrow, modifiers: [.command], action: { model.playback.seek(by: -15) })
+            shortcut(.rightArrow, modifiers: [.command], action: { model.playback.seek(by: 15) })
+            shortcut(.leftArrow, modifiers: [.shift], action: { model.playback.seek(by: -30) })
+            shortcut(.rightArrow, modifiers: [.shift], action: { model.playback.seek(by: 30) })
+            shortcut(.leftArrow, modifiers: [.option], action: { model.playback.seek(by: -60) })
+            shortcut(.rightArrow, modifiers: [.option], action: { model.playback.seek(by: 60) })
+            shortcut("q", action: model.playback.toggleMute)
+            shortcut("r", action: model.playback.restart)
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
+    }
+
+    private func shortcut(
+        _ key: KeyEquivalent,
+        modifiers: EventModifiers = [],
+        action: @escaping @MainActor () -> Void
+    ) -> some View {
+        Button(action: action) {
+            EmptyView()
+        }
+        .keyboardShortcut(key, modifiers: modifiers)
+    }
+
     // MARK: - Loading
 
     private func startPlayback() {
@@ -247,7 +317,7 @@ struct VideoDetailView: View {
         model.playback.play(
             playbackItem,
             client: client,
-            quality: quality,
+            profile: QualityPreferences.videoProfile(cellular: model.networkMonitor.isCellular),
             startAt: model.resumePosition(for: video)
         )
     }

@@ -1,4 +1,3 @@
-
 import AVFoundation
 import AVKit
 import Foundation
@@ -33,6 +32,11 @@ enum PlaybackItem: Hashable {
         case .live(let channel):
             return channel.name
         }
+    }
+
+    var isVideo: Bool {
+        if case .video = self { return true }
+        return false
     }
 }
 
@@ -83,17 +87,36 @@ final class PlaybackController {
     /// Live pipeline failure message (nil while the stream is healthy).
     private(set) var liveErrorMessage: String?
 
+    /// Live stream status reported by the SSE event API ("ONAir", "Standby",
+    /// ...). Empty before the first event or outside live playback.
+    private(set) var liveStatus = ""
+    /// Detail text shown over the player while the status is not ONAir.
+    private(set) var liveDetail = ""
+    /// Viewers of this live channel across all qualities.
+    private(set) var liveViewerCount = 0
+    /// True when the live stream offers 主音声 / 副音声.
+    private(set) var hasSecondaryAudio = false
+    /// Selected live audio track.
+    private(set) var liveAudioSelection: AudioSelection = .primary
+
+    /// Profile (quality, data saver, 24fps, low latency) of the current
+    /// playback. Changing it through `switchQuality` restarts the stream.
+    private(set) var profile = StreamingProfile.default
+    private(set) var isMuted = false
+
     @ObservationIgnored private var delegateProxy = PlayerViewControllerDelegate()
     @ObservationIgnored private var player: AVPlayer?
     @ObservationIgnored private var liveSession: LiveStreamSession?
+    @ObservationIgnored private let liveEvents = LiveEventsMonitor()
     @ObservationIgnored private var keepAliveTask: Task<Void, Never>?
     @ObservationIgnored private var client: APIClient?
-    @ObservationIgnored private var quality: StreamQuality = .p1080
 
     @ObservationIgnored private var timeControlObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemStatusObservation: NSKeyValueObservation?
     @ObservationIgnored private var periodicTimeObserver: Any?
     @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
+
+    /// Extra player layer used to start picture in picture from the E shortcut.
 
     /// Item whose detail screen is currently on screen.
     @ObservationIgnored private var visibleItem: PlaybackItem?
@@ -128,7 +151,7 @@ final class PlaybackController {
     func play(
         _ playbackItem: PlaybackItem,
         client: APIClient,
-        quality: StreamQuality,
+        profile: StreamingProfile,
         startAt: Double = 0
     ) {
         if let current = item, current == playbackItem, player != nil || liveSession != nil {
@@ -139,45 +162,27 @@ final class PlaybackController {
 
         item = playbackItem
         self.client = client
-        self.quality = quality
+        self.profile = profile
         state = "buffering"
         errorDetail = nil
         positionSeconds = 0
         liveErrorMessage = nil
+        isMuted = false
 
         activateAudioSession()
-
-        switch playbackItem {
-        case .video(let video):
-            startVideo(video, client: client, quality: quality, startAt: startAt)
-        case .live(let channel):
-            startLive(channel, client: client, quality: quality)
-        }
+        startCurrentItem(startAt: startAt)
     }
 
     /// Restarts the live pipeline after a failure.
     func retry() {
-        guard let current = item, case .live(let channel) = current else { return }
-        guard let client else { return }
-
-        liveSession?.onReady = nil
-        liveSession?.onFailed = nil
-        liveSession?.stop()
-        liveSession = nil
-
-        detachPlayerObservers()
-        player?.pause()
-        player = nil
-        playerViewController.player = nil
-        isPlayerAttached = false
-
-        liveErrorMessage = nil
-        errorDetail = nil
-        state = "buffering"
-        positionSeconds = 0
-
-        activateAudioSession()
-        startLive(channel, client: client, quality: quality)
+        guard let current = item else { return }
+        guard client != nil else { return }
+        switch current {
+        case .live:
+            reload(startAt: 0)
+        case .video:
+            reload(startAt: Double(positionSeconds))
+        }
     }
 
     /// Stops playback and releases every observer, task and session.
@@ -199,8 +204,12 @@ final class PlaybackController {
 
         liveSession?.onReady = nil
         liveSession?.onFailed = nil
+        liveSession?.onAudioTrackChange = nil
         liveSession?.stop()
         liveSession = nil
+
+        liveEvents.onUpdate = nil
+        liveEvents.stop()
 
         item = nil
         client = nil
@@ -208,8 +217,89 @@ final class PlaybackController {
         errorDetail = nil
         positionSeconds = 0
         liveErrorMessage = nil
+        liveStatus = ""
+        liveDetail = ""
+        liveViewerCount = 0
+        hasSecondaryAudio = false
+        liveAudioSelection = .primary
+        isMuted = false
         isPictureInPictureActive = false
         isRestoringFromPictureInPicture = false
+    }
+
+    // MARK: - Player controls
+
+    /// Toggles play / pause (Space shortcut).
+    func togglePlayPause() {
+        guard let player else { return }
+        if player.timeControlStatus == .playing {
+            player.pause()
+        } else {
+            player.play()
+        }
+    }
+
+    /// Toggles mute (Q shortcut). iOS has no per-app volume control, but
+    /// muting the AVPlayer is the equivalent of the web client's Q shortcut.
+    func toggleMute() {
+        isMuted.toggle()
+        player?.isMuted = isMuted
+    }
+
+    /// Seeks to an absolute position in seconds.
+    func seek(to seconds: Double) {
+        guard let player else { return }
+        let target = max(seconds, 0)
+        player.seek(
+            to: CMTime(seconds: target, preferredTimescale: 600),
+            toleranceBefore: CMTime(seconds: 0.5, preferredTimescale: 600),
+            toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)
+        )
+    }
+
+    /// Seeks relative to the current position.
+    func seek(by seconds: Double) {
+        seek(to: currentPosition + seconds)
+    }
+
+    /// Jumps to the live edge (W shortcut).
+    func seekToLiveEdge() {
+        guard case .live? = item, let player, let currentItem = player.currentItem else { return }
+        guard let range = currentItem.seekableTimeRanges.last?.timeRangeValue else { return }
+        let end = range.start.seconds + range.duration.seconds
+        guard end.isFinite else { return }
+        player.seek(
+            to: CMTime(seconds: max(end - 1, 0), preferredTimescale: 600),
+            toleranceBefore: .positiveInfinity,
+            toleranceAfter: .zero
+        )
+    }
+
+    /// Restarts the current item (R shortcut).
+    func restart() {
+        guard let current = item else { return }
+        switch current {
+        case .video:
+            reload(startAt: currentPosition)
+        case .live:
+            reload(startAt: 0)
+        }
+    }
+
+    /// Switches the base quality and restarts the stream with the new profile.
+    /// Recorded video resumes at the current position with a new session id.
+    func switchQuality(_ quality: StreamQuality) {
+        guard item != nil else { return }
+        var updated = profile
+        updated.quality = quality
+        profile = updated
+        reload(startAt: currentPosition)
+    }
+
+    /// Switches 主音声 / 副音声 of the live stream without restarting it.
+    func selectLiveAudio(_ selection: AudioSelection) {
+        liveAudioSelection = selection
+        liveSession?.selectAudio(selection)
     }
 
     // MARK: - Screen visibility
@@ -235,6 +325,12 @@ final class PlaybackController {
     private var isPlayerScreenVisible: Bool {
         guard let current = item else { return false }
         return visibleItem == current
+    }
+
+    private var currentPosition: Double {
+        guard let player else { return Double(positionSeconds) }
+        let seconds = player.currentTime().seconds
+        return seconds.isFinite ? max(seconds, 0) : Double(positionSeconds)
     }
 
     // MARK: - Picture in Picture
@@ -267,19 +363,73 @@ final class PlaybackController {
         onRestore?(current)
     }
 
+    // MARK: - Item lifecycle
+
+    private func startCurrentItem(startAt: Double) {
+        guard let item, let client else { return }
+        switch item {
+        case .video(let video):
+            startVideo(video, client: client, profile: profile, startAt: startAt)
+        case .live(let channel):
+            startLive(channel, client: client, profile: profile)
+        }
+    }
+
+    /// Tears down the player and the live pipeline, then starts the current
+    /// item again with the current profile.
+    private func reload(startAt: Double) {
+        guard let item, let client else { return }
+
+        keepAliveTask?.cancel()
+        keepAliveTask = nil
+
+        detachPlayerObservers()
+        player?.pause()
+        player = nil
+        playerViewController.player = nil
+        isPlayerAttached = false
+
+        liveSession?.onReady = nil
+        liveSession?.onFailed = nil
+        liveSession?.onAudioTrackChange = nil
+        liveSession?.stop()
+        liveSession = nil
+
+        liveEvents.onUpdate = nil
+        liveEvents.stop()
+
+        errorDetail = nil
+        liveErrorMessage = nil
+        liveStatus = ""
+        liveDetail = ""
+        hasSecondaryAudio = false
+        state = "buffering"
+        positionSeconds = Int(startAt)
+
+        activateAudioSession()
+
+        switch item {
+        case .video(let video):
+            startVideo(video, client: client, profile: profile, startAt: startAt)
+        case .live(let channel):
+            startLive(channel, client: client, profile: profile)
+        }
+    }
+
     // MARK: - Video
 
     private func startVideo(
         _ video: RecordedProgram,
         client: APIClient,
-        quality: StreamQuality,
+        profile: StreamingProfile,
         startAt: Double
     ) {
         let sessionID = String(UUID().uuidString.prefix(8)).lowercased()
         let url = client.videoPlaylistURL(
             videoID: video.id,
-            quality: quality.videoSafe,
-            sessionID: sessionID
+            profile: profile,
+            sessionID: sessionID,
+            playlistType: .master
         )
 
         let playerItem = AVPlayerItem(url: url)
@@ -291,14 +441,14 @@ final class PlaybackController {
         pendingStartPosition = startAt
         newPlayer.play()
 
-        startKeepAlive(client: client, videoID: video.id, quality: quality, sessionID: sessionID)
+        startKeepAlive(client: client, videoID: video.id, profile: profile, sessionID: sessionID)
     }
 
     /// KonomiTV stops a recording session that stops sending keep-alives.
     private func startKeepAlive(
         client: APIClient,
         videoID: Int,
-        quality: StreamQuality,
+        profile: StreamingProfile,
         sessionID: String
     ) {
         keepAliveTask?.cancel()
@@ -306,7 +456,7 @@ final class PlaybackController {
             while !Task.isCancelled {
                 try? await client.keepAlive(
                     videoID: videoID,
-                    quality: quality,
+                    profile: profile,
                     sessionID: sessionID
                 )
                 guard !Task.isCancelled else { return }
@@ -317,11 +467,12 @@ final class PlaybackController {
 
     // MARK: - Live
 
-    private func startLive(_ channel: LiveChannel, client: APIClient, quality: StreamQuality) {
-        let session = LiveStreamSession(channel: channel, client: client, quality: quality)
+    private func startLive(_ channel: LiveChannel, client: APIClient, profile: StreamingProfile) {
+        let session = LiveStreamSession(channel: channel, client: client, profile: profile)
 
         session.onReady = { [weak self, weak session] url in
             guard let self, let session, self.liveSession === session else { return }
+            self.hasSecondaryAudio = session.hasSecondaryAudio
             self.attachLivePlayer(url: url, channel: channel)
         }
         session.onFailed = { [weak self, weak session] message in
@@ -330,9 +481,50 @@ final class PlaybackController {
             self.state = "error"
             self.errorDetail = message
         }
+        session.onAudioTrackChange = { [weak self, weak session] hasSecondary in
+            guard let self, let session, self.liveSession === session else { return }
+            self.hasSecondaryAudio = hasSecondary
+        }
 
         liveSession = session
+        hasSecondaryAudio = session.hasSecondaryAudio
+        liveAudioSelection = .primary
         session.start()
+
+        let eventsURL = client.liveEventsURL(
+            displayChannelID: channel.displayChannelID,
+            profile: profile,
+            isRadioChannel: channel.isRadioChannel
+        )
+        liveEvents.onUpdate = { [weak self, weak session] status in
+            guard let self, let session, self.liveSession === session else { return }
+            self.applyLiveStatus(status)
+        }
+        liveEvents.start(url: eventsURL)
+    }
+
+    private func applyLiveStatus(_ status: LiveStreamStatus) {
+        liveStatus = status.status.rawValue
+        liveDetail = status.detail
+        liveViewerCount = status.clientCount
+
+        switch status.status {
+        case .offline:
+            // Offline with a detail means the stream will not come back on its
+            // own; surface it as a playback error with the server's message.
+            if !status.detail.isEmpty {
+                liveErrorMessage = status.detail
+                state = "error"
+                errorDetail = status.detail
+            }
+        case .onAir:
+            liveErrorMessage = nil
+            if state == "error" {
+                state = "buffering"
+            }
+        case .standby, .idling, .restart:
+            break
+        }
     }
 
     private func attachLivePlayer(url: URL, channel: LiveChannel) {
@@ -340,7 +532,15 @@ final class PlaybackController {
 
         activateAudioSession()
 
-        let newPlayer = AVPlayer(url: url)
+        let item = AVPlayerItem(url: url)
+        if profile.lowLatency {
+            // Keep playback close to the live edge and let AVPlayer speed up
+            // slightly when it falls behind.
+            item.configuredTimeOffsetFromLive = CMTime(seconds: 3, preferredTimescale: 600)
+            item.automaticallyPreservesTimeOffsetFromLive = true
+        }
+
+        let newPlayer = AVPlayer(playerItem: item)
         configure(newPlayer, item: .live(channel))
         attach(newPlayer)
         newPlayer.play()
@@ -353,6 +553,12 @@ final class PlaybackController {
         newPlayer.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
         newPlayer.allowsExternalPlayback = true
         newPlayer.automaticallyWaitsToMinimizeStalling = true
+        newPlayer.isMuted = isMuted
+
+        // Linear playback of recorded programs, 1x only for live.
+        playerViewController.speeds = playbackItem.isVideo
+            ? [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0].map { NSNumber(value: $0) }
+            : [NSNumber(value: 1.0)]
 
         let title = AVMutableMetadataItem()
         title.identifier = .commonIdentifierTitle
@@ -379,6 +585,7 @@ final class PlaybackController {
         player = newPlayer
         playerViewController.player = newPlayer
         isPlayerAttached = true
+        newPlayer.isMuted = isMuted
 
         timeControlObservation = newPlayer.observe(
             \.timeControlStatus,

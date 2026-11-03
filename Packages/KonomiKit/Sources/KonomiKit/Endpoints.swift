@@ -167,6 +167,12 @@ enum Endpoints {
         url(baseURL: baseURL, path: ["videos", String(videoID), "thumbnail"])
     }
 
+    /// Seek-bar tiled thumbnail sheet
+    /// (`GET /api/videos/{id}/thumbnail/tiled`).
+    static func tiledThumbnail(baseURL: URL, videoID: Int) -> URL {
+        url(baseURL: baseURL, path: ["videos", String(videoID), "thumbnail", "tiled"])
+    }
+
     // MARK: - Streaming
 
     /// `GET /api/streams/video/{video_id}/{quality}/playlist?session_id=..&type=..[&cache_key=..]`

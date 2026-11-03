@@ -22,8 +22,9 @@ API が 404 を返すサーバーでは画面に出しません。
 | 実況勢いでの並べ替え | `tv_channel_sort_by_jikkyo_force` | ✅ |
 | チャンネル・番組検索（`/tv/search`） | `POST /api/programs/search`（キーワード検索のみ） | ✅ |
 | ライブ視聴 | `GET /api/streams/live/{id}/{quality}/mpegts` | ✅ |
-| 視聴中の状態（Standby / ONAir など）と視聴人数 | `GET /api/streams/live/{id}/{quality}/events`（SSE） | 🚧 2 |
-| チャンネル切り替え（上下・リモコンパネル） | — | 🚧 2 |
+| 視聴中の状態（Standby / ONAir など）と視聴人数 | `GET /api/streams/live/{id}/{quality}/events`（SSE） | ✅ |
+| チャンネル切り替え（上下・リモコンパネル） | — | ✅ |
+| ライブ視聴の番組・チャンネルパネル | `GET /api/channels` | ✅ |
 
 ## 番組表・番組検索
 
@@ -44,17 +45,19 @@ API が 404 を返すサーバーでは画面に出しません。
 | 録画ファイル情報 | `GET /api/videos/{id}` | ✅ |
 | 管理者: 録画ファイル削除・メタデータ再解析・サムネイル再生成 | `DELETE /api/videos/{id}` ほか | ✅ |
 | 録画ファイルのダウンロード | `GET /api/videos/{id}/download` | ✅ |
-| シークバーのサムネイルプレビュー | `GET /api/videos/{id}/thumbnail/tiled` | 🚧 2 |
+| シークバーのサムネイルプレビュー（シーン一覧） | `GET /api/videos/{id}/thumbnail/tiled` | ✅ |
 | オフライン保存・オフライン再生（0.15） | `GET /api/streams/video/{id}/{quality}/offline-stream` | 🚧 9 |
 
 ## プレイヤー
 
 | 機能 | 状態 |
 | --- | --- |
-| 画質の選択（Wi-Fi とモバイル通信で別設定、データ節約・低遅延・24fps） | 🚧 2 |
-| 再生中の画質切り替え・再生速度・主音声／副音声 | 🚧 2 |
-| L 字画面のクロップ | 🚧 2 |
-| キーボードショートカット（iPad のハードウェアキーボード） | 🚧 2 |
+| 画質の選択（Wi-Fi とモバイル通信で別設定、データ節約・低遅延・24fps） | ✅ |
+| 再生中の画質切り替え・再生速度・主音声／副音声 | ✅ |
+| ライブの低遅延モード（ライブエッジ付近の再生） | ✅ |
+| L 字画面のクロップ | ⚠️ AVPlayerViewController に映像をクロップ／ズームする API がない |
+| デュアルモノ（1 本のステレオトラックに左右で別音声） | ⚠️ AVPlayer の HLS 再生ではチャンネルをミックスし直せない |
+| キーボードショートカット（iPad のハードウェアキーボード） | ✅ |
 | PiP・バックグラウンド再生・ロック画面の再生中情報 | ✅ |
 | ニコニコ実況コメントの表示・投稿・NG 設定 | 🚧 3 |
 | 録画番組の過去ログコメント | 🚧 3 |

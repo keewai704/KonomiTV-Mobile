@@ -55,6 +55,8 @@ struct RootView: View {
                 playback.isPictureInPictureSupported ? "true" : "false",
                 identifier: "playback.pipSupported"
             )
+            statusText(playback.liveStatus, identifier: "live.status")
+            statusText(String(playback.liveViewerCount), identifier: "live.viewerCount")
         }
         .font(.system(size: 1))
         .opacity(0.01)

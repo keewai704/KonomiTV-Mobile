@@ -222,6 +222,31 @@ class MockServerTestCase(unittest.TestCase):
         self.assertEqual(headers.get("Content-Type"), "image/webp")
         self.assertTrue(body.startswith(b"RIFF"))
 
+    def test_video_tiled_thumbnail(self) -> None:
+        status, headers, body = self.request(
+            "GET", "/api/videos/1/thumbnail/tiled"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "image/png")
+        self.assertTrue(body.startswith(b"\x89PNG"))
+        # 960 x 180 (160 x 90 のタイル 6 列 x 2 行) の IHDR
+        self.assertEqual(int.from_bytes(body[16:20], "big"), 960)
+        self.assertEqual(int.from_bytes(body[20:24], "big"), 180)
+
+        status, _, _ = self.request("GET", "/api/videos/9999/thumbnail/tiled")
+        self.assertEqual(status, 404)
+
+    def test_video_detail_has_tile_thumbnail_info(self) -> None:
+        status, _, detail = self.get_json("/api/videos/1")
+        self.assertEqual(status, 200)
+        tile = detail["recorded_video"]["thumbnail_info"]["tile"]
+        self.assertEqual(tile["tile_width"], mock_server.TILE_WIDTH)
+        self.assertEqual(tile["tile_height"], mock_server.TILE_HEIGHT)
+        self.assertEqual(tile["column_count"], mock_server.TILE_COLUMNS)
+        self.assertEqual(tile["row_count"], mock_server.TILE_ROWS)
+        self.assertEqual(tile["total_tiles"], mock_server.TILE_TOTAL)
+        self.assertEqual(tile["interval_sec"], mock_server.TILE_INTERVAL_SEC)
+
     # -- auth --------------------------------------------------------------
 
     def test_token_success_and_failure(self) -> None:
@@ -547,7 +572,11 @@ class MockServerStreamingTestCase(unittest.TestCase):
             self.assertIn("#EXTM3U", media)
             self.assertIn(f"session_id={session_id}", media)
             self.assertIn("segment?", media)
-            self.assertEqual(self.stats()["last_video_playlist_type"], playlist_type)
+            # Media playlist requests are recorded separately; the master
+            # playlist marker stays for the playback-type check.
+            self.assertEqual(
+                self.stats()["last_video_media_playlist_type"], playlist_type
+            )
 
             segment_uri = next(
                 line for line in media.splitlines()

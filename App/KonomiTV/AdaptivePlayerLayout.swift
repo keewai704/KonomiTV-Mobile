@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Arranges a video player and its program information.
+/// Arranges a video player, optional content directly below it (the recorded
+/// video scene strip) and its program information.
 ///
 /// Wide windows put the player on the left (about two thirds of the width)
 /// with the information beside it; narrow windows keep the player on top and
@@ -11,9 +12,10 @@ import SwiftUI
 /// Both arrangements share one `AnyLayout`, so switching between them keeps
 /// the player's identity: the `AVPlayerViewController` is not recreated and
 /// playback continues while the window is resized.
-struct AdaptivePlayerLayout<Player: View, Info: View>: View {
+struct AdaptivePlayerLayout<Player: View, BelowPlayer: View, Info: View>: View {
     private let threshold: CGFloat
     private let player: Player
+    private let belowPlayer: BelowPlayer
     private let info: Info
 
     @State private var width: CGFloat = 0
@@ -21,10 +23,12 @@ struct AdaptivePlayerLayout<Player: View, Info: View>: View {
     init(
         threshold: CGFloat = 900,
         @ViewBuilder player: () -> Player,
+        @ViewBuilder belowPlayer: () -> BelowPlayer,
         @ViewBuilder info: () -> Info
     ) {
         self.threshold = threshold
         self.player = player()
+        self.belowPlayer = belowPlayer()
         self.info = info()
     }
 
@@ -38,11 +42,15 @@ struct AdaptivePlayerLayout<Player: View, Info: View>: View {
 
     var body: some View {
         layout {
-            player
-                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .background(Color.black)
-                .frame(width: isWide ? max(width * 0.65, 320) : nil)
+            VStack(spacing: 0) {
+                player
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.black)
+
+                belowPlayer
+            }
+            .frame(width: isWide ? max(width * 0.65, 320) : nil)
 
             ScrollView {
                 info

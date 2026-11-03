@@ -42,8 +42,7 @@ struct LaunchOptions: Sendable {
     func preparePersistence(defaults: UserDefaults = .standard) {
         if isUITesting {
             defaults.removeObject(forKey: PreferenceKeys.serverURL)
-            defaults.removeObject(forKey: PreferenceKeys.liveQuality)
-            defaults.removeObject(forKey: PreferenceKeys.videoQuality)
+            QualityPreferences.removeAll(defaults: defaults)
             defaults.removeObject(forKey: PreferenceKeys.clientSettings)
             defaults.removeObject(forKey: PreferenceKeys.syncSettings)
             KeychainStore.delete(account: KeychainStore.tokenAccount)
@@ -62,6 +61,7 @@ struct KonomiTVApp: App {
     init() {
         let options = LaunchOptions()
         options.preparePersistence()
+        QualityPreferences.migrate()
         if options.isUITesting {
             MainActor.assumeIsolated {
                 UIView.setAnimationsEnabled(false)

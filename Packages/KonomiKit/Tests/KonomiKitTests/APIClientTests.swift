@@ -305,6 +305,14 @@ final class APIClientTests: XCTestCase {
         )
     }
 
+    func testTiledThumbnailURL() {
+        let client = APIClient(baseURL: serverBaseURL)
+        XCTAssertEqual(
+            client.tiledThumbnailURL(videoID: 101).absoluteString,
+            "http://127.0.0.1:7010/api/videos/101/thumbnail/tiled"
+        )
+    }
+
     func testVideoPlaylistURL() {
         let client = APIClient(baseURL: serverBaseURL)
         let url = client.videoPlaylistURL(videoID: 101, quality: .p1080, sessionID: "abcd1234")

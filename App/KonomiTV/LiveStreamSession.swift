@@ -84,16 +84,21 @@ final class LiveStreamSession {
 
     let channel: LiveChannel
     let client: APIClient
-    let quality: StreamQuality
+    let profile: StreamingProfile
 
     private(set) var phase: Phase = .idle
     private(set) var segmentCount = 0
     private(set) var playbackURL: URL?
+    /// True when the stream carries a secondary audio track (副音声).
+    private(set) var hasSecondaryAudio = false
+    private(set) var audioSelection: AudioSelection = .primary
 
     /// Called once when the loopback playlist URL is published.
     @ObservationIgnored var onReady: (@MainActor (URL) -> Void)?
     /// Called when the pipeline fails (network error, stream ended, ...).
     @ObservationIgnored var onFailed: (@MainActor (String) -> Void)?
+    /// Called when the stream's audio track layout becomes known or changes.
+    @ObservationIgnored var onAudioTrackChange: (@MainActor (Bool) -> Void)?
 
     @ObservationIgnored private var store: SegmentStore?
     @ObservationIgnored private var server: LocalHLSServer?
@@ -101,10 +106,10 @@ final class LiveStreamSession {
     @ObservationIgnored private var pipeline: Task<Void, Never>?
     @ObservationIgnored private var reader: Task<String?, Never>?
 
-    init(channel: LiveChannel, client: APIClient, quality: StreamQuality) {
+    init(channel: LiveChannel, client: APIClient, profile: StreamingProfile) {
         self.channel = channel
         self.client = client
-        self.quality = quality
+        self.profile = profile
     }
 
     func start() {
@@ -120,7 +125,8 @@ final class LiveStreamSession {
 
         let upstreamURL = client.liveStreamURL(
             displayChannelID: channel.displayChannelID,
-            quality: quality
+            profile: profile,
+            isRadioChannel: channel.isRadioChannel
         )
 
         pipeline = Task { [weak self] in
@@ -139,13 +145,21 @@ final class LiveStreamSession {
         serverURL = nil
         playbackURL = nil
         segmentCount = 0
+        hasSecondaryAudio = false
         phase = .idle
+    }
+
+    /// Switches 主音声 / 副音声 without restarting the upstream stream.
+    func selectAudio(_ selection: AudioSelection) {
+        audioSelection = selection
+        server?.setAudio(selection)
     }
 
     // MARK: - Pipeline
 
     private func bootstrap(upstreamURL: URL, store: SegmentStore) async {
         let server = LocalHLSServer(store: store)
+        server.setAudio(audioSelection)
         self.server = server
 
         do {
@@ -204,6 +218,18 @@ final class LiveStreamSession {
 
     private func applySegmentCount(_ count: Int) {
         segmentCount = count
+
+        if let store {
+            Task { [weak self, store] in
+                let hasSecondary = await store.hasSecondaryAudio
+                guard !Task.isCancelled else { return }
+                if self?.hasSecondaryAudio != hasSecondary {
+                    self?.hasSecondaryAudio = hasSecondary
+                    self?.onAudioTrackChange?(hasSecondary)
+                }
+            }
+        }
+
         guard count >= 3, let serverURL else { return }
         guard playbackURL == nil else { return }
         playbackURL = serverURL

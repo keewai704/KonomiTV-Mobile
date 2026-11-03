@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import KonomiKit
 import KonomiStreaming
 
 enum LocalHLSServerError: Error, LocalizedError, Sendable {
@@ -13,6 +14,24 @@ enum LocalHLSServerError: Error, LocalizedError, Sendable {
         case .stopped:
             return "ローカル再生サーバーが停止しました。"
         }
+    }
+}
+
+/// Thread-safe holder of the selected audio track.
+private final class AudioSelectionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var selection: AudioSelection = .primary
+
+    func set(_ selection: AudioSelection) {
+        lock.lock()
+        self.selection = selection
+        lock.unlock()
+    }
+
+    var current: AudioSelection {
+        lock.lock()
+        defer { lock.unlock() }
+        return selection
     }
 }
 
@@ -31,6 +50,7 @@ final class LocalHLSServer: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.github.keewai704.KonomiTV.local-hls")
     private let store: SegmentStore
+    private let audio = AudioSelectionBox()
 
     private var listener: NWListener?
     private var connections: [UUID: NWConnection] = [:]
@@ -39,6 +59,12 @@ final class LocalHLSServer: @unchecked Sendable {
 
     init(store: SegmentStore) {
         self.store = store
+    }
+
+    /// Selects the audio track served by the segment endpoint. Switching takes
+    /// effect with the next segment request, without restarting the stream.
+    func setAudio(_ selection: AudioSelection) {
+        audio.set(selection)
     }
 
     // MARK: - Lifecycle
@@ -192,9 +218,14 @@ final class LocalHLSServer: @unchecked Sendable {
         let parts = requestLine.split(separator: " ")
         let target = parts.count >= 2 ? String(parts[1]) : "/"
         let store = self.store
+        let audio = self.audio.current
 
         Task { [weak self] in
-            let response = await LocalHLSServer.makeResponse(for: target, store: store)
+            let response = await LocalHLSServer.makeResponse(
+                for: target,
+                store: store,
+                audio: audio
+            )
             guard let self else { return }
             self.queue.async {
                 self.send(response, to: id)
@@ -211,7 +242,11 @@ final class LocalHLSServer: @unchecked Sendable {
 
     // MARK: - Responses
 
-    private static func makeResponse(for target: String, store: SegmentStore) async -> Data {
+    private static func makeResponse(
+        for target: String,
+        store: SegmentStore,
+        audio: AudioSelection
+    ) async -> Data {
         let path = target
             .split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
             .first
@@ -229,7 +264,8 @@ final class LocalHLSServer: @unchecked Sendable {
 
         if path.hasPrefix("/seg/"), path.hasSuffix(".ts") {
             let number = path.dropFirst("/seg/".count).dropLast(".ts".count)
-            if let sequence = Int(number), let segment = await store.segment(sequence: sequence) {
+            if let sequence = Int(number),
+               let segment = await store.segment(sequence: sequence, audio: audio) {
                 return httpResponse(
                     status: 200,
                     reason: "OK",

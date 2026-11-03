@@ -6,9 +6,6 @@ import KonomiKit
 struct SettingsView: View {
     let model: AppModel
 
-    @AppStorage(PreferenceKeys.liveQuality) private var liveQualityRaw: String = StreamQuality.p1080.rawValue
-    @AppStorage(PreferenceKeys.videoQuality) private var videoQualityRaw: String = StreamQuality.p1080.rawValue
-
     @State private var serverText = ""
     @State private var username = ""
     @State private var password = ""
@@ -73,19 +70,12 @@ struct SettingsView: View {
 
     private var qualitySection: some View {
         Section("再生品質") {
-            Picker("ライブ配信", selection: $liveQualityRaw) {
-                ForEach(StreamQuality.liveQualities, id: \.self) { quality in
-                    Text(quality.displayName).tag(quality.rawValue)
-                }
+            NavigationLink {
+                QualitySettingsView()
+            } label: {
+                Label("画質", systemImage: "slider.horizontal.3")
             }
-            .accessibilityIdentifier("settings.liveQuality")
-
-            Picker("ビデオ", selection: $videoQualityRaw) {
-                ForEach(StreamQuality.videoQualities, id: \.self) { quality in
-                    Text(quality.displayName).tag(quality.rawValue)
-                }
-            }
-            .accessibilityIdentifier("settings.videoQuality")
+            .accessibilityIdentifier("settings.quality")
         }
     }
 

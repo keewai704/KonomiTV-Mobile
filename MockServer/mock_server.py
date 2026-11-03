@@ -18,8 +18,10 @@ import json
 import os
 import select
 import socket
+import struct
 import threading
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
@@ -94,6 +96,73 @@ def split_api_quality(quality: str) -> tuple[str, bool]:
             if suffix == "-24fps":
                 is_24fps_mode = True
     return base_quality, is_24fps_mode
+
+# シークバー用タイルサムネイル (6 列 x 2 行、12 枚、1 枚 10 秒)
+TILE_WIDTH = 160
+TILE_HEIGHT = 90
+TILE_COLUMNS = 6
+TILE_ROWS = 2
+TILE_TOTAL = TILE_COLUMNS * TILE_ROWS
+TILE_INTERVAL_SEC = 10.0
+TILED_THUMBNAIL_INFO = {
+    "version": 1,
+    "representative": None,
+    "tile": {
+        "format": "png",
+        "image_width": TILE_WIDTH * TILE_COLUMNS,
+        "image_height": TILE_HEIGHT * TILE_ROWS,
+        "tile_width": TILE_WIDTH,
+        "tile_height": TILE_HEIGHT,
+        "total_tiles": TILE_TOTAL,
+        "column_count": TILE_COLUMNS,
+        "row_count": TILE_ROWS,
+        "interval_sec": TILE_INTERVAL_SEC,
+    },
+}
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    payload = kind + data
+    return (
+        struct.pack(">I", len(data))
+        + payload
+        + struct.pack(">I", zlib.crc32(payload) & 0xFFFFFFFF)
+    )
+
+
+def build_tiled_thumbnail_png() -> bytes:
+    """Generate a valid PNG with one solid colour per tile (stdlib only).
+
+    The iOS UI crops this sheet with Core Graphics, so the image has to have
+    the real dimensions from TILED_THUMBNAIL_INFO instead of being a 1x1
+    placeholder.
+    """
+    width = TILE_WIDTH * TILE_COLUMNS
+    height = TILE_HEIGHT * TILE_ROWS
+    palette = [
+        (202, 72, 72), (214, 128, 54), (206, 182, 58), (84, 168, 92),
+        (66, 142, 196), (104, 88, 186), (178, 82, 156), (76, 176, 176),
+        (140, 104, 62), (110, 122, 138), (188, 118, 92), (96, 160, 120),
+    ]
+
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)  # filter type: none
+        row = y // TILE_HEIGHT
+        for x in range(width):
+            column = x // TILE_WIDTH
+            raw.extend(palette[(row * TILE_COLUMNS + column) % len(palette)])
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+TILED_THUMBNAIL_PNG = build_tiled_thumbnail_png()
 
 # 1x1 のダミー画像 (PNG / WebP)
 PNG_BYTES = base64.b64decode(
@@ -181,6 +250,7 @@ class MockServerState:
         self.last_live_quality: str | None = None
         self.last_video_quality: str | None = None
         self.last_video_playlist_type: str | None = None
+        self.last_video_media_playlist_type: str | None = None
         # クライアント設定はプロセスが生きている間だけ保持する (実サーバーでは DB に保存される)
         self.client_settings: dict = copy.deepcopy(client_settings or {})
 
@@ -210,8 +280,13 @@ class MockServerState:
     def record_video_quality(self, quality: str, playlist_type: str | None = None) -> None:
         with self.lock:
             self.last_video_quality = quality
-            if playlist_type is not None:
+            if playlist_type == "master":
+                # The UI tests verify that recorded videos are requested as the
+                # master playlist. Media playlist requests are recorded
+                # separately so they do not overwrite that check.
                 self.last_video_playlist_type = playlist_type
+            elif playlist_type is not None:
+                self.last_video_media_playlist_type = playlist_type
 
     def record_settings_put(self, settings: dict) -> None:
         with self.lock:
@@ -230,6 +305,7 @@ class MockServerState:
                 "last_live_quality": self.last_live_quality,
                 "last_video_quality": self.last_video_quality,
                 "last_video_playlist_type": self.last_video_playlist_type,
+                "last_video_media_playlist_type": self.last_video_media_playlist_type,
             }
 
 
@@ -262,6 +338,12 @@ def load_fixtures() -> dict:
         page2.get("recorded_programs", [])
     )
     total = page1.get("total", len(videos))
+
+    # シークバー用のタイルサムネイル情報を全録画番組に付与する
+    for program in videos:
+        recorded_video = program.get("recorded_video")
+        if isinstance(recorded_video, dict) and recorded_video.get("thumbnail_info") is None:
+            recorded_video["thumbnail_info"] = copy.deepcopy(TILED_THUMBNAIL_INFO)
 
     # シリーズ情報を組み立て、紐づく録画番組に series_id / series_title などを付与する
     series = build_series(series_fixture, videos, channels)
@@ -904,6 +986,16 @@ class MockHandler(BaseHTTPRequestHandler):
             filtered = self._ordered_videos(filtered, self._order_param(query, allow_ids=False))
             page = self._page_param(query)
             self._send_json(self._paginate(filtered, len(filtered), page))
+            return
+
+        # /videos/{video_id}/thumbnail/tiled (seek-bar tile sheet)
+        if len(parts) == 4 and parts[2] == "thumbnail" and parts[3] == "tiled":
+            if not self._video_exists(parts[1], fixtures):
+                self._not_found()
+                return
+            self._send_bytes(
+                TILED_THUMBNAIL_PNG, "image/png", cache="max-age=3600"
+            )
             return
 
         # /videos/{video_id}/thumbnail

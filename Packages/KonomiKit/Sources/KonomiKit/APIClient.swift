@@ -335,6 +335,12 @@ public struct APIClient: Sendable {
         Endpoints.thumbnail(baseURL: baseURL, videoID: videoID)
     }
 
+    /// Seek-bar tiled thumbnail sheet URL. The tile geometry comes from
+    /// `RecordedVideo.thumbnailInfo.tile`.
+    public func tiledThumbnailURL(videoID: Int) -> URL {
+        Endpoints.tiledThumbnail(baseURL: baseURL, videoID: videoID)
+    }
+
     /// Download URL of a recorded program's file (`GET /api/videos/{id}/download`).
     public func videoDownloadURL(id: Int) -> URL {
         Endpoints.videoDownload(baseURL: baseURL, id: id)
