@@ -51,7 +51,7 @@ jobs:
   ios:
     name: iOS (E2E + IPA)
     runs-on: macos-26
-    timeout-minutes: 75
+    timeout-minutes: 120
     needs: [package-linux, mock-server]
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
