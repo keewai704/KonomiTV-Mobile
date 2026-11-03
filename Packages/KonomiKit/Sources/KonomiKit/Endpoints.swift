@@ -157,6 +157,32 @@ enum Endpoints {
         url(baseURL: baseURL, path: ["users", "me"])
     }
 
+    // MARK: - Jikkyo / Niconico
+
+    /// `GET /api/channels/{display_channel_id}/jikkyo`
+    ///
+    /// The route parameter is the channel ID or the `display_channel_id`
+    /// (`ChannelsRouter.GetChannel`); the app works with
+    /// `display_channel_id` everywhere else, so that is what is used here.
+    static func jikkyoWebSocketInfo(baseURL: URL, channelID: String) -> URL {
+        url(baseURL: baseURL, path: ["channels", channelID, "jikkyo"])
+    }
+
+    /// `GET /api/videos/{id}/jikkyo` (past log comments of a recorded program).
+    static func pastComments(baseURL: URL, videoID: Int) -> URL {
+        url(baseURL: baseURL, path: ["videos", String(videoID), "jikkyo"])
+    }
+
+    /// `GET /api/niconico/auth` (needs the bearer token).
+    static func niconicoAuth(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["niconico", "auth"])
+    }
+
+    /// `DELETE /api/niconico/logout` (needs the bearer token).
+    static func niconicoLogout(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["niconico", "logout"])
+    }
+
     // MARK: - Images
 
     static func logo(baseURL: URL, channelID: String) -> URL {

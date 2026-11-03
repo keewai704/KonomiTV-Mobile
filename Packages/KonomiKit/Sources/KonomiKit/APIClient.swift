@@ -293,6 +293,51 @@ public struct APIClient: Sendable {
         try await perform(makeRequest(path: ["users", "me"]), as: User.self)
     }
 
+    // MARK: - Jikkyo (Niconico comments)
+
+    /// WebSocket endpoints for a channel's live comments
+    /// (`GET /api/channels/{display_channel_id}/jikkyo`).
+    ///
+    /// The bearer token is optional here: when it is set the server also returns
+    /// a Nicolive watch session URL (if a Niconico account is linked and a
+    /// program is on air), which the app uses instead of NX-Jikkyo when
+    /// `prefer_posting_to_nicolive` is on.
+    public func jikkyoWebSocketInfo(channelID: String) async throws -> JikkyoWebSocketInfo {
+        try await perform(
+            makeRequest(path: ["channels", channelID, "jikkyo"]),
+            as: JikkyoWebSocketInfo.self
+        )
+    }
+
+    /// Past log comments of a recorded program
+    /// (`GET /api/videos/{id}/jikkyo`).
+    ///
+    /// The comments are already converted to the player's format (`time` in
+    /// seconds from the start, `#RRGGBB` colours, top/right/bottom, big /
+    /// medium / small). Filter them with `CommentMuteFilter` before showing.
+    public func pastComments(videoID: Int) async throws -> JikkyoComments {
+        try await perform(
+            makeRequest(path: ["videos", String(videoID), "jikkyo"]),
+            as: JikkyoComments.self
+        )
+    }
+
+    /// Niconico OAuth authorization URL (`GET /api/niconico/auth`).
+    ///
+    /// Needs the bearer token: the URL carries the logged in user's session so
+    /// the server can link the Niconico account to it. Open the URL in a browser
+    /// or `ASWebAuthenticationSession`; after the user approves, Niconico
+    /// redirects to the server's callback which finishes the link and redirects
+    /// to `{client}/settings/jikkyo`.
+    public func niconicoAuthURL() async throws -> NiconicoAuthURL {
+        try await perform(makeRequest(path: ["niconico", "auth"]), as: NiconicoAuthURL.self)
+    }
+
+    /// Unlinks the Niconico account (`DELETE /api/niconico/logout`).
+    public func unlinkNiconico() async throws {
+        _ = try await sendRaw(makeRequest(path: ["niconico", "logout"], method: "DELETE"))
+    }
+
     // MARK: - Recorded playback
 
     /// Keeps a recorded-playback session alive (`PUT .../keep-alive`).

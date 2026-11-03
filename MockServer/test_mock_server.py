@@ -7,9 +7,13 @@ Run from the MockServer directory:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import http.client
 import json
 import os
+import socket
+import struct
 import threading
 import time
 import unittest
@@ -1250,6 +1254,534 @@ class MockServerMutationTestCase(unittest.TestCase):
         status, _, payload = self.get_json("/api/videos?order=desc&page=1")
         self.assertEqual(status, 200)
         self.assertEqual(payload["total"], 35)
+
+
+# ---------------------------------------------------------------------------
+# ニコニコ実況 (WebSocket) / ニコニコ OAuth
+# ---------------------------------------------------------------------------
+
+class WebSocketTestClient:
+    """Tiny RFC 6455 client (stdlib only) used by the jikkyo tests.
+
+    Client frames must be masked, so every frame written here is.
+    """
+
+    OPCODE_CONTINUATION = 0x0
+    OPCODE_TEXT = 0x1
+    OPCODE_CLOSE = 0x8
+    OPCODE_PING = 0x9
+    OPCODE_PONG = 0xA
+
+    def __init__(self, host: str, port: int, path: str, timeout: float = 10.0) -> None:
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        self.buffer = b""
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            "GET " + path + " HTTP/1.1\r\n"
+            "Host: " + host + ":" + str(port) + "\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Key: " + key + "\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        self.sock.sendall(request.encode("ascii"))
+
+        head = self._read_until(b"\r\n\r\n").decode("latin-1")
+        status_line = head.split("\r\n")[0]
+        self.status = int(status_line.split(" ")[1])
+        expected = base64.b64encode(
+            hashlib.sha1((key + mock_server.WS_GUID).encode("ascii")).digest()
+        ).decode("ascii")
+        if "Sec-WebSocket-Accept: " + expected not in head:
+            raise RuntimeError("invalid Sec-WebSocket-Accept: " + head)
+
+    # -- low level ---------------------------------------------------------
+
+    def _read_until(self, marker: bytes) -> bytes:
+        while marker not in self.buffer:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise RuntimeError("connection closed during the handshake")
+            self.buffer += chunk
+        head, _, self.buffer = self.buffer.partition(marker)
+        return head
+
+    def _read_exact(self, size: int) -> bytes:
+        while len(self.buffer) < size:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise RuntimeError("connection closed")
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:size], self.buffer[size:]
+        return data
+
+    def _send_frame(self, opcode: int, payload: bytes = b"") -> None:
+        frame = bytearray([0x80 | opcode])
+        length = len(payload)
+        if length < 126:
+            frame.append(0x80 | length)
+        elif length < 65536:
+            frame.append(0x80 | 126)
+            frame.extend(struct.pack(">H", length))
+        else:
+            frame.append(0x80 | 127)
+            frame.extend(struct.pack(">Q", length))
+        mask = os.urandom(4)
+        frame.extend(mask)
+        frame.extend(bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload)))
+        self.sock.sendall(bytes(frame))
+
+    def send_text(self, text: str) -> None:
+        self._send_frame(self.OPCODE_TEXT, text.encode("utf-8"))
+
+    def send_json(self, payload) -> None:
+        self.send_text(json.dumps(payload, ensure_ascii=False))
+
+    def recv_frame(self):
+        header = self._read_exact(2)
+        first, second = header[0], header[1]
+        opcode = first & 0x0F
+        length = second & 0x7F
+        if length == 126:
+            length = struct.unpack(">H", self._read_exact(2))[0]
+        elif length == 127:
+            length = struct.unpack(">Q", self._read_exact(8))[0]
+        payload = self._read_exact(length) if length else b""
+        return opcode, payload
+
+    def recv_text(self, limit: int = 200):
+        """Next text payload, or None once the server closed the connection."""
+        for _ in range(limit):
+            opcode, payload = self.recv_frame()
+            if opcode == self.OPCODE_PING:
+                # 実クライアントと同じく pong を返す
+                self._send_frame(self.OPCODE_PONG, payload)
+                continue
+            if opcode == self.OPCODE_PONG:
+                continue
+            if opcode == self.OPCODE_CLOSE:
+                return None
+            return payload.decode("utf-8")
+        raise RuntimeError("no text frame received")
+
+    def recv_json(self, limit: int = 200):
+        text = self.recv_text(limit)
+        if text is None:
+            return None
+        return json.loads(text)
+
+    def recv_until(self, predicate, limit: int = 60):
+        for _ in range(limit):
+            payload = self.recv_json()
+            if payload is None:
+                return None
+            if predicate(payload):
+                return payload
+        return None
+
+    def close(self) -> None:
+        try:
+            self._send_frame(self.OPCODE_CLOSE, struct.pack(">H", 1000))
+        except OSError:
+            pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+class JikkyoMockTestCase(unittest.TestCase):
+    """ニコニコ実況のモック (REST / WebSocket / Niconico OAuth)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = mock_server.create_server("127.0.0.1", 0)
+        cls.host, cls.port = cls.server.server_address[:2]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    # -- helpers -----------------------------------------------------------
+
+    def request(self, method: str, path: str, body: bytes | None = None,
+                headers: dict | None = None):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            hdrs = {"Accept": "*/*"}
+            if headers:
+                hdrs.update(headers)
+            conn.request(method, path, body=body, headers=hdrs)
+            response = conn.getresponse()
+            data = response.read()
+            return response.status, dict(response.getheaders()), data
+        finally:
+            conn.close()
+
+    def get_json(self, path: str, headers: dict | None = None):
+        status, response_headers, data = self.request("GET", path, headers=headers)
+        return status, response_headers, json.loads(data.decode("utf-8"))
+
+    def stats(self) -> dict:
+        status, _, payload = self.get_json("/__mock/stats")
+        self.assertEqual(status, 200)
+        return payload
+
+    def reset(self) -> None:
+        status, _, _ = self.request("POST", "/__mock/reset")
+        self.assertEqual(status, 200)
+
+    def connect(self, path: str) -> WebSocketTestClient:
+        return WebSocketTestClient(self.host, self.port, path)
+
+    # -- REST --------------------------------------------------------------
+
+    def test_channel_jikkyo_returns_mock_websocket_urls(self) -> None:
+        status, _, payload = self.get_json("/api/channels/gr011/jikkyo")
+        self.assertEqual(status, 200)
+        for field in (
+            "watch_session_url", "nicolive_watch_session_url",
+            "nicolive_watch_session_error", "comment_session_url",
+            "is_nxjikkyo_exclusive",
+        ):
+            self.assertIn(field, payload)
+
+        base = "ws://127.0.0.1:" + str(self.port)
+        self.assertEqual(
+            payload["watch_session_url"], base + "/__mock/jikkyo/watch/gr011"
+        )
+        self.assertEqual(
+            payload["comment_session_url"], base + "/__mock/jikkyo/comment/gr011"
+        )
+        self.assertIsNone(payload["nicolive_watch_session_url"])
+        self.assertIsNone(payload["nicolive_watch_session_error"])
+        self.assertFalse(payload["is_nxjikkyo_exclusive"])
+
+        # 通常の id (NID32736-SID1024) でも引ける
+        status, _, by_id = self.get_json("/api/channels/NID32736-SID1024/jikkyo")
+        self.assertEqual(status, 200)
+        self.assertIn("/__mock/jikkyo/watch/", by_id["watch_session_url"])
+
+        status, _, _ = self.request("GET", "/api/channels/zz999/jikkyo")
+        self.assertEqual(status, 422)
+
+    def test_video_jikkyo_past_log(self) -> None:
+        status, _, payload = self.get_json("/api/videos/1/jikkyo")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["is_success"])
+        self.assertEqual(payload["detail"], "Success")
+        comments = payload["comments"]
+        self.assertEqual(len(comments), mock_server.JIKKYO_PAST_COMMENT_COUNT)
+
+        status, _, program = self.get_json("/api/videos/1")
+        duration = program["recorded_video"]["duration"]
+
+        times = []
+        for comment in comments:
+            self.assertIn(comment["type"], ("top", "right", "bottom"))
+            self.assertIn(comment["size"], ("big", "medium", "small"))
+            self.assertRegex(comment["color"], r"^#[0-9A-F]{6}$")
+            self.assertTrue(comment["text"])
+            self.assertTrue(comment["author"])
+            self.assertGreater(comment["time"], 0)
+            self.assertLess(comment["time"], duration)
+            times.append(comment["time"])
+        self.assertEqual(times, sorted(times))
+
+        # 色付き・上固定・大きいコメントが混ざっている
+        self.assertIn("top", {c["type"] for c in comments})
+        self.assertIn("right", {c["type"] for c in comments})
+        self.assertIn("big", {c["size"] for c in comments})
+        self.assertIn("#F02840", {c["color"] for c in comments})
+        # 露骨な表現 (組み込みのミュート対象) も 1 件は入っている
+        self.assertTrue(any("エッチ" in c["text"] for c in comments))
+
+        status, _, _ = self.request("GET", "/api/videos/9999/jikkyo")
+        self.assertEqual(status, 404)
+
+    # -- WebSocket ---------------------------------------------------------
+
+    def test_watch_session_start_watching(self) -> None:
+        client = self.connect("/__mock/jikkyo/watch/gr011")
+        try:
+            self.assertEqual(client.status, 101)
+            client.send_json({"type": "startWatching", "data": {"reconnect": False}})
+
+            seat = client.recv_json()
+            self.assertIsNotNone(seat)
+            self.assertEqual(seat["type"], "seat")
+            self.assertEqual(
+                seat["data"]["keepIntervalSec"],
+                mock_server.JIKKYO_SEAT_KEEP_INTERVAL_SEC,
+            )
+
+            room = client.recv_json()
+            self.assertIsNotNone(room)
+            self.assertEqual(room["type"], "room")
+            data = room["data"]
+            self.assertEqual(data["threadId"], "mock-thread-gr011")
+            self.assertEqual(data["yourPostKey"], mock_server.JIKKYO_MOCK_USER_KEY)
+            # コメントセッションの URL がモックサーバー自身を指している
+            self.assertEqual(
+                data["messageServer"]["uri"],
+                "ws://127.0.0.1:" + str(self.port) + "/__mock/jikkyo/comment/gr011",
+            )
+            # vposBaseTime は ISO 8601 (+09:00)
+            self.assertTrue(data["vposBaseTime"].endswith("+09:00"))
+
+            # keepSeat を送ってもセッションが切れない
+            client.send_json({"type": "keepSeat"})
+            client.send_json({"type": "pong"})
+
+            stats = self.stats()
+            self.assertGreaterEqual(stats["jikkyo_watch_total"], 1)
+            self.assertGreaterEqual(stats["jikkyo_watch_active"], 1)
+            self.assertGreaterEqual(stats["jikkyo_keep_seat_count"], 1)
+        finally:
+            client.close()
+
+    def test_comment_session_streams_comments(self) -> None:
+        client = self.connect("/__mock/jikkyo/comment/gr011")
+        try:
+            self.assertEqual(client.status, 101)
+            # クライアントはスレッドリクエストを送らないとコメントを受け取れない
+            client.send_text(json.dumps([
+                {"ping": {"content": "rs:0"}},
+                {"ping": {"content": "ps:0"}},
+                {
+                    "thread": {
+                        "version": "20061206",
+                        "thread": "mock-thread-gr011",
+                        "threadkey": "nicolive:mock-user",
+                        "user_id": "",
+                        "res_from": -100,
+                    }
+                },
+                {"ping": {"content": "pf:0"}},
+                {"ping": {"content": "rf:0"}},
+            ]))
+
+            thread = client.recv_json()
+            self.assertIsNotNone(thread)
+            self.assertEqual(thread["thread"]["resultcode"], 0)
+            self.assertEqual(thread["thread"]["thread"], "mock-thread-gr011")
+
+            # 接続直後に過去コメントがまとめて送られてくる
+            history = []
+            while True:
+                message = client.recv_json()
+                self.assertIsNotNone(message)
+                if message.get("ping", {}).get("content") == "rf:0":
+                    break
+                self.assertIn("chat", message)
+                history.append(message["chat"])
+            self.assertEqual(len(history), mock_server.JIKKYO_INITIAL_COMMENT_COUNT)
+
+            for chat in history:
+                for field in (
+                    "no", "thread", "vpos", "date", "mail", "user_id",
+                    "content", "anonymity", "yourpost",
+                ):
+                    self.assertIn(field, chat)
+
+            mails = {chat["mail"] for chat in history}
+            self.assertTrue(any("big" in mail for mail in mails))
+            self.assertTrue(any("ue" in mail for mail in mails))
+            self.assertTrue(any(chat["content"] == "エッチな話をしよう" for chat in history))
+
+            # rf:0 のあとは 1 秒ごとに新着コメントが流れ続ける
+            live = client.recv_json()
+            self.assertIsNotNone(live)
+            self.assertIn("chat", live)
+            self.assertGreater(live["chat"]["no"], history[-1]["no"])
+            self.assertEqual(live["chat"]["thread"], "mock-thread-gr011")
+
+            stats = self.stats()
+            self.assertGreaterEqual(stats["jikkyo_comment_total"], 1)
+            self.assertGreaterEqual(stats["jikkyo_comment_active"], 1)
+        finally:
+            client.close()
+
+    def test_posted_comment_is_broadcast_to_comment_session(self) -> None:
+        comment_client = self.connect("/__mock/jikkyo/comment/gr011")
+        watch_client = self.connect("/__mock/jikkyo/watch/gr011")
+        try:
+            comment_client.send_json([{"thread": {"version": "20061206", "thread": "", "user_id": "", "res_from": -100}}])
+            thread = comment_client.recv_json()
+            self.assertEqual(thread["thread"]["resultcode"], 0)
+            # rf:0 まで読み飛ばす (その後は新着コメントが流れてくる)
+            while True:
+                message = comment_client.recv_json()
+                self.assertIsNotNone(message)
+                if message.get("ping", {}).get("content") == "rf:0":
+                    break
+
+            watch_client.send_json({"type": "startWatching", "data": {"reconnect": False}})
+            self.assertEqual(watch_client.recv_json()["type"], "seat")
+            self.assertEqual(watch_client.recv_json()["type"], "room")
+
+            watch_client.send_json({
+                "type": "postComment",
+                "data": {
+                    "text": "モックへの投稿テスト",
+                    "color": "red",
+                    "position": "naka",
+                    "size": "medium",
+                    "vpos": 1234,
+                    "isAnonymous": True,
+                },
+            })
+
+            result = watch_client.recv_until(
+                lambda payload: payload.get("type") == "postCommentResult"
+            )
+            self.assertIsNotNone(result)
+            self.assertEqual(result["data"]["chat"]["content"], "モックへの投稿テスト")
+            self.assertEqual(result["data"]["chat"]["yourpost"], 1)
+
+            # 同じチャンネルのコメントセッションにも流れてくる
+            broadcast = comment_client.recv_until(
+                lambda payload: payload.get("chat", {}).get("content") == "モックへの投稿テスト"
+            )
+            self.assertIsNotNone(broadcast)
+            self.assertEqual(broadcast["chat"]["user_id"], mock_server.JIKKYO_MOCK_USER_KEY)
+            self.assertEqual(broadcast["chat"]["yourpost"], 1)
+            self.assertEqual(broadcast["chat"]["mail"], "184 naka medium red")
+
+            stats = self.stats()
+            self.assertIn("モックへの投稿テスト", stats["jikkyo_posted_comments"])
+        finally:
+            watch_client.close()
+            comment_client.close()
+
+    def test_jikkyo_stats_and_reset(self) -> None:
+        client = self.connect("/__mock/jikkyo/watch/bs101")
+        try:
+            client.send_json({"type": "startWatching", "data": {"reconnect": False}})
+            self.assertEqual(client.recv_json()["type"], "seat")
+            self.assertEqual(client.recv_json()["type"], "room")
+        finally:
+            client.close()
+
+        stats = self.stats()
+        for field in (
+            "jikkyo_watch_active", "jikkyo_watch_total",
+            "jikkyo_comment_active", "jikkyo_comment_total",
+            "jikkyo_keep_seat_count", "jikkyo_posted_comments",
+            "niconico_authorize_count", "niconico_link_count", "niconico_unlink_count",
+        ):
+            self.assertIn(field, stats)
+        self.assertGreaterEqual(stats["jikkyo_watch_total"], 1)
+
+        self.reset()
+        reset_stats = self.stats()
+        self.assertEqual(reset_stats["jikkyo_watch_total"], 0)
+        self.assertEqual(reset_stats["jikkyo_comment_total"], 0)
+        self.assertEqual(reset_stats["jikkyo_posted_comments"], [])
+        self.assertEqual(reset_stats["niconico_authorize_count"], 0)
+        self.assertEqual(reset_stats["niconico_link_count"], 0)
+        self.assertEqual(reset_stats["niconico_unlink_count"], 0)
+
+        # リセット後もエンドポイントは動き続ける
+        status, _, payload = self.get_json("/api/channels/gr011/jikkyo")
+        self.assertEqual(status, 200)
+        self.assertIn("/__mock/jikkyo/watch/gr011", payload["watch_session_url"])
+
+    # -- Niconico OAuth ----------------------------------------------------
+
+    def test_niconico_oauth_link_and_unlink(self) -> None:
+        admin_headers = {"Authorization": "Bearer " + mock_server.MOCK_ACCESS_TOKEN}
+
+        status, _, me = self.get_json("/api/users/me", headers=admin_headers)
+        self.assertEqual(status, 200)
+        self.assertIsNone(me["niconico_user_id"])
+
+        status, _, _ = self.request("GET", "/api/niconico/auth")
+        self.assertEqual(status, 401)
+
+        status, _, payload = self.get_json("/api/niconico/auth", headers=admin_headers)
+        self.assertEqual(status, 200)
+        self.assertIn("authorization_url", payload)
+        auth_url = payload["authorization_url"]
+        self.assertTrue(auth_url.startswith("http://127.0.0.1:" + str(self.port)))
+        self.assertIn("/__mock/niconico/authorize?", auth_url)
+        self.assertIn("state=", auth_url)
+
+        # 認可ページはすぐにサーバーのコールバックへリダイレクトする
+        path = auth_url.split("://", 1)[1]
+        path = path[path.index("/"):]
+        status, headers, _ = self.request("GET", path)
+        self.assertEqual(status, 302)
+        location = headers.get("Location", "")
+        self.assertTrue(location.startswith("/api/niconico/callback?"))
+        self.assertIn("client=" + quote("http://127.0.0.1:" + str(self.port) + "/", safe=""), location)
+        self.assertIn("user_access_token=" + mock_server.MOCK_ACCESS_TOKEN, location)
+        self.assertIn("code=", location)
+
+        # コールバックでニコニコアカウントが紐づく
+        status, headers, body = self.request("GET", location)
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers.get("Content-Type", ""))
+        html = body.decode("utf-8")
+        self.assertIn("/settings/jikkyo", html)
+        self.assertIn("Success", html)
+
+        status, _, me = self.get_json("/api/users/me", headers=admin_headers)
+        self.assertEqual(me["niconico_user_id"], mock_server.MOCK_NICONICO_USER_ID)
+        self.assertEqual(me["niconico_user_name"], mock_server.MOCK_NICONICO_USER_NAME)
+        self.assertIs(me["niconico_user_premium"], mock_server.MOCK_NICONICO_USER_PREMIUM)
+
+        stats = self.stats()
+        self.assertGreaterEqual(stats["niconico_authorize_count"], 1)
+        self.assertGreaterEqual(stats["niconico_link_count"], 1)
+
+        # 連携解除 (実サーバーと同じく DELETE のみ)
+        status, _, _ = self.request("DELETE", "/api/niconico/logout")
+        self.assertEqual(status, 401)
+        status, _, _ = self.request("DELETE", "/api/niconico/logout", headers=admin_headers)
+        self.assertEqual(status, 204)
+        status, _, me = self.get_json("/api/users/me", headers=admin_headers)
+        self.assertIsNone(me["niconico_user_id"])
+        self.assertIsNone(me["niconico_user_name"])
+        self.assertIsNone(me["niconico_user_premium"])
+        self.assertGreaterEqual(self.stats()["niconico_unlink_count"], 1)
+
+    def test_niconico_callback_rejects_bad_token(self) -> None:
+        status, _, body = self.request(
+            "GET",
+            "/api/niconico/callback?client=" + quote("http://127.0.0.1:" + str(self.port) + "/", safe="")
+            + "&user_access_token=invalid&code=mock-authorization-code",
+        )
+        self.assertEqual(status, 401)
+        self.assertIn("Unauthorized", body.decode("utf-8"))
+        # ユーザーは連携されないまま
+        status, _, me = self.get_json(
+            "/api/users/me",
+            headers={"Authorization": "Bearer " + mock_server.MOCK_ACCESS_TOKEN},
+        )
+        self.assertIsNone(me["niconico_user_id"])
+
+    def test_niconico_authorize_can_deny(self) -> None:
+        admin_headers = {"Authorization": "Bearer " + mock_server.MOCK_ACCESS_TOKEN}
+        status, _, payload = self.get_json("/api/niconico/auth", headers=admin_headers)
+        self.assertEqual(status, 200)
+        auth_url = payload["authorization_url"]
+        path = auth_url.split("://", 1)[1]
+        path = path[path.index("/"):]
+        status, headers, _ = self.request("GET", path + "&deny=1")
+        self.assertEqual(status, 302)
+        location = headers.get("Location", "")
+        self.assertIn("error=access_denied", location)
+
+        status, _, _ = self.request("GET", location)
+        self.assertEqual(status, 401)
+        status, _, me = self.get_json("/api/users/me", headers=admin_headers)
+        self.assertIsNone(me["niconico_user_id"])
 
 
 if __name__ == "__main__":

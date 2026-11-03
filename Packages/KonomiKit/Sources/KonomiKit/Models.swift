@@ -991,6 +991,14 @@ public struct User: Codable, Sendable, Hashable, Identifiable {
     public var id: Int
     public var name: String
     public var isAdmin: Bool
+    /// Niconico user ID, set once the user linked a Niconico account
+    /// (`/api/niconico/auth`). `nil` means "not linked".
+    public var niconicoUserID: Int?
+    /// Niconico nickname of the linked account.
+    public var niconicoUserName: String?
+    /// Whether the linked account is a Niconico premium member. Premium is
+    /// required to post fixed (top / bottom) and big comments to Nicolive.
+    public var niconicoUserPremium: Bool?
     public var createdAt: Date?
     public var updatedAt: Date?
 
@@ -998,12 +1006,18 @@ public struct User: Codable, Sendable, Hashable, Identifiable {
         id: Int = 0,
         name: String = "",
         isAdmin: Bool = false,
+        niconicoUserID: Int? = nil,
+        niconicoUserName: String? = nil,
+        niconicoUserPremium: Bool? = nil,
         createdAt: Date? = nil,
         updatedAt: Date? = nil
     ) {
         self.id = id
         self.name = name
         self.isAdmin = isAdmin
+        self.niconicoUserID = niconicoUserID
+        self.niconicoUserName = niconicoUserName
+        self.niconicoUserPremium = niconicoUserPremium
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -1012,6 +1026,9 @@ public struct User: Codable, Sendable, Hashable, Identifiable {
         case id
         case name
         case isAdmin = "is_admin"
+        case niconicoUserID = "niconico_user_id"
+        case niconicoUserName = "niconico_user_name"
+        case niconicoUserPremium = "niconico_user_premium"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -1021,8 +1038,16 @@ public struct User: Codable, Sendable, Hashable, Identifiable {
         id = container.lenient(Int.self, forKey: .id) ?? 0
         name = container.lenient(String.self, forKey: .name) ?? ""
         isAdmin = container.lenient(Bool.self, forKey: .isAdmin) ?? false
+        niconicoUserID = container.lenient(Int.self, forKey: .niconicoUserID)
+        niconicoUserName = container.lenient(String.self, forKey: .niconicoUserName)
+        niconicoUserPremium = container.lenient(Bool.self, forKey: .niconicoUserPremium)
         createdAt = container.lenient(Date.self, forKey: .createdAt)
         updatedAt = container.lenient(Date.self, forKey: .updatedAt)
+    }
+
+    /// True when a Niconico account is linked.
+    public var isNiconicoLinked: Bool {
+        niconicoUserID != nil
     }
 }
 

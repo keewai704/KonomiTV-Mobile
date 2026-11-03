@@ -185,6 +185,99 @@ public struct ClientSettings: Codable, Sendable, Hashable {
         set { values["timetable_dim_shopping_programs"] = .bool(newValue) }
     }
 
+    // MARK: Niconico Jikkyo (comments)
+
+    /// Post to ニコニコ生放送 instead of NX-Jikkyo when a Nicolive program is on
+    /// air and a Niconico account is linked. The web client's default is on.
+    public var preferPostingToNicolive: Bool {
+        get { values["prefer_posting_to_nicolive"]?.boolValue ?? ClientSettingsDefaults.preferPostingToNicolive }
+        set { values["prefer_posting_to_nicolive"] = .bool(newValue) }
+    }
+
+    /// Comment scrolling speed multiplier (1 = the web client's default).
+    public var commentSpeedRate: Double {
+        get { values["comment_speed_rate"]?.numberValue ?? ClientSettingsDefaults.commentSpeedRate }
+        set { values["comment_speed_rate"] = .number(newValue) }
+    }
+
+    /// Comment font size in points (the web client's default is 34 px).
+    public var commentFontSize: Double {
+        get { values["comment_font_size"]?.numberValue ?? ClientSettingsDefaults.commentFontSize }
+        set { values["comment_font_size"] = .number(newValue) }
+    }
+
+    /// Close the comment form after sending. The web client's default is on.
+    public var closeCommentFormAfterSending: Bool {
+        get { values["close_comment_form_after_sending"]?.boolValue ?? ClientSettingsDefaults.closeCommentFormAfterSending }
+        set { values["close_comment_form_after_sending"] = .bool(newValue) }
+    }
+
+    /// Mute comments that contain explicit language. Default is on.
+    public var muteVulgarComments: Bool {
+        get { values["mute_vulgar_comments"]?.boolValue ?? ClientSettingsDefaults.muteVulgarComments }
+        set { values["mute_vulgar_comments"] = .bool(newValue) }
+    }
+
+    /// Mute abusive, discriminatory or politically prejudiced comments.
+    /// Default is on.
+    public var muteAbusiveDiscriminatoryPrejudicedComments: Bool {
+        get {
+            values["mute_abusive_discriminatory_prejudiced_comments"]?.boolValue
+                ?? ClientSettingsDefaults.muteAbusiveDiscriminatoryPrejudicedComments
+        }
+        set { values["mute_abusive_discriminatory_prejudiced_comments"] = .bool(newValue) }
+    }
+
+    /// Mute comments with the large font size. Default is on.
+    public var muteBigSizeComments: Bool {
+        get { values["mute_big_size_comments"]?.boolValue ?? ClientSettingsDefaults.muteBigSizeComments }
+        set { values["mute_big_size_comments"] = .bool(newValue) }
+    }
+
+    /// Mute comments fixed above or below the video. Default is off.
+    public var muteFixedComments: Bool {
+        get { values["mute_fixed_comments"]?.boolValue ?? ClientSettingsDefaults.muteFixedComments }
+        set { values["mute_fixed_comments"] = .bool(newValue) }
+    }
+
+    /// Mute coloured comments. Default is off.
+    public var muteColoredComments: Bool {
+        get { values["mute_colored_comments"]?.boolValue ?? ClientSettingsDefaults.muteColoredComments }
+        set { values["mute_colored_comments"] = .bool(newValue) }
+    }
+
+    /// Mute comments with eight or more identical characters in a row.
+    /// Default is off.
+    public var muteConsecutiveSameCharactersComments: Bool {
+        get {
+            values["mute_consecutive_same_characters_comments"]?.boolValue
+                ?? ClientSettingsDefaults.muteConsecutiveSameCharactersComments
+        }
+        set { values["mute_consecutive_same_characters_comments"] = .bool(newValue) }
+    }
+
+    /// Compare muted keywords ignoring full/half width and letter case.
+    /// Default is on.
+    public var muteCommentKeywordsNormalizeAlphanumericWidthCase: Bool {
+        get {
+            values["mute_comment_keywords_normalize_alphanumeric_width_case"]?.boolValue
+                ?? ClientSettingsDefaults.muteCommentKeywordsNormalizeAlphanumericWidthCase
+        }
+        set { values["mute_comment_keywords_normalize_alphanumeric_width_case"] = .bool(newValue) }
+    }
+
+    /// The user's muted keyword list.
+    public var mutedCommentKeywords: [MutedCommentKeyword] {
+        get { typedValue([MutedCommentKeyword].self, forKey: "muted_comment_keywords") ?? [] }
+        set { setTypedValue(newValue, forKey: "muted_comment_keywords") }
+    }
+
+    /// Niconico user IDs whose comments are always muted.
+    public var mutedNiconicoUserIDs: [String] {
+        get { typedValue([String].self, forKey: "muted_niconico_user_ids") ?? [] }
+        set { setTypedValue(newValue, forKey: "muted_niconico_user_ids") }
+    }
+
     // MARK: My List / history mutation
 
     public func isInMylist(type: MylistItem.Kind, id: Int) -> Bool {
@@ -249,6 +342,19 @@ public enum ClientSettingsDefaults {
     public static let tvChannelSortByJikkyoForce = false
     public static let use28HourClock = false
     public static let timetableDimShoppingPrograms = true
+    public static let preferPostingToNicolive = true
+    public static let commentSpeedRate: Double = 1
+    public static let commentFontSize: Double = 34
+    public static let closeCommentFormAfterSending = true
+    public static let muteVulgarComments = true
+    public static let muteAbusiveDiscriminatoryPrejudicedComments = true
+    public static let muteBigSizeComments = true
+    public static let muteFixedComments = false
+    public static let muteColoredComments = false
+    public static let muteConsecutiveSameCharactersComments = false
+    public static let muteCommentKeywordsNormalizeAlphanumericWidthCase = true
+    public static let mutedCommentKeywords: [MutedCommentKeyword] = []
+    public static let mutedNiconicoUserIDs: [String] = []
 }
 
 // MARK: - Sync decision

@@ -14,8 +14,10 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import hashlib
 import json
 import os
+import queue
 import select
 import socket
 import struct
@@ -41,6 +43,26 @@ HLS_PLAYLIST_REPEATS = 10
 # MPEG-TS パケット (188 バイト) x 64 ずつ送る
 TS_PACKET_SIZE = 188
 STREAM_CHUNK_SIZE = TS_PACKET_SIZE * 64
+
+# ニコニコ実況 (モック)
+# 視聴セッションが seat で通知する keepSeat の間隔 (実サーバーと同じ 30 秒)
+JIKKYO_SEAT_KEEP_INTERVAL_SEC = 30
+# モックの視聴セッションが ping を送る間隔 (秒)
+JIKKYO_WATCH_PING_INTERVAL = 5.0
+# コメントセッションが新着コメントを流す間隔 (秒)
+JIKKYO_COMMENT_INTERVAL = 1.0
+# コメントセッションがスレッドリクエストを待つ時間 (秒)
+JIKKYO_THREAD_REQUEST_TIMEOUT = 5.0
+# コメントセッションが接続直後にまとめて送る過去コメントの件数
+JIKKYO_INITIAL_COMMENT_COUNT = 12
+# 録画番組の過去ログコメントの件数
+JIKKYO_PAST_COMMENT_COUNT = 24
+# 投稿されたコメントに付ける vpos (10 ミリ秒単位) の基準
+JIKKYO_MOCK_USER_KEY = "nicolive:mock-user"
+# ニコニコ OAuth 連携で設定されるモックユーザーの情報
+MOCK_NICONICO_USER_ID = 1234567
+MOCK_NICONICO_USER_NAME = "モックニコニコ"
+MOCK_NICONICO_USER_PREMIUM = True
 
 JST = timezone(timedelta(hours=9))
 
@@ -246,6 +268,19 @@ class MockServerState:
         self.settings_put_count = 0
         self.video_delete_count = 0
         self.deleted_video_ids: list[int] = []
+        # ニコニコ実況 (視聴セッション / コメントセッション) の接続カウンタ
+        self.jikkyo_watch_active = 0
+        self.jikkyo_watch_total = 0
+        self.jikkyo_comment_active = 0
+        self.jikkyo_comment_total = 0
+        self.jikkyo_keep_seat_count = 0
+        self.jikkyo_posted_comments: list[str] = []
+        # チャンネルごとのコメントセッション WebSocket (投稿コメントの配信用)
+        self.jikkyo_comment_sockets: dict[str, list] = {}
+        # ニコニコ OAuth 連携の呼び出し回数
+        self.niconico_authorize_count = 0
+        self.niconico_link_count = 0
+        self.niconico_unlink_count = 0
         # 直近にリクエストされた品質・プレイリスト種別 (UI テストの検証用)
         self.last_live_quality: str | None = None
         self.last_video_quality: str | None = None
@@ -293,6 +328,64 @@ class MockServerState:
             self.settings_put_count += 1
             self.client_settings = copy.deepcopy(settings)
 
+    # -- ニコニコ実況 ------------------------------------------------------
+
+    def jikkyo_watch_connected(self) -> None:
+        with self.lock:
+            self.jikkyo_watch_active += 1
+            self.jikkyo_watch_total += 1
+
+    def jikkyo_watch_disconnected(self) -> None:
+        with self.lock:
+            if self.jikkyo_watch_active > 0:
+                self.jikkyo_watch_active -= 1
+
+    def jikkyo_comment_connected(self, channel_id: str, socket_connection) -> None:
+        with self.lock:
+            self.jikkyo_comment_active += 1
+            self.jikkyo_comment_total += 1
+            self.jikkyo_comment_sockets.setdefault(channel_id, []).append(socket_connection)
+
+    def jikkyo_comment_disconnected(self, channel_id: str, socket_connection) -> None:
+        with self.lock:
+            if self.jikkyo_comment_active > 0:
+                self.jikkyo_comment_active -= 1
+            sockets = self.jikkyo_comment_sockets.get(channel_id) or []
+            if socket_connection in sockets:
+                sockets.remove(socket_connection)
+            if not sockets:
+                self.jikkyo_comment_sockets.pop(channel_id, None)
+
+    def record_jikkyo_keep_seat(self) -> None:
+        with self.lock:
+            self.jikkyo_keep_seat_count += 1
+
+    def record_jikkyo_post(self, text: str) -> None:
+        with self.lock:
+            self.jikkyo_posted_comments.append(text)
+
+    def broadcast_jikkyo_chat(self, channel_id: str, payload: dict) -> int:
+        """Send one chat message to every comment session of a channel."""
+        with self.lock:
+            sockets = list(self.jikkyo_comment_sockets.get(channel_id) or [])
+        sent = 0
+        for socket_connection in sockets:
+            if socket_connection.send_json(payload):
+                sent += 1
+        return sent
+
+    def record_niconico_authorize(self) -> None:
+        with self.lock:
+            self.niconico_authorize_count += 1
+
+    def record_niconico_link(self) -> None:
+        with self.lock:
+            self.niconico_link_count += 1
+
+    def record_niconico_unlink(self) -> None:
+        with self.lock:
+            self.niconico_unlink_count += 1
+
     def snapshot(self) -> dict:
         with self.lock:
             return {
@@ -306,6 +399,15 @@ class MockServerState:
                 "last_video_quality": self.last_video_quality,
                 "last_video_playlist_type": self.last_video_playlist_type,
                 "last_video_media_playlist_type": self.last_video_media_playlist_type,
+                "jikkyo_watch_active": self.jikkyo_watch_active,
+                "jikkyo_watch_total": self.jikkyo_watch_total,
+                "jikkyo_comment_active": self.jikkyo_comment_active,
+                "jikkyo_comment_total": self.jikkyo_comment_total,
+                "jikkyo_keep_seat_count": self.jikkyo_keep_seat_count,
+                "jikkyo_posted_comments": list(self.jikkyo_posted_comments),
+                "niconico_authorize_count": self.niconico_authorize_count,
+                "niconico_link_count": self.niconico_link_count,
+                "niconico_unlink_count": self.niconico_unlink_count,
             }
 
 
@@ -616,6 +718,327 @@ def build_channels(channels: dict) -> dict:
     return result
 
 
+
+# ---------------------------------------------------------------------------
+# ニコニコ実況 (コメント) のモックデータ
+# ---------------------------------------------------------------------------
+
+# ニコニコの色コマンド → 16 進数カラーコード (client/src/utils/CommentUtils.ts の
+# color_table と同じ並び。ここではモックで使う色だけを定義する)
+JIKKYO_COLOR_TABLE = {
+    "white": "#FFEAEA",
+    "red": "#F02840",
+    "pink": "#FD7E80",
+    "orange": "#FDA708",
+    "yellow": "#FFE133",
+    "green": "#64DD17",
+    "cyan": "#00D4F5",
+    "blue": "#4763FF",
+    "purple": "#D500F9",
+    "black": "#1E1310",
+}
+
+JIKKYO_POSITION_TABLE = {"ue": "top", "naka": "right", "shita": "bottom"}
+
+# コメントセッションが流すコメントのテンプレート。
+# 色付き・上固定・大きい・小さい・露骨な表現 (組み込みのミュート対象) を一通り含める。
+JIKKYO_COMMENT_TEMPLATES = [
+    {"mail": "184", "content": "こんばんは"},
+    {"mail": "184 red", "content": "赤いコメント"},
+    {"mail": "184 ue", "content": "上に固定されるコメント"},
+    {"mail": "184 big", "content": "大きいコメント"},
+    {"mail": "184 shita small", "content": "下に固定される小さいコメント"},
+    {"mail": "184 green", "content": "緑のコメント"},
+    {"mail": "184", "content": "きたああああ"},
+    # 露骨な表現 (CommentUtils の mute_vulgar_comments に一致する)
+    {"mail": "184", "content": "エッチな話をしよう"},
+    {"mail": "184 blue big", "content": "青くて大きいコメント"},
+    {"mail": "184 orange", "content": "オレンジのコメント"},
+    {"mail": "184", "content": "88888888"},
+    {"mail": "184 ue small", "content": "上固定の小さいコメント"},
+]
+
+# コメントの投稿者 (匿名 ID とニコニコユーザー ID を混ぜる)
+JIKKYO_USER_IDS = ["nicolive:1234567", "AbCdEfGhIjKl", "nicolive:7654321", "ZzYyXxWwVvUu"]
+
+
+def jikkyo_thread_id(channel_id: str) -> str:
+    """Thread ID for a channel. The real server uses the program start time."""
+    return "mock-thread-" + channel_id
+
+
+def parse_comment_mail(mail: str | None) -> dict:
+    """Resolve a Niconico comment command into color / type / size.
+
+    Mirrors CommentUtils.parseCommentCommand(): the first "184" is dropped and
+    the remaining space separated commands are applied in order.
+    """
+    color = "#FFEAEA"
+    position = "right"
+    size = "medium"
+    if mail:
+        for command in mail.replace("184", "", 1).split(" "):
+            if command in JIKKYO_COLOR_TABLE:
+                color = JIKKYO_COLOR_TABLE[command]
+            elif command in JIKKYO_POSITION_TABLE:
+                position = JIKKYO_POSITION_TABLE[command]
+            elif command in ("big", "medium", "small"):
+                size = command
+    return {"color": color, "type": position, "size": size}
+
+
+def build_jikkyo_chat(
+    channel_id: str,
+    index: int,
+    vpos: int,
+    date: float,
+    *,
+    number: int | None = None,
+    mail: str | None = None,
+    content: str | None = None,
+    user_id: str | None = None,
+    your_post: int = 0,
+    premium: int | None = None,
+) -> dict:
+    """One "chat" message of the comment session."""
+    template = JIKKYO_COMMENT_TEMPLATES[index % len(JIKKYO_COMMENT_TEMPLATES)]
+    return {
+        "no": number if number is not None else 4000 + index,
+        "thread": jikkyo_thread_id(channel_id),
+        "vpos": int(vpos),
+        "date": int(date),
+        "date_usec": int((date - int(date)) * 1_000_000),
+        "mail": mail if mail is not None else template["mail"],
+        "user_id": user_id or JIKKYO_USER_IDS[index % len(JIKKYO_USER_IDS)],
+        "content": content if content is not None else template["content"],
+        "premium": premium,
+        "anonymity": 1,
+        "yourpost": your_post,
+        "score": 0,
+    }
+
+
+def build_jikkyo_past_comments(duration: float) -> list[dict]:
+    """Past log comments spread over a recording (GET /api/videos/{id}/jikkyo)."""
+    length = float(duration or 0)
+    if length <= 0:
+        length = float(JIKKYO_PAST_COMMENT_COUNT * 60)
+    step = length / (JIKKYO_PAST_COMMENT_COUNT + 1)
+    comments: list[dict] = []
+    for index in range(JIKKYO_PAST_COMMENT_COUNT):
+        template = JIKKYO_COMMENT_TEMPLATES[index % len(JIKKYO_COMMENT_TEMPLATES)]
+        style = parse_comment_mail(template["mail"])
+        comments.append({
+            "time": round(step * (index + 1), 2),
+            "type": style["type"],
+            "size": style["size"],
+            "color": style["color"],
+            "author": JIKKYO_USER_IDS[index % len(JIKKYO_USER_IDS)],
+            "text": template["content"],
+        })
+    return comments
+
+
+# ---------------------------------------------------------------------------
+# WebSocket (RFC 6455)
+# ---------------------------------------------------------------------------
+
+# RFC 6455 のハンドシェイクで使う固定 GUID
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+class WebSocketConnection:
+    """Server side of one WebSocket connection (text frames only).
+
+    Only what the jikkyo mock needs is implemented: the RFC 6455 handshake,
+    masked client frames, continuation frames, ping/pong and close. Incoming
+    text messages are pushed onto the messages queue by a reader thread so the
+    session code can also do periodic work (pings, new comments) on its own
+    thread.
+    """
+
+    OPCODE_CONTINUATION = 0x0
+    OPCODE_TEXT = 0x1
+    OPCODE_BINARY = 0x2
+    OPCODE_CLOSE = 0x8
+    OPCODE_PING = 0x9
+    OPCODE_PONG = 0xA
+
+    def __init__(self, handler) -> None:
+        self.rfile = handler.rfile
+        self.wfile = handler.wfile
+        self.write_lock = threading.Lock()
+        self.closed = False
+        self.messages = queue.Queue()
+        self.reader = threading.Thread(target=self._reader_loop, daemon=True)
+        self.reader.start()
+
+    # -- handshake ---------------------------------------------------------
+
+    @staticmethod
+    def accept_key(key: str) -> str:
+        digest = hashlib.sha1((key + WS_GUID).encode("ascii")).digest()
+        return base64.b64encode(digest).decode("ascii")
+
+    @classmethod
+    def upgrade(cls, handler):
+        """Complete the handshake; returns None (and sends 400) on failure."""
+        key = handler.headers.get("Sec-WebSocket-Key")
+        upgrade = (handler.headers.get("Upgrade") or "").lower()
+        if not key or upgrade != "websocket":
+            handler._send_json({"detail": "Expected a WebSocket upgrade request"}, 400)
+            return None
+
+        accept = cls.accept_key(key.strip())
+        # BaseHTTPRequestHandler の send_response() は HTTP/1.0 で書いてしまうので、
+        # ハンドシェイクのレスポンスは直接書き込む。
+        handler.wfile.write(
+            (
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " + accept + "\r\n"
+                "\r\n"
+            ).encode("ascii")
+        )
+        handler.wfile.flush()
+        # ハンドラが戻ったらソケットを閉じる
+        handler.close_connection = True
+        return cls(handler)
+
+    # -- receiving ---------------------------------------------------------
+
+    def _read_exact(self, size: int) -> bytes:
+        chunks = []
+        remaining = size
+        while remaining > 0:
+            chunk = self.rfile.read(remaining)
+            if not chunk:
+                raise EOFError("socket closed")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _read_frame(self):
+        header = self._read_exact(2)
+        first, second = header[0], header[1]
+        fin = bool(first & 0x80)
+        opcode = first & 0x0F
+        masked = bool(second & 0x80)
+        length = second & 0x7F
+        if length == 126:
+            length = struct.unpack(">H", self._read_exact(2))[0]
+        elif length == 127:
+            length = struct.unpack(">Q", self._read_exact(8))[0]
+        mask = self._read_exact(4) if masked else b""
+        payload = self._read_exact(length) if length else b""
+        if masked and mask:
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        return fin, opcode, payload
+
+    def _reader_loop(self) -> None:
+        buffered = bytearray()
+        buffered_opcode = None
+        try:
+            while not self.closed:
+                fin, opcode, payload = self._read_frame()
+                if opcode == self.OPCODE_CLOSE:
+                    break
+                if opcode == self.OPCODE_PING:
+                    self._send_frame(self.OPCODE_PONG, payload)
+                    continue
+                if opcode == self.OPCODE_PONG:
+                    continue
+                if opcode == self.OPCODE_CONTINUATION:
+                    buffered.extend(payload)
+                    if fin and buffered_opcode is not None:
+                        self.messages.put(("text", buffered.decode("utf-8", "replace")))
+                        buffered = bytearray()
+                        buffered_opcode = None
+                    continue
+                if opcode in (self.OPCODE_TEXT, self.OPCODE_BINARY):
+                    if fin:
+                        self.messages.put(("text", payload.decode("utf-8", "replace")))
+                    else:
+                        buffered = bytearray(payload)
+                        buffered_opcode = opcode
+                    continue
+        except (EOFError, OSError, ValueError):
+            pass
+        finally:
+            self.closed = True
+            self.messages.put(("close", ""))
+
+    def next_message(self, timeout: float = 0.2):
+        """Next ("text" | "close", payload) message, or None on timeout."""
+        try:
+            return self.messages.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    # -- sending -----------------------------------------------------------
+
+    def _send_frame(self, opcode: int, payload: bytes = b"") -> bool:
+        header = bytearray()
+        header.append(0x80 | opcode)
+        length = len(payload)
+        if length < 126:
+            header.append(length)
+        elif length < 65536:
+            header.append(126)
+            header.extend(struct.pack(">H", length))
+        else:
+            header.append(127)
+            header.extend(struct.pack(">Q", length))
+
+        with self.write_lock:
+            if self.closed:
+                return False
+            try:
+                self.wfile.write(bytes(header) + payload)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                self.closed = True
+                return False
+        return True
+
+    def send_text(self, text: str) -> bool:
+        return self._send_frame(self.OPCODE_TEXT, text.encode("utf-8"))
+
+    def send_json(self, payload) -> bool:
+        return self.send_text(json.dumps(payload, ensure_ascii=False))
+
+    def send_ping(self, payload: bytes = b"jikkyo") -> bool:
+        return self._send_frame(self.OPCODE_PING, payload)
+
+    def close(self, code: int = 1000) -> None:
+        if not self.closed:
+            self._send_frame(self.OPCODE_CLOSE, struct.pack(">H", code))
+        self.closed = True
+
+
+def parse_thread_request(text: str):
+    """Extract the thread object from a comment session request.
+
+    The web client sends a JSON array of pings that wraps the thread request:
+    [{"ping":{"content":"rs:0"}}, ..., {"thread":{...}}, ...].
+    """
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(payload, dict):
+        entries = [payload]
+    elif isinstance(payload, list):
+        entries = payload
+    else:
+        return None
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("thread"), dict):
+            return entry["thread"]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # HTTP ハンドラ
 # ---------------------------------------------------------------------------
@@ -740,6 +1163,20 @@ class MockHandler(BaseHTTPRequestHandler):
             self._send_json(state.snapshot())
             return
 
+        # ニコニコ実況の WebSocket (アプリはこの URL に直接接続する)
+        if path.startswith("/__mock/jikkyo/watch/"):
+            self._serve_jikkyo_watch(path[len("/__mock/jikkyo/watch/"):], state)
+            return
+
+        if path.startswith("/__mock/jikkyo/comment/"):
+            self._serve_jikkyo_comment(path[len("/__mock/jikkyo/comment/"):], state)
+            return
+
+        # ニコニコ OAuth のモック認可ページ (すぐにコールバックへリダイレクトする)
+        if path == "/__mock/niconico/authorize":
+            self._handle_niconico_authorize(query)
+            return
+
         if not path.startswith("/api"):
             self._not_found()
             return
@@ -759,6 +1196,18 @@ class MockHandler(BaseHTTPRequestHandler):
 
         if len(parts) == 3 and parts[0] == "channels" and parts[2] == "logo":
             self._serve_channel_logo(parts[1], fixtures)
+            return
+
+        if len(parts) == 3 and parts[0] == "channels" and parts[2] == "jikkyo":
+            self._handle_channel_jikkyo(parts[1], fixtures)
+            return
+
+        if parts == ["niconico", "auth"]:
+            self._handle_niconico_auth(fixtures, state)
+            return
+
+        if parts == ["niconico", "callback"]:
+            self._handle_niconico_callback(query, fixtures, state)
             return
 
         if parts[0] == "videos":
@@ -902,6 +1351,11 @@ class MockHandler(BaseHTTPRequestHandler):
         fixtures = self.server.fixtures  # type: ignore[attr-defined]
         state = self.server.state  # type: ignore[attr-defined]
 
+        # /api/niconico/logout: ニコニコアカウントとの連携を解除する
+        if parts == ["niconico", "logout"]:
+            self._handle_niconico_logout(fixtures, state)
+            return
+
         # /api/videos/{video_id}: 管理者のみ。削除した録画番組はプロセスの生存期間中は戻らない。
         if len(parts) == 2 and parts[0] == "videos":
             user = self._require_admin(fixtures)
@@ -986,6 +1440,11 @@ class MockHandler(BaseHTTPRequestHandler):
             filtered = self._ordered_videos(filtered, self._order_param(query, allow_ids=False))
             page = self._page_param(query)
             self._send_json(self._paginate(filtered, len(filtered), page))
+            return
+
+        # /videos/{video_id}/jikkyo (過去ログコメント)
+        if len(parts) == 3 and parts[2] == "jikkyo":
+            self._handle_video_jikkyo(parts[1], fixtures)
             return
 
         # /videos/{video_id}/thumbnail/tiled (seek-bar tile sheet)
@@ -1666,6 +2125,413 @@ class MockHandler(BaseHTTPRequestHandler):
             delay = target - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
+
+    # -- ニコニコ実況 (REST) ------------------------------------------------
+
+    def _http_base_url(self) -> str:
+        port = self.server.server_address[1]
+        return "http://127.0.0.1:" + str(port)
+
+    def _ws_base_url(self) -> str:
+        port = self.server.server_address[1]
+        return "ws://127.0.0.1:" + str(port)
+
+    def _handle_channel_jikkyo(self, channel_id: str, fixtures: dict) -> None:
+        """チャンネルのニコニコ実況 WebSocket URL (schemas.JikkyoWebSocketInfo).
+
+        実サーバーと同じく、ログイン中 (Authorization ヘッダーあり) でも
+        Nicolive の視聴セッションは返さない。アプリは常に NX-Jikkyo を使う。
+        """
+        channel = find_channel(fixtures["channels"], channel_id)
+        if channel is None:
+            self._unprocessable("Specified display_channel_id was not found")
+            return
+
+        base = self._ws_base_url()
+        self._send_json({
+            "watch_session_url": base + "/__mock/jikkyo/watch/" + channel_id,
+            "nicolive_watch_session_url": None,
+            "nicolive_watch_session_error": None,
+            "comment_session_url": base + "/__mock/jikkyo/comment/" + channel_id,
+            "is_nxjikkyo_exclusive": False,
+        })
+
+    def _handle_video_jikkyo(self, video_id: str, fixtures: dict) -> None:
+        """録画番組の過去ログコメント (schemas.JikkyoComments)."""
+        try:
+            wanted = int(video_id)
+        except (TypeError, ValueError):
+            self._not_found()
+            return
+
+        for program in fixtures["videos"]:
+            if program.get("id") != wanted:
+                continue
+            recorded_video = program.get("recorded_video") or {}
+            duration = recorded_video.get("duration") or program.get("duration") or 0
+            self._send_json({
+                "is_success": True,
+                "comments": build_jikkyo_past_comments(float(duration)),
+                "detail": "Success",
+            })
+            return
+
+        self._not_found()
+
+    # -- ニコニコ実況 (視聴セッション WebSocket) ------------------------------
+
+    def _serve_jikkyo_watch(self, channel_id: str, state: MockServerState) -> None:
+        socket_connection = WebSocketConnection.upgrade(self)
+        if socket_connection is None:
+            return
+
+        state.jikkyo_watch_connected()
+        try:
+            self._run_jikkyo_watch_session(socket_connection, channel_id, state)
+        finally:
+            socket_connection.close()
+            state.jikkyo_watch_disconnected()
+
+    def _run_jikkyo_watch_session(self, socket_connection: WebSocketConnection,
+                                  channel_id: str, state: MockServerState) -> None:
+        """Watch session: startWatching -> seat + room, keepSeat, postComment."""
+        base_time = datetime.now(JST)
+        thread_id = jikkyo_thread_id(channel_id)
+        last_ping = time.monotonic()
+        posted_index = 0
+
+        while not socket_connection.closed:
+            message = socket_connection.next_message(timeout=0.2)
+            if message is not None:
+                kind, text = message
+                if kind == "close":
+                    return
+                try:
+                    payload = json.loads(text)
+                except (TypeError, ValueError):
+                    payload = None
+                if not isinstance(payload, dict):
+                    continue
+
+                message_type = payload.get("type")
+                data = payload.get("data")
+                if not isinstance(data, dict):
+                    data = {}
+
+                if message_type == "startWatching":
+                    # 実際の NX-Jikkyo は seat → room の順で送ってくる
+                    socket_connection.send_json({
+                        "type": "seat",
+                        "data": {
+                            "keepIntervalSec": JIKKYO_SEAT_KEEP_INTERVAL_SEC,
+                            "seatId": "mock-seat",
+                        },
+                    })
+                    socket_connection.send_json({
+                        "type": "room",
+                        "data": {
+                            "vposBaseTime": isoformat(base_time),
+                            "threadId": thread_id,
+                            "messageServer": {
+                                "uri": self._ws_base_url() + "/__mock/jikkyo/comment/" + channel_id,
+                                "type": "websocket",
+                            },
+                            "yourPostKey": JIKKYO_MOCK_USER_KEY,
+                            "roomId": channel_id,
+                        },
+                    })
+                elif message_type == "keepSeat":
+                    state.record_jikkyo_keep_seat()
+                elif message_type == "pong":
+                    # ping への応答。何もしなくてよい
+                    pass
+                elif message_type == "postComment":
+                    posted_index += 1
+                    content = str(data.get("text") or "")
+                    state.record_jikkyo_post(content)
+                    mail_parts = ["184"]
+                    for key in ("position", "size", "color"):
+                        value = data.get(key)
+                        if isinstance(value, str) and value:
+                            mail_parts.append(value)
+                    chat = build_jikkyo_chat(
+                        channel_id,
+                        posted_index,
+                        int(data.get("vpos") or 0),
+                        time.time(),
+                        number=5000 + posted_index,
+                        mail=" ".join(mail_parts),
+                        content=content,
+                        user_id=JIKKYO_MOCK_USER_KEY,
+                        your_post=1,
+                    )
+                    # 投稿できたことを知らせる (実サーバーも chat を返す)
+                    socket_connection.send_json({
+                        "type": "postCommentResult",
+                        "data": {"chat": chat},
+                    })
+                    # 同じチャンネルのコメントセッションにも流す
+                    state.broadcast_jikkyo_chat(channel_id, {"chat": chat})
+
+            now = time.monotonic()
+            if now - last_ping >= JIKKYO_WATCH_PING_INTERVAL:
+                if not socket_connection.send_ping():
+                    return
+                last_ping = now
+
+    # -- ニコニコ実況 (コメントセッション WebSocket) --------------------------
+
+    def _serve_jikkyo_comment(self, channel_id: str, state: MockServerState) -> None:
+        socket_connection = WebSocketConnection.upgrade(self)
+        if socket_connection is None:
+            return
+
+        state.jikkyo_comment_connected(channel_id, socket_connection)
+        try:
+            self._run_jikkyo_comment_session(socket_connection, channel_id)
+        finally:
+            socket_connection.close()
+            state.jikkyo_comment_disconnected(channel_id, socket_connection)
+
+    def _run_jikkyo_comment_session(self, socket_connection: WebSocketConnection,
+                                    channel_id: str) -> None:
+        """Comment session: thread request -> thread + past chats + rf:0, then
+        one new chat every JIKKYO_COMMENT_INTERVAL seconds."""
+        thread_id = jikkyo_thread_id(channel_id)
+
+        # スレッドリクエスト (ping に包まれた thread) を待つ
+        deadline = time.monotonic() + JIKKYO_THREAD_REQUEST_TIMEOUT
+        while not socket_connection.closed and time.monotonic() < deadline:
+            message = socket_connection.next_message(timeout=0.1)
+            if message is None:
+                continue
+            kind, text = message
+            if kind == "close":
+                return
+            thread = parse_thread_request(text)
+            if thread is not None:
+                requested = thread.get("thread")
+                if isinstance(requested, str) and requested:
+                    thread_id = requested
+                break
+
+        socket_connection.send_json({
+            "thread": {
+                "resultcode": 0,
+                "thread": thread_id,
+                "revision": 1,
+                "server_time": int(time.time()),
+                "last_res": 4000,
+                "ticket": "mock-ticket",
+                "comment_count": 0,
+            },
+        })
+
+        # 接続直後にまとめて過去コメントを送る (実サーバーも res_from=-100 で送る)
+        now = time.time()
+        for index in range(JIKKYO_INITIAL_COMMENT_COUNT):
+            socket_connection.send_json({
+                "chat": build_jikkyo_chat(
+                    channel_id,
+                    index,
+                    index * 300,
+                    now - (JIKKYO_INITIAL_COMMENT_COUNT - index) * 3,
+                ),
+            })
+        # rf:0 で過去コメントの送信が完了したことを伝える
+        socket_connection.send_json({"ping": {"content": "rf:0"}})
+
+        # 以降は新着コメントを 1 秒ごとに流し続ける
+        index = JIKKYO_INITIAL_COMMENT_COUNT
+        started = time.time()
+        next_send = time.monotonic() + JIKKYO_COMMENT_INTERVAL
+        while not socket_connection.closed:
+            message = socket_connection.next_message(timeout=0.05)
+            if message is not None and message[0] == "close":
+                return
+
+            current = time.monotonic()
+            if current < next_send:
+                continue
+            index += 1
+            vpos = int((time.time() - started) * 100) + index * 300
+            if not socket_connection.send_json({
+                "chat": build_jikkyo_chat(channel_id, index, vpos, time.time()),
+            }):
+                return
+            next_send = current + JIKKYO_COMMENT_INTERVAL
+
+    # -- ニコニコ OAuth -----------------------------------------------------
+
+    @staticmethod
+    def _encode_oauth_state(payload: dict) -> str:
+        encoded = base64.b64encode(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        # 実サーバーと同じく、末尾の = はリダイレクト時に URL エンコードされるので削除する
+        return encoded.replace("=", "")
+
+    @staticmethod
+    def _decode_oauth_state(value: str) -> dict:
+        padded = value + "=" * (-len(value) % 4)
+        try:
+            decoded = base64.b64decode(padded).decode("utf-8")
+            payload = json.loads(decoded)
+        except (ValueError, TypeError, UnicodeDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _handle_niconico_auth(self, fixtures: dict, state: MockServerState) -> None:
+        """GET /api/niconico/auth: authorization URL issuing API."""
+        if self._require_user(fixtures) is None:
+            return
+
+        state.record_niconico_authorize()
+
+        # 実サーバーは Origin ヘッダーからクライアント URL を決める
+        client_url = (self.headers.get("Origin") or "").rstrip("/")
+        if client_url:
+            client_url += "/"
+        else:
+            client_url = self._http_base_url() + "/"
+
+        oauth_state = self._encode_oauth_state({
+            "server": self._http_base_url() + "/",
+            "client": client_url,
+            "user_access_token": self._bearer_token(),
+        })
+        self._send_json({
+            "authorization_url": (
+                self._http_base_url() + "/__mock/niconico/authorize"
+                "?response_type=code"
+                "&scope=offline_access%20openid%20profile%20user.premium"
+                "&client_id=mock-niconico-client"
+                "&redirect_uri=https://app.konomi.tv/api/redirect/niconico"
+                # state は base64 なので + / = を含みうる。クエリ文字列として安全に渡すため
+                # パーセントエンコードしておく (parse_qs 側でデコードされる)
+                "&state=" + quote(oauth_state, safe="")
+            ),
+        })
+
+    def _handle_niconico_authorize(self, query: dict) -> None:
+        """Mock authorization page: redirects straight to the callback.
+
+        The real Niconico page asks the user for permission and then redirects
+        to https://app.konomi.tv/api/redirect/niconico, which forwards to
+        {server}/api/niconico/callback?client=..&user_access_token=..&code=..
+        """
+        oauth_state = self._decode_oauth_state((query.get("state") or [""])[0])
+        client_url = str(oauth_state.get("client") or (self._http_base_url() + "/"))
+        user_access_token = str(oauth_state.get("user_access_token") or "")
+
+        location = (
+            "/api/niconico/callback"
+            "?client=" + quote(client_url, safe="")
+            + "&user_access_token=" + quote(user_access_token, safe="")
+        )
+        # ?deny=1 でユーザーが連携を拒否したケースを再現できる
+        if (query.get("deny") or [""])[0]:
+            location += "&error=access_denied"
+        else:
+            location += "&code=mock-authorization-code"
+
+        self._send_bytes(
+            b"", "text/plain; charset=utf-8", status=302,
+            extra_headers={"Location": location},
+        )
+
+    def _handle_niconico_callback(self, query: dict, fixtures: dict,
+                                  state: MockServerState) -> None:
+        """GET /api/niconico/callback: links the Niconico account."""
+        client_url = (query.get("client") or [""])[0] or (self._http_base_url() + "/")
+        redirect_to = client_url.rstrip("/") + "/settings/jikkyo"
+        user_access_token = (query.get("user_access_token") or [""])[0]
+        error = (query.get("error") or [None])[0]
+        code = (query.get("code") or [None])[0]
+
+        if error is not None:
+            self._send_oauth_callback_html(
+                status=401,
+                detail="Authorization was denied (" + error + ")",
+                redirect_to=redirect_to,
+            )
+            return
+
+        if code is None:
+            self._send_oauth_callback_html(
+                status=500,
+                detail="Authorization code does not exist",
+                redirect_to=redirect_to,
+            )
+            return
+
+        if user_access_token != MOCK_ACCESS_TOKEN:
+            self._send_oauth_callback_html(
+                status=401,
+                detail="Unauthorized",
+                redirect_to=redirect_to,
+            )
+            return
+
+        user = fixtures["user"]
+        user["niconico_user_id"] = MOCK_NICONICO_USER_ID
+        user["niconico_user_name"] = MOCK_NICONICO_USER_NAME
+        user["niconico_user_premium"] = MOCK_NICONICO_USER_PREMIUM
+        state.record_niconico_link()
+
+        self._send_oauth_callback_html(
+            status=200, detail="Success", redirect_to=redirect_to
+        )
+
+    def _handle_niconico_logout(self, fixtures: dict, state: MockServerState) -> None:
+        """DELETE /api/niconico/logout: unlinks the Niconico account."""
+        user = self._require_user(fixtures)
+        if user is None:
+            return
+
+        user["niconico_user_id"] = None
+        user["niconico_user_name"] = None
+        user["niconico_user_premium"] = None
+        state.record_niconico_unlink()
+
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send_oauth_callback_html(self, status: int, detail: str,
+                                  redirect_to: str) -> None:
+        """Mirror of OAuthCallbackResponse: HTML that forwards the result.
+
+        A popup gets a postMessage, a redirect (mobile) gets the result in the
+        URL hash of the client's redirect URL.
+        """
+        callback_data = json.dumps(
+            {"status": status, "detail": detail},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).replace("<", "\\u003C").replace(">", "\\u003E").replace("&", "\\u0026")
+        redirect_json = json.dumps(redirect_to, ensure_ascii=False)
+        target_origin = json.dumps(self._http_base_url())
+        html = (
+            "<!DOCTYPE html>\n"
+            "<html lang=\"ja\">\n"
+            "<head><meta charset=\"utf-8\">\n"
+            "<script>\n"
+            "window.onload = () => {\n"
+            "    if (window.opener) {\n"
+            "        window.opener.postMessage({'KonomiTV-OAuthPopup': " + callback_data + "}, " + target_origin + ");\n"
+            "    } else {\n"
+            "        const callbackData = " + callback_data + ";\n"
+            "        const redirectURL = new URL(" + redirect_json + ");\n"
+            "        redirectURL.hash = new URLSearchParams(callbackData).toString();\n"
+            "        location.href = redirectURL.toString();\n"
+            "    }\n"
+            "};\n"
+            "</script>\n"
+            "<body>KonomiTV Niconico OAuth (" + str(status) + ")</body>\n"
+            "</html>\n"
+        )
+        self._send_bytes(html.encode("utf-8"), "text/html; charset=utf-8", status=status)
 
     def _handle_users_me(self, fixtures: dict) -> None:
         user = self._require_user(fixtures)
