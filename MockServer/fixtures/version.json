@@ -1,0 +1,7 @@
+{
+  "version": "v2.8.0-mock",
+  "latest_version": "v2.8.0",
+  "environment": "Linux",
+  "backend": "Mirakurun",
+  "encoder": "FFmpeg"
+}

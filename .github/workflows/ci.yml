@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package-linux:
+    name: KonomiKit (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.2
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Run Swift package tests
+        working-directory: Packages/KonomiKit
+        run: swift test
+
+  mock-server:
+    name: Mock server (unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run mock server unit tests
+        working-directory: MockServer
+        run: python3 -m unittest discover -v
+
+  ios-e2e:
+    name: iOS E2E (${{ matrix.device }})
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: iPhone 17
+            artifact: iphone-17
+          - device: iPad Pro 13-inch (M5)
+            artifact: ipad-pro-13-inch-m5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26.6
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Start mock server
+        run: |
+          set -euo pipefail
+          cd MockServer
+          nohup python3 mock_server.py --port 7010 > "$RUNNER_TEMP/mock-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/mock-server.pid"
+          for _ in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:7010/api/version >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Mock server did not become ready" >&2
+          exit 1
+
+      - name: Run UI tests
+        env:
+          TEST_RUNNER_KONOMITV_SERVER_URL: http://127.0.0.1:7010
+        run: |
+          xcodebuild test \
+            -project KonomiTV.xcodeproj \
+            -scheme KonomiTV \
+            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=26.5" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/TestResults-${{ matrix.artifact }}.xcresult" \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload UI test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcresult-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/TestResults-${{ matrix.artifact }}.xcresult
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload mock server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mock-server-log-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/mock-server.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stop mock server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/mock-server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/mock-server.pid")" 2>/dev/null || true
+          fi

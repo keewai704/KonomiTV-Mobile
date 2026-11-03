@@ -1,0 +1,13 @@
+{
+  "id": 1,
+  "name": "テストユーザー",
+  "is_admin": true,
+  "niconico_user_id": null,
+  "niconico_user_name": null,
+  "niconico_user_premium": null,
+  "twitter_accounts": [],
+  "bluesky_accounts": [],
+  "account_links": [],
+  "created_at": "2025-11-03T21:00:00+09:00",
+  "updated_at": "2026-11-03T21:00:00+09:00"
+}
