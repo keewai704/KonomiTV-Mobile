@@ -363,27 +363,12 @@ final class VideoHLSProxy: @unchecked Sendable {
     /// Extracts caption PES packets from one segment and maps their PTS onto
     /// the recording's playback timeline.
     private func extractCaptions(from data: Data, playlist: HLSMediaPlaylist, index: Int) {
-        let events = TSSegmentProbe.captionPES(in: data)
-        guard !events.isEmpty else { return }
-
-        let firstPTS = TSSegmentProbe.firstVideoPTS(in: data)
-        let segmentStart = playlist.segments[0..<index].reduce(0.0) { $0 + $1.duration }
-
-        for pes in events {
-            let time: Double
-            if let firstPTS, let pts = pes.pts,
-               let mapped = playlist.playbackTime(
-                   segmentIndex: index,
-                   pts: pts,
-                   firstPTS: firstPTS
-               ) {
-                time = mapped
-            } else {
-                // 文字スーパー without a PTS (and malformed caption timing)
-                // is shown from the start of its segment.
-                time = segmentStart
-            }
-            onCaption(pes, time)
+        for event in VideoCaptionExtraction.events(
+            in: data,
+            playlist: playlist,
+            segmentIndex: index
+        ) {
+            onCaption(event.pes, event.time)
         }
     }
 
@@ -448,6 +433,50 @@ final class VideoHLSProxy: @unchecked Sendable {
         var response = Data(header.utf8)
         response.append(body)
         return response
+    }
+}
+
+// MARK: - Caption extraction
+
+/// Turns the caption PES packets of one MPEG-TS segment into playback times.
+///
+/// Shared by the online proxy and the offline loopback server, so saved videos
+/// keep their ARIB captions without the server.
+enum VideoCaptionExtraction {
+    struct Event: Sendable {
+        let pes: CaptionPES
+        let time: Double
+    }
+
+    static func events(
+        in data: Data,
+        playlist: HLSMediaPlaylist,
+        segmentIndex: Int
+    ) -> [Event] {
+        let packets = TSSegmentProbe.captionPES(in: data)
+        guard !packets.isEmpty else { return [] }
+
+        let firstPTS = TSSegmentProbe.firstVideoPTS(in: data)
+        let segmentStart = playlist.segments
+            .prefix(max(segmentIndex, 0))
+            .reduce(0.0) { $0 + $1.duration }
+
+        return packets.map { pes in
+            let time: Double
+            if let firstPTS, let pts = pes.pts,
+               let mapped = playlist.playbackTime(
+                   segmentIndex: segmentIndex,
+                   pts: pts,
+                   firstPTS: firstPTS
+               ) {
+                time = mapped
+            } else {
+                // 文字スーパー without a PTS (and malformed caption timing)
+                // is shown from the start of its segment.
+                time = segmentStart
+            }
+            return Event(pes: pes, time: time)
+        }
     }
 }
 

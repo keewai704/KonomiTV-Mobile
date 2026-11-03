@@ -35,8 +35,26 @@ private final class AudioSelectionBox: @unchecked Sendable {
     }
 }
 
+/// Where a saved (offline) video is served from.
+///
+/// The playlist is the finished VOD playlist of the save; its segment URIs are
+/// relative, so AVPlayer resolves them against the loopback playlist URL.
+struct OfflinePlaybackSource: Sendable {
+    let playlist: String
+    /// Directory that contains the playlist and its segments.
+    let directory: URL
+    let segmentDirectoryName: String
+    let segmentFileExtension: String
+    let segmentContentType: String
+    /// Init segment file name (fMP4 saves); nil for MPEG-TS.
+    let initSegmentFile: String?
+    /// Called for every caption PES packet of a served segment, with its
+    /// playback time, so offline playback keeps the ARIB caption overlay.
+    let onCaption: @Sendable (CaptionPES, Double) -> Void
+}
+
 /// A minimal HTTP/1.1 server bound to `127.0.0.1` that exposes the live
-/// segment store as an HLS playlist.
+/// segment store (or a saved video) as an HLS playlist.
 ///
 /// `AVPlayer` cannot consume the endless raw MPEG-TS stream KonomiTV serves, so
 /// the app re-packetises it into short HLS segments and plays them from here.
@@ -49,7 +67,9 @@ final class LocalHLSServer: @unchecked Sendable {
     private static let maximumRequestBytes = 64 * 1024
 
     private let queue = DispatchQueue(label: "com.github.keewai704.KonomiTV.local-hls")
-    private let store: SegmentStore
+    private let store: SegmentStore?
+    private let offline: OfflinePlaybackSource?
+    private let offlinePlaylist: HLSMediaPlaylist?
     private let audio = AudioSelectionBox()
 
     private var listener: NWListener?
@@ -59,6 +79,18 @@ final class LocalHLSServer: @unchecked Sendable {
 
     init(store: SegmentStore) {
         self.store = store
+        self.offline = nil
+        self.offlinePlaylist = nil
+    }
+
+    /// Serves a saved video from disk instead of the live segment store.
+    init(offline: OfflinePlaybackSource) {
+        self.store = nil
+        self.offline = offline
+        self.offlinePlaylist = HLSMediaPlaylist(
+            text: offline.playlist,
+            url: URL(string: "http://127.0.0.1/offline/playlist.m3u8")!
+        )
     }
 
     /// Selects the audio track served by the segment endpoint. Switching takes
@@ -76,6 +108,15 @@ final class LocalHLSServer: @unchecked Sendable {
                 self.startOnQueue(continuation)
             }
         }
+    }
+
+    /// Starts listening and returns the loopback URL of `path`.
+    func startURL(path: String) async throws -> URL {
+        let port = try await start()
+        guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else {
+            throw LocalHLSServerError.notStarted
+        }
+        return url
     }
 
     func stop() {
@@ -218,12 +259,16 @@ final class LocalHLSServer: @unchecked Sendable {
         let parts = requestLine.split(separator: " ")
         let target = parts.count >= 2 ? String(parts[1]) : "/"
         let store = self.store
+        let offline = self.offline
+        let offlinePlaylist = self.offlinePlaylist
         let audio = self.audio.current
 
         Task { [weak self] in
             let response = await LocalHLSServer.makeResponse(
                 for: target,
                 store: store,
+                offline: offline,
+                offlinePlaylist: offlinePlaylist,
                 audio: audio
             )
             guard let self else { return }
@@ -244,7 +289,9 @@ final class LocalHLSServer: @unchecked Sendable {
 
     private static func makeResponse(
         for target: String,
-        store: SegmentStore,
+        store: SegmentStore?,
+        offline: OfflinePlaybackSource?,
+        offlinePlaylist: HLSMediaPlaylist?,
         audio: AudioSelection
     ) async -> Data {
         let path = target
@@ -252,7 +299,12 @@ final class LocalHLSServer: @unchecked Sendable {
             .first
             .map(String.init) ?? target
 
-        if path == "/live.m3u8" {
+        // A saved video is served from disk: no server, no network.
+        if let offline {
+            return offlineResponse(for: path, source: offline, playlist: offlinePlaylist)
+        }
+
+        if path == "/live.m3u8", let store {
             let playlist = await store.playlist()
             return httpResponse(
                 status: 200,
@@ -265,7 +317,7 @@ final class LocalHLSServer: @unchecked Sendable {
         if path.hasPrefix("/seg/"), path.hasSuffix(".ts") {
             let number = path.dropFirst("/seg/".count).dropLast(".ts".count)
             if let sequence = Int(number),
-               let segment = await store.segment(sequence: sequence, audio: audio) {
+               let segment = await store?.segment(sequence: sequence, audio: audio) {
                 return httpResponse(
                     status: 200,
                     reason: "OK",
@@ -275,7 +327,67 @@ final class LocalHLSServer: @unchecked Sendable {
             }
         }
 
-        return httpResponse(
+        return notFound()
+    }
+
+    // MARK: - Offline responses
+
+    private static func offlineResponse(
+        for path: String,
+        source: OfflinePlaybackSource,
+        playlist: HLSMediaPlaylist?
+    ) -> Data {
+        if path == "/offline/playlist.m3u8" {
+            return httpResponse(
+                status: 200,
+                reason: "OK",
+                contentType: "application/vnd.apple.mpegurl",
+                body: Data(source.playlist.utf8)
+            )
+        }
+
+        if let initSegment = source.initSegmentFile, path == "/offline/\(initSegment)" {
+            if let data = try? Data(contentsOf: source.directory.appendingPathComponent(initSegment)) {
+                return httpResponse(status: 200, reason: "OK", contentType: "video/mp4", body: data)
+            }
+            return notFound()
+        }
+
+        let prefix = "/offline/\(source.segmentDirectoryName)/"
+        let suffix = ".\(source.segmentFileExtension)"
+        if path.hasPrefix(prefix), path.hasSuffix(suffix) {
+            let number = path.dropFirst(prefix.count).dropLast(suffix.count)
+            if let sequence = Int(number) {
+                let fileURL = source.directory
+                    .appendingPathComponent(source.segmentDirectoryName, isDirectory: true)
+                    .appendingPathComponent("\(sequence)\(suffix)")
+                if let data = try? Data(contentsOf: fileURL) {
+                    // Extracted on every fetch like the online proxy does, so
+                    // seeking back re-fills the caption buffer.
+                    if let playlist {
+                        for event in VideoCaptionExtraction.events(
+                            in: data,
+                            playlist: playlist,
+                            segmentIndex: sequence
+                        ) {
+                            source.onCaption(event.pes, event.time)
+                        }
+                    }
+                    return httpResponse(
+                        status: 200,
+                        reason: "OK",
+                        contentType: source.segmentContentType,
+                        body: data
+                    )
+                }
+            }
+        }
+
+        return notFound()
+    }
+
+    private static func notFound() -> Data {
+        httpResponse(
             status: 404,
             reason: "Not Found",
             contentType: "text/plain; charset=utf-8",

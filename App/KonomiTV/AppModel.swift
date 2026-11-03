@@ -13,6 +13,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Sendable {
     case captures
     /// 録画予約 (EDCB backend only).
     case reservations
+    /// オフライン保存 (0.15+ only; stays visible while videos are saved).
+    case offline
     case settings
 
     var id: String { rawValue }
@@ -26,6 +28,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .history: return "視聴履歴"
         case .captures: return "キャプチャ"
         case .reservations: return "録画予約"
+        case .offline: return "オフライン"
         case .settings: return "設定"
         }
     }
@@ -39,6 +42,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .history: return "clock.arrow.circlepath"
         case .captures: return "photo.on.rectangle"
         case .reservations: return "record.circle"
+        case .offline: return "arrow.down.circle"
         case .settings: return "gearshape"
         }
     }
@@ -78,6 +82,7 @@ enum MypageRow: String, CaseIterable, Identifiable, Hashable, Sendable {
     case history
     case captures
     case reservations
+    case offline
     case settings
 
     var id: String { rawValue }
@@ -89,6 +94,7 @@ enum MypageRow: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .history: return .history
         case .captures: return .captures
         case .reservations: return .reservations
+        case .offline: return .offline
         case .settings: return .settings
         }
     }
@@ -100,6 +106,7 @@ enum MypageRow: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .history: return .history
         case .captures: return .captures
         case .reservations: return .reservations
+        case .offline: return .offlineList
         case .settings: return .settings
         }
     }
@@ -127,6 +134,10 @@ enum SectionRoute: Hashable, Sendable {
     case captureProgram(Int)
     case reservations
     case reservation(Int)
+    /// オフライン保存の一覧.
+    case offlineList
+    /// A saved video played from local storage.
+    case offline(RecordedProgram)
     case reservationConditions
     case settings
     case pinnedChannels
@@ -226,6 +237,7 @@ final class AppModel {
     var historyPath: [SectionRoute] = []
     var capturesPath: [SectionRoute] = []
     var reservationsPath: [SectionRoute] = []
+    var offlinePath: [SectionRoute] = []
     var timetablePath: [SectionRoute] = []
     var settingsPath: [SectionRoute] = []
     /// Path of the compact マイページ hub.
@@ -259,6 +271,12 @@ final class AppModel {
     /// server / login.
     private(set) var capturesLibraryAvailable = false
 
+    /// Whether the configured server has the offline save stream (v0.15+).
+    /// v0.14.1 has no route and answers 404, so the オフライン保存 action is
+    /// hidden there. Saved videos stay reachable regardless, because the
+    /// section also appears whenever the library has content.
+    private(set) var offlineVideosAvailable = false
+
     /// UI tests replace the system `ASWebAuthenticationSession` sheet with a
     /// plain URLSession round trip (`-UITestingDisableASWebAuth`).
     let disablesASWebAuthentication: Bool
@@ -266,6 +284,11 @@ final class AppModel {
     /// Recorded programs deleted in this session, so lists can drop them without
     /// waiting for a reload.
     private(set) var deletedVideoIDs: Set<Int> = []
+
+    /// Saved videos, save jobs and their storage. Owned here so a job keeps
+    /// running while the user navigates and the offline section is reachable
+    /// from every layout.
+    let offline = OfflineVideoManager()
 
     /// App-wide playback. Owned here so it survives view transitions.
     let playback = PlaybackController()
@@ -350,6 +373,13 @@ final class AppModel {
             compactTab = .videos
             mypagePath = []
             videosPath = [.video(video)]
+        case .offline(let video):
+            // The compact layout reaches オフライン through マイページ; the
+            // regular layout has its own section and stack.
+            section = .offline
+            compactTab = .mypage
+            offlinePath = [.offline(video)]
+            mypagePath = [.offline(video)]
         case .live(let channel):
             section = .live
             compactTab = .live
@@ -363,17 +393,33 @@ final class AppModel {
     // MARK: - Sections
 
     /// Sections of the regular width sidebar. キャプチャ needs the captures
-    /// library, so it disappears on a v0.14.1 server.
+    /// library, so it disappears on a v0.14.1 server. オフライン additionally
+    /// stays visible while videos are saved, so a library remains reachable
+    /// when the server is down.
     var visibleSections: [AppSection] {
         AppSection.allCases.filter { section in
-            section != .captures || capturesLibraryAvailable
+            switch section {
+            case .captures:
+                return capturesLibraryAvailable
+            case .offline:
+                return offlineVideosAvailable || offline.hasContent
+            default:
+                return true
+            }
         }
     }
 
-    /// Rows of the compact マイページ hub with the same rule.
+    /// Rows of the compact マイページ hub with the same rules.
     var visibleMypageRows: [MypageRow] {
         MypageRow.allCases.filter { row in
-            row != .captures || capturesLibraryAvailable
+            switch row {
+            case .captures:
+                return capturesLibraryAvailable
+            case .offline:
+                return offlineVideosAvailable || offline.hasContent
+            default:
+                return true
+            }
         }
     }
 
@@ -427,6 +473,15 @@ final class AppModel {
         capturesLibraryAvailable = (try? await client.capturesLibraryAvailable()) ?? false
     }
 
+    /// Probes whether the server has the offline save stream (v0.15+).
+    func refreshOfflineVideosAvailability() async {
+        guard let client else {
+            offlineVideosAvailable = false
+            return
+        }
+        offlineVideosAvailable = (try? await client.offlineStreamsAvailable()) ?? false
+    }
+
     var serverURLString: String { serverURL?.absoluteString ?? "" }
 
     /// Client for the configured server, including the bearer token when the
@@ -449,6 +504,7 @@ final class AppModel {
         defaults.set(url.absoluteString, forKey: PreferenceKeys.serverURL)
         resetRecordingPresets()
         await refreshCapturesLibraryAvailability()
+        await refreshOfflineVideosAvailability()
     }
 
     func refreshVersion() async {
@@ -462,6 +518,7 @@ final class AppModel {
         serverURL = nil
         version = nil
         capturesLibraryAvailable = false
+        offlineVideosAvailable = false
         resetRecordingPresets()
         resetNavigation()
     }
@@ -475,6 +532,7 @@ final class AppModel {
         historyPath = []
         capturesPath = []
         reservationsPath = []
+        offlinePath = []
         timetablePath = []
         settingsPath = []
         mypagePath = []
@@ -493,6 +551,7 @@ final class AppModel {
             user = try? await client.withToken(token).me()
         }
         await refreshCapturesLibraryAvailability()
+        await refreshOfflineVideosAvailability()
         if user != nil {
             await syncSettingsFromServer()
         }
@@ -507,6 +566,7 @@ final class AppModel {
         KeychainStore.save(result.accessToken, account: KeychainStore.tokenAccount)
         user = try await client.withToken(result.accessToken).me()
         await refreshCapturesLibraryAvailability()
+        await refreshOfflineVideosAvailability()
         await syncSettingsFromServer()
     }
 

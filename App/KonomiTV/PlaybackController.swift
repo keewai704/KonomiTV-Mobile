@@ -13,11 +13,13 @@ import UIKit
 enum PlaybackItem: Hashable {
     case video(RecordedProgram)
     case live(LiveChannel)
+    /// A saved video played from local storage (no server involved).
+    case offline(RecordedProgram)
 
     /// Title shown in the Now Playing / lock screen info.
     var title: String {
         switch self {
-        case .video(let video):
+        case .video(let video), .offline(let video):
             return video.title
         case .live(let channel):
             return channel.programPresent?.title ?? channel.name
@@ -27,7 +29,7 @@ enum PlaybackItem: Hashable {
     /// Secondary line for the Now Playing info (channel name).
     var subtitle: String {
         switch self {
-        case .video(let video):
+        case .video(let video), .offline(let video):
             return video.channel?.name ?? "KonomiTV"
         case .live(let channel):
             return channel.name
@@ -35,8 +37,10 @@ enum PlaybackItem: Hashable {
     }
 
     var isVideo: Bool {
-        if case .video = self { return true }
-        return false
+        switch self {
+        case .video, .offline: return true
+        case .live: return false
+        }
     }
 }
 
@@ -130,6 +134,11 @@ final class PlaybackController {
     /// Recorded-video HLS proxy (the video stream plus its caption extraction).
     @ObservationIgnored private var videoProxy: VideoHLSProxy?
 
+    /// Loopback server of a saved (offline) video.
+    @ObservationIgnored private var offlineServer: LocalHLSServer?
+    /// Saved video and its directory, kept so a restart can rebuild the server.
+    @ObservationIgnored private var offlineContent: (video: OfflineVideo, directory: URL)?
+
     @ObservationIgnored private var timeControlObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemStatusObservation: NSKeyValueObservation?
     @ObservationIgnored private var periodicTimeObserver: Any?
@@ -195,14 +204,41 @@ final class PlaybackController {
         startCurrentItem(startAt: startAt)
     }
 
+    /// Plays a saved video entirely from local storage.
+    ///
+    /// No server session is created: the stored playlist and segments are
+    /// served by a loopback `LocalHLSServer`, so picture in picture, background
+    /// playback and the ARIB caption overlay work the same way as online
+    /// playback, without a network.
+    func playOffline(_ video: OfflineVideo, directory: URL, startAt: Double = 0) {
+        let playbackItem = PlaybackItem.offline(video.program)
+        if let current = item, current == playbackItem, player != nil, offlineServer != nil {
+            return
+        }
+
+        stop()
+
+        item = playbackItem
+        offlineContent = (video, directory)
+        client = nil
+        state = "buffering"
+        errorDetail = nil
+        positionSeconds = 0
+        liveErrorMessage = nil
+        isMuted = false
+
+        activateAudioSession()
+        startOffline(video, directory: directory, startAt: startAt)
+    }
+
     /// Restarts the live pipeline after a failure.
     func retry() {
         guard let current = item else { return }
-        guard client != nil else { return }
         switch current {
         case .live:
+            guard client != nil else { return }
             reload(startAt: 0)
-        case .video:
+        case .video, .offline:
             reload(startAt: Double(positionSeconds))
         }
     }
@@ -210,8 +246,11 @@ final class PlaybackController {
     /// Stops playback and releases every observer, task and session.
     func stop() {
         // Store the final position of the recorded program that is stopping.
-        if case .video(let video)? = item {
+        switch item {
+        case .video(let video)?, .offline(let video)?:
             onVideoPlaybackStopped?(video, Double(positionSeconds))
+        default:
+            break
         }
 
         pendingStartPosition = 0
@@ -234,6 +273,10 @@ final class PlaybackController {
 
         videoProxy?.stop()
         videoProxy = nil
+
+        offlineServer?.stop()
+        offlineServer = nil
+        offlineContent = nil
 
         liveEvents.onUpdate = nil
         liveEvents.stop()
@@ -354,7 +397,7 @@ final class PlaybackController {
     func restart() {
         guard let current = item else { return }
         switch current {
-        case .video:
+        case .video, .offline:
             reload(startAt: currentPosition)
         case .live:
             reload(startAt: 0)
@@ -365,6 +408,8 @@ final class PlaybackController {
     /// Recorded video resumes at the current position with a new session id.
     func switchQuality(_ quality: StreamQuality) {
         guard item != nil else { return }
+        // A saved video holds exactly one quality; switching needs the server.
+        if case .offline = item { return }
         var updated = profile
         updated.quality = quality
         profile = updated
@@ -464,19 +509,30 @@ final class PlaybackController {
         // AVPlayerViewController creates its content overlay view lazily; by
         // the first play it exists, so this is a second chance to attach.
         attachOverlays()
-        guard let item, let client else { return }
+        guard let item else { return }
         switch item {
         case .video(let video):
+            guard let client else { return }
             startVideo(video, client: client, profile: profile, startAt: startAt)
         case .live(let channel):
+            guard let client else { return }
             startLive(channel, client: client, profile: profile)
+        case .offline:
+            guard let content = offlineContent else { return }
+            startOffline(content.video, directory: content.directory, startAt: startAt)
         }
     }
 
     /// Tears down the player and the live pipeline, then starts the current
     /// item again with the current profile.
     private func reload(startAt: Double) {
-        guard let item, let client else { return }
+        guard let item else { return }
+        // Offline items are served locally and need no API client.
+        if case .offline = item {
+            // Nothing to check.
+        } else if client == nil {
+            return
+        }
 
         keepAliveTask?.cancel()
         keepAliveTask = nil
@@ -498,6 +554,9 @@ final class PlaybackController {
         videoProxy?.stop()
         videoProxy = nil
 
+        offlineServer?.stop()
+        offlineServer = nil
+
         liveEvents.onUpdate = nil
         liveEvents.stop()
 
@@ -518,9 +577,14 @@ final class PlaybackController {
 
         switch item {
         case .video(let video):
+            guard let client else { return }
             startVideo(video, client: client, profile: profile, startAt: startAt)
         case .live(let channel):
+            guard let client else { return }
             startLive(channel, client: client, profile: profile)
+        case .offline:
+            guard let content = offlineContent else { return }
+            startOffline(content.video, directory: content.directory, startAt: startAt)
         }
     }
 
@@ -563,7 +627,11 @@ final class PlaybackController {
                     proxy.stop()
                     return
                 }
-                self.attachVideoPlayer(url: url, video: video, startAt: startAt)
+                self.attachVideoPlayer(
+                    url: url,
+                    item: .video(video),
+                    startAt: startAt
+                )
             } catch {
                 guard !Task.isCancelled, self.videoProxy === proxy else { return }
                 self.errorDetail = ErrorText.message(for: error)
@@ -572,15 +640,19 @@ final class PlaybackController {
         }
     }
 
-    private func attachVideoPlayer(url: URL, video: RecordedProgram, startAt: Double) {
-        guard let current = item, current == .video(video), player == nil else { return }
+    private func attachVideoPlayer(
+        url: URL,
+        item expected: PlaybackItem,
+        startAt: Double
+    ) {
+        guard let current = item, current == expected, player == nil else { return }
 
         activateAudioSession()
 
         let playerItem = AVPlayerItem(url: url)
         capture.attach(to: playerItem)
         let newPlayer = AVPlayer(playerItem: playerItem)
-        configure(newPlayer, item: .video(video))
+        configure(newPlayer, item: expected)
         attach(newPlayer)
         // Resuming from the watch history: seeking before the item is ready
         // can be ignored, so refreshState() seeks once it is.
@@ -592,6 +664,48 @@ final class PlaybackController {
                 return nil
             }
             return max(seconds, 0)
+        }
+    }
+
+    // MARK: - Offline video
+
+    /// Serves a saved video from a loopback server and attaches the player.
+    private func startOffline(_ video: OfflineVideo, directory: URL, startAt: Double) {
+        let source = OfflinePlaybackSource(
+            playlist: OfflineHLSPlaylist.mediaPlaylist(for: video),
+            directory: directory,
+            segmentDirectoryName: OfflineHLSPlaylist.segmentDirectoryName,
+            segmentFileExtension: video.container.fileExtension,
+            segmentContentType: video.container.contentType,
+            initSegmentFile: video.initSegmentFile
+        ) { [weak self] pes, playbackTime in
+            Task { @MainActor in
+                self?.captions.feed(pes, at: playbackTime)
+            }
+        }
+
+        let server = LocalHLSServer(offline: source)
+        offlineServer?.stop()
+        offlineServer = server
+
+        Task { [weak self, weak server] in
+            guard let self, let server else { return }
+            do {
+                let url = try await server.startURL(path: "/offline/playlist.m3u8")
+                guard !Task.isCancelled, self.offlineServer === server else {
+                    server.stop()
+                    return
+                }
+                self.attachVideoPlayer(
+                    url: url,
+                    item: .offline(video.program),
+                    startAt: startAt
+                )
+            } catch {
+                guard !Task.isCancelled, self.offlineServer === server else { return }
+                self.errorDetail = ErrorText.message(for: error)
+                self.state = "error"
+            }
         }
     }
 
@@ -825,8 +939,11 @@ final class PlaybackController {
         let position = Int(seconds)
         positionSeconds = position > 0 ? position : 0
 
-        if case .video(let video)? = item {
+        switch item {
+        case .video(let video)?, .offline(let video)?:
             onVideoProgress?(video, seconds > 0 ? seconds : 0)
+        default:
+            break
         }
     }
 

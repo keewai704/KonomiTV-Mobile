@@ -462,6 +462,21 @@ enum Endpoints {
         )
     }
 
+    /// `GET /api/streams/video/{video_id}/{quality}/offline-stream` (0.15+).
+    ///
+    /// A single binary stream of the metadata header and every encoded
+    /// segment; `OfflineStreamParser` reads it incrementally.
+    static func videoOfflineStream(
+        baseURL: URL,
+        videoID: Int,
+        apiQuality: String
+    ) -> URL {
+        url(
+            baseURL: baseURL,
+            path: ["streams", "video", String(videoID), apiQuality, "offline-stream"]
+        )
+    }
+
     /// `PUT /api/streams/video/{video_id}/{quality}/keep-alive?session_id=..`
     static func videoKeepAlive(
         baseURL: URL,

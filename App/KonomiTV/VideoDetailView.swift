@@ -89,6 +89,8 @@ struct VideoDetailView: View {
                 RecordedFileInfoSheet(program: current)
             case .share(let file):
                 ShareSheet(url: file.url)
+            case .offline:
+                OfflineSaveSheet(model: model, program: current)
             }
         }
         .confirmationDialog(
@@ -155,6 +157,17 @@ struct VideoDetailView: View {
                 }
                 .disabled(isRecording || isDownloading)
                 .accessibilityIdentifier("video.menu.download")
+
+                // オフライン保存 is a 0.15 feature; v0.14.1 has no such route.
+                if model.offlineVideosAvailable {
+                    Button {
+                        activeSheet = .offline
+                    } label: {
+                        Label("オフライン保存", systemImage: "arrow.down.circle")
+                    }
+                    .disabled(isRecording)
+                    .accessibilityIdentifier("video.offline.save")
+                }
 
                 if isAdmin {
                     Button {
@@ -353,6 +366,8 @@ struct VideoDetailView: View {
                     .accessibilityLabel("ダウンロード中")
             }
 
+            offlineStatus
+
             if isWorking {
                 ProgressView()
                     .controlSize(.small)
@@ -376,6 +391,60 @@ struct VideoDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Offline save state of this program: progress with a cancel button, the
+    /// failure with a retry, or the saved quality and size.
+    @ViewBuilder
+    private var offlineStatus: some View {
+        if let job = model.offline.activeJob(videoID: current.id) {
+            VStack(alignment: .leading, spacing: 6) {
+                ProgressView(value: job.progress)
+                    .accessibilityIdentifier("video.offline.progress")
+                    .accessibilityLabel("オフライン保存中")
+                    .accessibilityValue(Formatters.percent(job.progress))
+
+                HStack {
+                    Text("\(job.qualityLabel)・\(Formatters.percent(job.progress))")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 8)
+                    Button("キャンセル", role: .destructive) {
+                        model.offline.cancel(jobID: job.jobID)
+                    }
+                    .font(.footnote)
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("video.offline.cancel")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if let failed = model.offline.failedJob(videoID: current.id) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(failed.error ?? "オフライン保存に失敗しました。")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("video.offline.error")
+
+                if let client = model.client {
+                    Button("再試行") {
+                        model.offline.retry(jobID: failed.jobID, client: client)
+                    }
+                    .font(.footnote)
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("video.offline.retry")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if let saved = model.offline.video(id: current.id) {
+            Label(
+                "オフライン保存済み (\(saved.qualityLabel)・\(saved.sizeLabel))",
+                systemImage: "arrow.down.circle.fill"
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("video.offline.saved")
+        }
     }
 
     private var seriesEpisodes: [RecordedProgram] {
@@ -593,11 +662,13 @@ struct VideoDetailView: View {
 private enum VideoDetailSheet: Identifiable {
     case fileInfo
     case share(DownloadedFile)
+    case offline
 
     var id: String {
         switch self {
         case .fileInfo: return "fileInfo"
         case .share(let file): return "share-\(file.id.uuidString)"
+        case .offline: return "offline"
         }
     }
 }

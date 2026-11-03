@@ -12,9 +12,17 @@ import Observation
 @MainActor
 @Observable
 final class RecordedCommentSession {
+    /// Where the past log comments come from.
+    private enum Source {
+        /// `GET /api/videos/{id}/jikkyo`.
+        case api(APIClient)
+        /// Comments saved with an offline video.
+        case stored(JikkyoComments)
+    }
+
     private let video: RecordedProgram
     private let model: AppModel
-    private let client: APIClient
+    private let source: Source
     private let overlay: CommentOverlayModel
 
     /// Comments up to the current playback position.
@@ -41,7 +49,21 @@ final class RecordedCommentSession {
     ) {
         self.video = video
         self.model = model
-        self.client = client
+        self.source = .api(client)
+        self.overlay = overlay
+    }
+
+    /// Plays back the comments stored with an offline video instead of
+    /// fetching them (the offline library saved `jikkyo.json`).
+    init(
+        video: RecordedProgram,
+        model: AppModel,
+        comments: JikkyoComments,
+        overlay: CommentOverlayModel
+    ) {
+        self.video = video
+        self.model = model
+        self.source = .stored(comments)
         self.overlay = overlay
     }
 
@@ -61,12 +83,17 @@ final class RecordedCommentSession {
 
     private func load() async {
         let result: JikkyoComments
-        do {
-            result = try await client.pastComments(videoID: video.id)
-        } catch {
-            guard !isStopped else { return }
-            statusMessage = "過去ログコメントを取得できませんでした。"
-            return
+        switch source {
+        case .api(let client):
+            do {
+                result = try await client.pastComments(videoID: video.id)
+            } catch {
+                guard !isStopped else { return }
+                statusMessage = "過去ログコメントを取得できませんでした。"
+                return
+            }
+        case .stored(let comments):
+            result = comments
         }
         guard !Task.isCancelled, !isStopped else { return }
 

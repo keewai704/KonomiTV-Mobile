@@ -64,6 +64,9 @@ struct LaunchOptions: Sendable {
                 defaults.removeObject(forKey: key)
             }
             KeychainStore.delete(account: KeychainStore.tokenAccount)
+            // Saved offline videos outlive a normal launch; UI tests start from
+            // an empty library so "save / play / delete" is deterministic.
+            OfflineVideoManager.removeAllStorage()
         }
 
         if !showsSetup, let serverURLOverride {

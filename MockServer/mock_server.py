@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 import caption_injector
 import captures_mock
 import maintenance_mock
+import offline_mock
 import reservations_mock
 import settings_mock
 import twitter_mock
@@ -320,6 +321,12 @@ class MockServerState:
         self.niconico_authorize_count = 0
         self.niconico_link_count = 0
         self.niconico_unlink_count = 0
+        # オフライン保存ストリーム (0.15+) の応答回数と直近の画質
+        self.offline_stream = True
+        self.offline_stream_truncate = False
+        self.offline_stream_count = 0
+        self.offline_stream_video_ids: list[int] = []
+        self.last_offline_quality: str | None = None
         # 直近にリクエストされた品質・プレイリスト種別 (UI テストの検証用)
         self.last_live_quality: str | None = None
         self.last_video_quality: str | None = None
@@ -422,6 +429,12 @@ class MockServerState:
     def record_live_quality(self, quality: str) -> None:
         with self.lock:
             self.last_live_quality = quality
+
+    def record_offline_stream(self, video_id: int, quality: str) -> None:
+        with self.lock:
+            self.offline_stream_count += 1
+            self.offline_stream_video_ids.append(video_id)
+            self.last_offline_quality = quality
 
     def record_video_quality(self, quality: str, playlist_type: str | None = None) -> None:
         with self.lock:
@@ -576,6 +589,11 @@ class MockServerState:
                 "last_live_quality": self.last_live_quality,
                 "last_video_quality": self.last_video_quality,
                 "last_video_playlist_type": self.last_video_playlist_type,
+                "offline_stream": self.offline_stream,
+                "offline_stream_truncate": self.offline_stream_truncate,
+                "offline_stream_count": self.offline_stream_count,
+                "offline_stream_video_ids": list(self.offline_stream_video_ids),
+                "last_offline_quality": self.last_offline_quality,
                 "last_video_media_playlist_type": self.last_video_media_playlist_type,
                 "jikkyo_watch_active": self.jikkyo_watch_active,
                 "jikkyo_watch_total": self.jikkyo_watch_total,
@@ -1570,6 +1588,11 @@ class MockHandler(BaseHTTPRequestHandler):
             return
 
         if parts[0] == "streams" and len(parts) >= 2:
+            # オフライン保存ストリーム (0.15+) は録画番組の HLS より先に処理する
+            if (len(parts) == 5 and parts[1] == "video"
+                    and parts[4] == "offline-stream"):
+                offline_mock.handle(self, parts, query, fixtures, state)
+                return
             if parts[1] == "video":
                 self._handle_video_stream(parts, query, state, fixtures)
                 return
@@ -1775,20 +1798,30 @@ class MockHandler(BaseHTTPRequestHandler):
     # -- テスト用エンドポイント --------------------------------------------
 
     def _handle_mock_config(self) -> None:
-        """Change mock server behaviour (currently the captures library).
+        """Change mock server behaviour.
 
         POST /__mock/config {"captures_library": false} makes the server behave
         like KonomiTV v0.14.1: every captures endpoint except the upload
-        answers 404. POST /__mock/reset restores the default (true).
+        answers 404. {"offline_stream": false} does the same for the offline
+        save stream (the route answers 404 and the app hides the feature), and
+        {"offline_stream_truncate": true} drops the save stream after two
+        segments without its terminator record.
+        POST /__mock/reset restores the defaults.
         """
         state = self.server.state  # type: ignore[attr-defined]
         body = self._read_json_body()
         if "captures_library" in body:
             state.captures_library = bool(body["captures_library"])
+        if "offline_stream" in body:
+            state.offline_stream = bool(body["offline_stream"])
+        if "offline_stream_truncate" in body:
+            state.offline_stream_truncate = bool(body["offline_stream_truncate"])
         self._send_json(
             {
                 "status": "ok",
                 "captures_library": state.captures_library,
+                "offline_stream": state.offline_stream,
+                "offline_stream_truncate": state.offline_stream_truncate,
             }
         )
 
@@ -1808,6 +1841,7 @@ class MockHandler(BaseHTTPRequestHandler):
         users_mock.reset(server.state, fixtures["user"], MOCK_ACCESS_TOKEN)
         settings_mock.reset(server.state)
         maintenance_mock.reset(server.state)
+        offline_mock.reset(server.state)
         self._send_json({"status": "ok"})
 
     # -- 各エンドポイント (API) ----------------------------------------------
@@ -2985,6 +3019,7 @@ def create_server(host: str = "0.0.0.0", port: int = 7010) -> MockHTTPServer:
     users_mock.reset(server.state, server.fixtures["user"], MOCK_ACCESS_TOKEN)  # type: ignore[attr-defined]
     settings_mock.reset(server.state)  # type: ignore[attr-defined]
     maintenance_mock.reset(server.state)  # type: ignore[attr-defined]
+    offline_mock.reset(server.state)  # type: ignore[attr-defined]
     return server
 
 

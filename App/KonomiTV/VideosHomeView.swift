@@ -31,6 +31,14 @@ struct VideosHomeView: View {
                 Button("再試行") {
                     Task { await load() }
                 }
+
+                // Saved videos stay playable while the server is unreachable.
+                if model.offline.hasContent {
+                    NavigationLink(value: SectionRoute.offlineList) {
+                        Text("オフライン保存を見る")
+                    }
+                    .accessibilityIdentifier("videos.offlineLink")
+                }
             }
         } else {
             ScrollView {

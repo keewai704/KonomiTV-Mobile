@@ -407,7 +407,7 @@ final class CaptureController {
                 capturedAt: capturedAt,
                 captionText: captionText
             )
-        case .video(let video):
+        case .video(let video), .offline(let video):
             return CaptureExifMetadata.video(
                 program: video,
                 position: position,
@@ -434,7 +434,7 @@ final class CaptureController {
                 eventStartTime: program?.startTime ?? capturedAt,
                 eventEndTime: program?.endTime
             )
-        case .video(let video):
+        case .video(let video), .offline(let video):
             return CaptureFilenameContext(
                 capturedAt: capturedAt,
                 channelName: video.channel?.name ?? "不明なチャンネル",

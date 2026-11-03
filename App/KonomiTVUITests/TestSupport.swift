@@ -20,6 +20,7 @@ enum TestSection: String, CaseIterable {
     case history
     case captures
     case reservations
+    case offline
     case settings
 
     var title: String {
@@ -31,6 +32,7 @@ enum TestSection: String, CaseIterable {
         case .history: return "視聴履歴"
         case .captures: return "キャプチャ"
         case .reservations: return "録画予約"
+        case .offline: return "オフライン"
         case .settings: return "設定"
         }
     }
@@ -40,7 +42,7 @@ enum TestSection: String, CaseIterable {
         switch self {
         case .live: return "live"
         case .videos: return "videos"
-        case .timetable, .mylist, .history, .captures, .reservations, .settings: return "mypage"
+        case .timetable, .mylist, .history, .captures, .reservations, .offline, .settings: return "mypage"
         }
     }
 
@@ -52,6 +54,7 @@ enum TestSection: String, CaseIterable {
         case .history: return "mypage.history"
         case .captures: return "mypage.captures"
         case .reservations: return "mypage.reservations"
+        case .offline: return "mypage.offline"
         case .settings: return "mypage.settings"
         case .live, .videos: return nil
         }
@@ -105,18 +108,36 @@ enum MockServerControl {
         return status
     }
 
-    /// `POST /__mock/config {"captures_library": false}`: makes the mock
-    /// behave like KonomiTV v0.14.1, which has no captures library.
+    /// `POST /__mock/config`: changes one or more mock server switches.
     @discardableResult
-    static func setCapturesLibrary(_ available: Bool) -> Int {
+    static func setConfig(_ values: [String: Any]) -> Int {
         var request = URLRequest(url: baseURL.appendingPathComponent("__mock/config"))
         request.httpMethod = "POST"
         request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(
-            withJSONObject: ["captures_library": available]
-        )
+        request.httpBody = try? JSONSerialization.data(withJSONObject: values)
         return perform(request).status
+    }
+
+    /// `POST /__mock/config {"captures_library": false}`: makes the mock
+    /// behave like KonomiTV v0.14.1, which has no captures library.
+    @discardableResult
+    static func setCapturesLibrary(_ available: Bool) -> Int {
+        setConfig(["captures_library": available])
+    }
+
+    /// `POST /__mock/config {"offline_stream": false}`: makes the mock behave
+    /// like KonomiTV v0.14.1, which has no offline save stream.
+    @discardableResult
+    static func setOfflineStream(_ available: Bool) -> Int {
+        setConfig(["offline_stream": available])
+    }
+
+    /// `POST /__mock/config {"offline_stream_truncate": true}`: drops the save
+    /// stream after two segments, without its terminator record.
+    @discardableResult
+    static func setOfflineStreamTruncation(_ truncate: Bool) -> Int {
+        setConfig(["offline_stream_truncate": truncate])
     }
 
     /// `GET /__mock/stats`.

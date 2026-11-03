@@ -191,6 +191,7 @@ struct RootView: View {
         case .history: return $model.historyPath
         case .captures: return $model.capturesPath
         case .reservations: return $model.reservationsPath
+        case .offline: return $model.offlinePath
         case .settings: return $model.settingsPath
         }
     }
@@ -212,6 +213,8 @@ struct RootView: View {
             CapturesLibraryScreen(model: model)
         case .reservations:
             ReservationsHomeScreen(model: model)
+        case .offline:
+            OfflineVideosScreen(model: model)
         case .settings:
             SettingsView(model: model)
         }
@@ -246,6 +249,10 @@ struct RootView: View {
             ReservationDetailScreen(model: model, reservationID: id)
         case .reservationConditions:
             ReservationConditionsScreen(model: model)
+        case .offlineList:
+            OfflineVideosScreen(model: model)
+        case .offline(let video):
+            OfflineVideoPlayerView(model: model, program: video)
         case .settings:
             SettingsView(model: model)
         case .pinnedChannels:

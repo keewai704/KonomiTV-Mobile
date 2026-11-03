@@ -50,8 +50,32 @@ struct SetupView: View {
                             .accessibilityIdentifier("setup.error")
                     }
                 }
+
+                // Saved videos do not need a server: keep them reachable from
+                // the first run screen as well (only when there are any, so an
+                // empty library does not add a row to the setup form).
+                if model.offline.hasContent {
+                    Section {
+                        NavigationLink {
+                            OfflineVideosScreen(model: model)
+                        } label: {
+                            Label("オフライン保存", systemImage: "arrow.down.circle")
+                        }
+                        .accessibilityIdentifier("setup.offline")
+                    }
+                }
             }
             .navigationTitle("KonomiTV")
+            .navigationDestination(for: SectionRoute.self) { route in
+                switch route {
+                case .offline(let video):
+                    OfflineVideoPlayerView(model: model, program: video)
+                case .offlineList:
+                    OfflineVideosScreen(model: model)
+                default:
+                    EmptyView()
+                }
+            }
         }
     }
 
