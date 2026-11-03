@@ -283,7 +283,7 @@ struct TwitterSettingsView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .submitLabel(.done)
-                        .onSubmit(normalizeSavedHashtag(entry.offset))
+                        .onSubmit { normalizeSavedHashtag(entry.offset) }
                         .accessibilityIdentifier("settings.twitter.savedHashtag.\(entry.offset)")
                         .accessibilityLabel("保存したハッシュタグ")
 
