@@ -555,10 +555,12 @@ final class PlaybackController {
         newPlayer.automaticallyWaitsToMinimizeStalling = true
         newPlayer.isMuted = isMuted
 
-        // Linear playback of recorded programs, 1x only for live.
+        // Speeds for recorded programs; an empty list hides the menu for live.
         playerViewController.speeds = playbackItem.isVideo
-            ? [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0].map { NSNumber(value: $0) }
-            : [NSNumber(value: 1.0)]
+            ? [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0].map { rate in
+                AVPlaybackSpeed(rate: Float(rate), localizedName: "\(rate.formatted())x")
+            }
+            : []
 
         let title = AVMutableMetadataItem()
         title.identifier = .commonIdentifierTitle

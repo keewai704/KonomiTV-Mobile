@@ -112,7 +112,7 @@ struct VideoSceneStrip: View {
             width: tileWidth,
             height: tileHeight
         )
-        guard rect.maxX <= image.width, rect.maxY <= image.height else { return nil }
+        guard rect.maxX <= CGFloat(image.width), rect.maxY <= CGFloat(image.height) else { return nil }
         return image.cropping(to: rect)
     }
 
