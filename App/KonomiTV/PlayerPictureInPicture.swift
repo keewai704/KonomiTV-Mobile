@@ -175,9 +175,13 @@ final class PlayerPictureInPictureMediaController: NSObject, @unchecked Sendable
 /// libVLC adds its `AVSampleBufferDisplayLayer` view as a subview and positions
 /// it itself (letterboxing included), so this is a plain container. It also
 /// carries the picture-in-picture selectors libVLC looks for.
+///
+/// It does not declare `VLCDrawable`: that protocol's `bounds` is a method,
+/// which UIView's `bounds` property cannot witness in Swift. libVLC never
+/// checks the conformance; it only sends `addSubview:` and `bounds`, which
+/// every UIView answers.
 @MainActor
-final class PlayerDrawableView: UIView, @preconcurrency VLCDrawable,
-                               PlayerPictureInPictureDrawable {
+final class PlayerDrawableView: UIView, PlayerPictureInPictureDrawable {
     /// Shared with libVLC's PiP window controller.
     let pipMedia = PlayerPictureInPictureMediaController()
 
