@@ -79,12 +79,12 @@ final class OfflineVideoManager {
     private(set) var availableCapacityBytes: Int64?
 
     /// Directory name below Application Support.
-    static let storageDirectoryName = "OfflineVideos"
+    nonisolated static let storageDirectoryName = "OfflineVideos"
     /// KonomiTV segments recorded videos into about 2 seconds, which is the
     /// expected segment count before the first segment tells us more.
-    static let defaultSegmentDurationSeconds: Double = 2
+    nonisolated static let defaultSegmentDurationSeconds: Double = 2
     /// Interval of the storage usage refresh while a save is running.
-    private static let progressPersistenceInterval: TimeInterval = 5
+    private nonisolated static let progressPersistenceInterval: TimeInterval = 5
 
     @ObservationIgnored private let rootURL: URL
     @ObservationIgnored private var downloadTasks: [String: Task<Void, Never>] = [:]
