@@ -22,6 +22,8 @@ SwiftUI と AVKit だけで構成し、WebView やサードパーティ製 UI �
 - **プレイヤー**: 再生中の画質切り替え（ビデオは同じ位置から再開）、ビデオの再生速度、主音声／副音声、
   ライブの低遅延モードとライブ状態表示、iPad のハードウェアキーボードショートカット、
   ライブの番組／チャンネルパネルとリモコン、ビデオのシーンサムネイル
+- **字幕**: ライブ・録画ビデオの ARIB 字幕と文字スーパー（`libaribcaption` で描画）。表示の切り替え（S）、
+  フォント・縁取り・不透明度、テレビ／ビデオ別の文字スーパー表示設定
 - 再生中の keep-alive、ピクチャ・イン・ピクチャ、AirPlay、バックグラウンド音声
 
 ## ライブ再生のしくみ
@@ -29,6 +31,13 @@ SwiftUI と AVKit だけで構成し、WebView やサードパーティ製 UI �
 KonomiTV のライブ配信 API は MPEG-TS をそのまま流し続けるため、AVPlayer では直接再生できません。
 アプリ内で MPEG-TS をキーフレーム単位の約 1 秒のセグメントに区切り（`KonomiStreaming`）、
 `127.0.0.1` で待ち受ける小さな HTTP サーバー（Network.framework）からライブ HLS として AVPlayer に渡します。
+各セグメントには `#EXT-X-PROGRAM-DATE-TIME` を付け、ストリーム内の字幕 PES を同じ PTS の時計で
+字幕レンダラーに渡すため、再生位置と字幕がずれません。
+
+録画ビデオも同じループバックサーバー経由で再生します。サーバーの master / media プレイリストと
+セグメントをアプリ内でプロキシし、映像のセグメントから字幕 PES を取り出して
+`HLSMediaPlaylist.playbackTime(segmentIndex:pts:firstPTS:)` で再生位置に変換します。
+サーバーへの master プレイリスト要求・keep-alive・画質切り替えはそのまま維持されます。
 
 ## ピクチャ・イン・ピクチャとバックグラウンド再生
 
@@ -71,6 +80,7 @@ Xcode でスキーム `KonomiTV` を選択して実行します。初回起動�
 | `App/KonomiTV/` | iOS アプリ本体（SwiftUI） |
 | `App/KonomiTVUITests/` | XCUITest による E2E テスト |
 | `Packages/KonomiKit` | API クライアント・モデルと MPEG-TS → HLS セグメンタ（SwiftPM） |
+| `Packages/ARIBCaption` | libaribcaption の Swift ラッパー（ARIB 字幕のデコードと描画、SwiftPM） |
 | `MockServer/` | 開発・テスト用のモックサーバー（Python 標準ライブラリのみ） |
 | `project.yml` | XcodeGen のプロジェクト定義 |
 
@@ -159,6 +169,8 @@ Apple の資格情報がないフォークでもリリース処理を確認で�
 
 ## 補足
 
+- 字幕のデコードと描画には [libaribcaption](https://github.com/magicxqq/libaribcaption)（MIT License,
+  Copyright (c) 2022 magicxqq）を `Packages/ARIBCaption` に同梱しています。
 - バージョンは `v1.2.3` のようなタグから `MARKETING_VERSION` に設定され、
   `CURRENT_PROJECT_VERSION` は GitHub Actions の実行番号になります。
 - `KonomiTV.xcodeproj`、`DerivedData`、`.build`、`*.xcresult`、`__pycache__` などは

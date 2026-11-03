@@ -58,6 +58,13 @@ struct RootView: View {
             statusText(playback.liveStatus, identifier: "live.status")
             statusText(String(playback.liveViewerCount), identifier: "live.viewerCount")
             statusText(String(playback.comments.drawnCount), identifier: "comments.drawnCount")
+            statusText(String(playback.captions.renderedCount), identifier: "captions.renderedCount")
+            statusText(
+                playback.captions.isVisible && !playback.captions.isPictureInPictureActive
+                    ? "true"
+                    : "false",
+                identifier: "captions.visible"
+            )
         }
         .font(.system(size: 1))
         .opacity(0.01)

@@ -111,6 +111,9 @@ final class PlaybackController {
     /// Created once so a channel switch keeps using the same renderer.
     let comments = CommentOverlayModel()
 
+    /// ARIB caption (字幕・文字スーパー) pipeline and overlay state.
+    let captions = CaptionController()
+
     @ObservationIgnored private var delegateProxy = PlayerViewControllerDelegate()
     @ObservationIgnored private var player: AVPlayer?
     @ObservationIgnored private var liveSession: LiveStreamSession?
@@ -119,6 +122,9 @@ final class PlaybackController {
     @ObservationIgnored private var client: APIClient?
 
     @ObservationIgnored private weak var commentOverlayView: CommentOverlayUIView?
+    @ObservationIgnored private weak var captionOverlayView: CaptionOverlayUIView?
+    /// Recorded-video HLS proxy (the video stream plus its caption extraction).
+    @ObservationIgnored private var videoProxy: VideoHLSProxy?
 
     @ObservationIgnored private var timeControlObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemStatusObservation: NSKeyValueObservation?
@@ -146,7 +152,7 @@ final class PlaybackController {
         delegateProxy.owner = self
         playerViewController.delegate = delegateProxy
 
-        attachCommentOverlay()
+        attachOverlays()
         observeAudioSessionInterruptions()
     }
 
@@ -215,8 +221,12 @@ final class PlaybackController {
         liveSession?.onReady = nil
         liveSession?.onFailed = nil
         liveSession?.onAudioTrackChange = nil
+        liveSession?.onCaption = nil
         liveSession?.stop()
         liveSession = nil
+
+        videoProxy?.stop()
+        videoProxy = nil
 
         liveEvents.onUpdate = nil
         liveEvents.stop()
@@ -239,21 +249,38 @@ final class PlaybackController {
         comments.isPlaying = false
         comments.isPictureInPictureActive = false
         comments.reset()
+
+        captions.isPictureInPictureActive = false
+        captions.end()
     }
 
-    // MARK: - Comment overlay
+    // MARK: - Overlays
 
-    /// Adds the danmaku renderer to the player's content overlay view, which is
-    /// drawn above the video inline and in the fullscreen presentation alike.
-    private func attachCommentOverlay() {
-        guard commentOverlayView == nil else { return }
+    /// Adds the caption and danmaku renderers to the player's content overlay
+    /// view, which is drawn above the video inline and in the fullscreen
+    /// presentation alike. Captions go first so comments stay on top.
+    private func attachOverlays() {
         playerViewController.loadViewIfNeeded()
         guard let contentOverlay = playerViewController.contentOverlayView else { return }
-        let overlay = CommentOverlayUIView(model: comments)
-        overlay.frame = contentOverlay.bounds
-        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        contentOverlay.addSubview(overlay)
-        commentOverlayView = overlay
+
+        if captionOverlayView == nil {
+            let overlay = CaptionOverlayUIView(
+                controller: captions,
+                playerViewController: playerViewController
+            )
+            overlay.frame = contentOverlay.bounds
+            overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            contentOverlay.insertSubview(overlay, at: 0)
+            captionOverlayView = overlay
+        }
+
+        if commentOverlayView == nil {
+            let overlay = CommentOverlayUIView(model: comments)
+            overlay.frame = contentOverlay.bounds
+            overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            contentOverlay.addSubview(overlay)
+            commentOverlayView = overlay
+        }
     }
 
     private func updatePlaying(_ playing: Bool) {
@@ -293,6 +320,7 @@ final class PlaybackController {
             toleranceBefore: CMTime(seconds: 0.5, preferredTimescale: 600),
             toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)
         )
+        captions.seek(to: target)
     }
 
     /// Seeks relative to the current position.
@@ -306,11 +334,13 @@ final class PlaybackController {
         guard let range = currentItem.seekableTimeRanges.last?.timeRangeValue else { return }
         let end = range.start.seconds + range.duration.seconds
         guard end.isFinite else { return }
+        let target = max(end - 1, 0)
         player.seek(
-            to: CMTime(seconds: max(end - 1, 0), preferredTimescale: 600),
+            to: CMTime(seconds: target, preferredTimescale: 600),
             toleranceBefore: .positiveInfinity,
             toleranceAfter: .zero
         )
+        captions.seek(to: target)
     }
 
     /// Restarts the current item (R shortcut).
@@ -377,6 +407,7 @@ final class PlaybackController {
     func pictureInPictureDidStart() {
         isPictureInPictureActive = true
         comments.isPictureInPictureActive = true
+        captions.isPictureInPictureActive = true
         pictureInPictureStartCount += 1
     }
 
@@ -384,6 +415,7 @@ final class PlaybackController {
     func pictureInPictureDidStop() {
         isPictureInPictureActive = false
         comments.isPictureInPictureActive = false
+        captions.isPictureInPictureActive = false
 
         // Restoring brings the screen back; that must not stop playback.
         if isRestoringFromPictureInPicture {
@@ -408,7 +440,7 @@ final class PlaybackController {
     private func startCurrentItem(startAt: Double) {
         // AVPlayerViewController creates its content overlay view lazily; by
         // the first play it exists, so this is a second chance to attach.
-        attachCommentOverlay()
+        attachOverlays()
         guard let item, let client else { return }
         switch item {
         case .video(let video):
@@ -435,11 +467,17 @@ final class PlaybackController {
         liveSession?.onReady = nil
         liveSession?.onFailed = nil
         liveSession?.onAudioTrackChange = nil
+        liveSession?.onCaption = nil
         liveSession?.stop()
         liveSession = nil
 
+        videoProxy?.stop()
+        videoProxy = nil
+
         liveEvents.onUpdate = nil
         liveEvents.stop()
+
+        captions.end()
 
         errorDetail = nil
         liveErrorMessage = nil
@@ -471,12 +509,49 @@ final class PlaybackController {
         startAt: Double
     ) {
         let sessionID = String(UUID().uuidString.prefix(8)).lowercased()
-        let url = client.videoPlaylistURL(
+        // AVPlayer never talks to the server directly: the loopback proxy
+        // forwards the playlists and segments (and extracts their captions).
+        let masterURL = client.videoPlaylistURL(
             videoID: video.id,
             profile: profile,
             sessionID: sessionID,
             playlistType: .master
         )
+
+        let proxy = VideoHLSProxy(
+            masterURL: masterURL,
+            token: client.token
+        ) { [weak self] pes, playbackTime in
+            Task { @MainActor in
+                self?.captions.feed(pes, at: playbackTime)
+            }
+        }
+        videoProxy?.stop()
+        videoProxy = proxy
+
+        startKeepAlive(client: client, videoID: video.id, profile: profile, sessionID: sessionID)
+
+        Task { [weak self, weak proxy] in
+            guard let self, let proxy else { return }
+            do {
+                let url = try await proxy.start()
+                guard !Task.isCancelled, self.videoProxy === proxy else {
+                    proxy.stop()
+                    return
+                }
+                self.attachVideoPlayer(url: url, video: video, startAt: startAt)
+            } catch {
+                guard !Task.isCancelled, self.videoProxy === proxy else { return }
+                self.errorDetail = ErrorText.message(for: error)
+                self.state = "error"
+            }
+        }
+    }
+
+    private func attachVideoPlayer(url: URL, video: RecordedProgram, startAt: Double) {
+        guard let current = item, current == .video(video), player == nil else { return }
+
+        activateAudioSession()
 
         let playerItem = AVPlayerItem(url: url)
         let newPlayer = AVPlayer(playerItem: playerItem)
@@ -487,7 +562,12 @@ final class PlaybackController {
         pendingStartPosition = startAt
         newPlayer.play()
 
-        startKeepAlive(client: client, videoID: video.id, profile: profile, sessionID: sessionID)
+        captions.beginVideo { [weak newPlayer] in
+            guard let seconds = newPlayer?.currentTime().seconds, seconds.isFinite else {
+                return nil
+            }
+            return max(seconds, 0)
+        }
     }
 
     /// KonomiTV stops a recording session that stops sending keep-alives.
@@ -530,6 +610,19 @@ final class PlaybackController {
         session.onAudioTrackChange = { [weak self, weak session] hasSecondary in
             guard let self, let session, self.liveSession === session else { return }
             self.hasSecondaryAudio = hasSecondary
+        }
+        session.onCaption = { [weak self, weak session] pes in
+            guard let self, let session, self.liveSession === session else { return }
+            guard let anchor = session.dateTimeAnchor else { return }
+            let playbackTime: Double
+            if let pts = pes.pts {
+                playbackTime = anchor.seconds(forPTS: pts)
+            } else if let now = self.captions.currentPlaybackTime() {
+                playbackTime = now
+            } else {
+                return
+            }
+            self.captions.feed(pes, at: playbackTime)
         }
 
         liveSession = session
@@ -590,6 +683,22 @@ final class PlaybackController {
         configure(newPlayer, item: .live(channel))
         attach(newPlayer)
         newPlayer.play()
+
+        // PROGRAM-DATE-TIME makes `currentDate()` the live wall clock; the
+        // anchor turns it back into seconds on the caption timeline.
+        captions.beginLive { [weak self, weak newPlayer] in
+            guard let self,
+                  let anchor = self.liveSession?.dateTimeAnchor else {
+                return nil
+            }
+            if let date = newPlayer?.currentItem?.currentDate() {
+                return date.timeIntervalSince(anchor.anchorDate)
+            }
+            // Before AVPlayer has mapped the playlist's PROGRAM-DATE-TIME (or
+            // on a server that omits it) the wall clock is the same broadcast
+            // clock the captions were stamped with.
+            return Date().timeIntervalSince(anchor.anchorDate)
+        }
     }
 
     // MARK: - Player configuration

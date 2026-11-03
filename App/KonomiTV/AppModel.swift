@@ -151,6 +151,16 @@ enum PreferenceKeys {
     static let video24fpsMode = "video_24fps_mode"
     static let video24fpsModeCellular = "video_24fps_mode_cellular"
 
+    // Caption (字幕) settings. The keys are the web client's own local-only
+    // settings, so the stored values keep their names even though the app does
+    // not sync them.
+    static let captionFont = "caption_font"
+    static let alwaysBorderCaptionText = "always_border_caption_text"
+    static let specifyCaptionOpacity = "specify_caption_opacity"
+    static let captionOpacity = "caption_opacity"
+    static let tvShowSuperimpose = "tv_show_superimpose"
+    static let videoShowSuperimpose = "video_show_superimpose"
+
     /// Keys of the quality picker that older builds stored under different
     /// names. Migrated once by `QualityPreferences.migrate`.
     static let legacyLiveQuality = "liveQuality"

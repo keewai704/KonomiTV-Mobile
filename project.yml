@@ -10,6 +10,8 @@ options:
 packages:
   KonomiKit:
     path: Packages/KonomiKit
+  ARIBCaption:
+    path: Packages/ARIBCaption
 
 settings:
   base:
@@ -36,6 +38,8 @@ targets:
         product: KonomiKit
       - package: KonomiKit
         product: KonomiStreaming
+      - package: ARIBCaption
+        product: ARIBCaption
     info:
       path: App/KonomiTV/Info.plist
       properties:

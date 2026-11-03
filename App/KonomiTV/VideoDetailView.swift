@@ -106,6 +106,15 @@ struct VideoDetailView: View {
             .accessibilityLabel("コメント")
             .accessibilityValue(model.playback.comments.isVisible ? "表示" : "非表示")
 
+            Button {
+                model.playback.captions.toggleVisibility()
+            } label: {
+                Image(systemName: model.playback.captions.isVisible ? "captions.bubble.fill" : "captions.bubble")
+            }
+            .accessibilityIdentifier("player.captions.toggle")
+            .accessibilityLabel("字幕")
+            .accessibilityValue(model.playback.captions.isVisible ? "表示" : "非表示")
+
             qualityMenu
 
             Button {
@@ -342,6 +351,7 @@ struct VideoDetailView: View {
             shortcut("q", action: model.playback.toggleMute)
             shortcut("r", action: model.playback.restart)
             shortcut("d", action: model.playback.comments.toggleVisibility)
+            shortcut("s", action: model.playback.captions.toggleVisibility)
         }
         .frame(width: 0, height: 0)
         .opacity(0)

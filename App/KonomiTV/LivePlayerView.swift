@@ -96,6 +96,15 @@ struct LivePlayerView: View {
             .accessibilityLabel("コメント")
             .accessibilityValue(playback.comments.isVisible ? "表示" : "非表示")
 
+            Button {
+                playback.captions.toggleVisibility()
+            } label: {
+                Image(systemName: playback.captions.isVisible ? "captions.bubble.fill" : "captions.bubble")
+            }
+            .accessibilityIdentifier("player.captions.toggle")
+            .accessibilityLabel("字幕")
+            .accessibilityValue(playback.captions.isVisible ? "表示" : "非表示")
+
             qualityMenu
 
             if playback.hasSecondaryAudio {
@@ -483,6 +492,7 @@ struct LivePlayerView: View {
                 panelTab = .channel
             })
             shortcut("d", action: playback.comments.toggleVisibility)
+            shortcut("s", action: playback.captions.toggleVisibility)
             shortcut("m", action: {
                 showsPanel = true
                 panelTab = .comment

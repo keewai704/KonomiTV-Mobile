@@ -49,6 +49,16 @@ struct LaunchOptions: Sendable {
             QualityPreferences.removeAll(defaults: defaults)
             defaults.removeObject(forKey: PreferenceKeys.clientSettings)
             defaults.removeObject(forKey: PreferenceKeys.syncSettings)
+            for key in [
+                PreferenceKeys.captionFont,
+                PreferenceKeys.alwaysBorderCaptionText,
+                PreferenceKeys.specifyCaptionOpacity,
+                PreferenceKeys.captionOpacity,
+                PreferenceKeys.tvShowSuperimpose,
+                PreferenceKeys.videoShowSuperimpose,
+            ] {
+                defaults.removeObject(forKey: key)
+            }
             KeychainStore.delete(account: KeychainStore.tokenAccount)
         }
 

@@ -23,6 +23,7 @@ struct SettingsView: View {
             televisionSection
             timetableSection
             historySection
+            captionSection
             informationSection
         }
         .navigationTitle("設定")
@@ -77,6 +78,17 @@ struct SettingsView: View {
                 Label("画質", systemImage: "slider.horizontal.3")
             }
             .accessibilityIdentifier("settings.quality")
+        }
+    }
+
+    private var captionSection: some View {
+        Section("字幕") {
+            NavigationLink {
+                CaptionSettingsView()
+            } label: {
+                Label("字幕", systemImage: "captions.bubble")
+            }
+            .accessibilityIdentifier("settings.caption")
         }
     }
 

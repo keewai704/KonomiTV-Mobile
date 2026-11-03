@@ -1,5 +1,54 @@
 import Foundation
 
+/// Fixed reference point that maps raw 90 kHz PTS values onto wall-clock
+/// dates, so a live playlist can carry `#EXT-X-PROGRAM-DATE-TIME`.
+///
+/// The app sets the anchor when the first segment is produced
+/// (`anchorDate` = the wall-clock time of that moment, `anchorPTS` =
+/// `TSSegment.firstVideoPTS`). Captions and the player's
+/// `AVPlayerItem.currentDate()` share this clock, which is what lets the
+/// caption renderer line up with the video.
+public struct LiveProgramDateTimeAnchor: Sendable, Hashable {
+    public let anchorDate: Date
+    public let anchorPTS: Int64
+
+    public init(anchorDate: Date, anchorPTS: Int64) {
+        self.anchorDate = anchorDate
+        self.anchorPTS = anchorPTS
+    }
+
+    /// Wall-clock date of a PTS. Handles the 33-bit PTS wrap-around.
+    public func date(forPTS pts: Int64) -> Date {
+        anchorDate.addingTimeInterval(seconds(forPTS: pts))
+    }
+
+    /// Seconds from the anchor to a PTS. Handles the 33-bit PTS wrap-around.
+    public func seconds(forPTS pts: Int64) -> Double {
+        Double(HLSMediaPlaylist.signedTicks(from: anchorPTS, to: pts)) / PTS.clockRate
+    }
+
+    /// `YYYY-MM-DDThh:mm:ss.SSSZ` in UTC, the form HLS PROGRAM-DATE-TIME uses.
+    public static func string(from date: Date) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? TimeZone(identifier: "UTC")!
+        let components = calendar.dateComponents(
+            [.year, .month, .day, .hour, .minute, .second, .nanosecond],
+            from: date
+        )
+        let milliseconds = max(0, min(999, (components.nanosecond ?? 0) / 1_000_000))
+        return String(
+            format: "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+            components.year ?? 1970,
+            components.month ?? 1,
+            components.day ?? 1,
+            components.hour ?? 0,
+            components.minute ?? 0,
+            components.second ?? 0,
+            milliseconds
+        )
+    }
+}
+
 /// Builds a live HLS media playlist (sliding window, no end list).
 public enum TSSegmentMediaPlaylist {
 
@@ -9,7 +58,8 @@ public enum TSSegmentMediaPlaylist {
         segments: [TSSegment],
         windowSize: Int = 6,
         discontinuitySequence: Int? = nil,
-        minimumTargetDuration: Int = 1
+        minimumTargetDuration: Int = 1,
+        programDateTimeAnchor: LiveProgramDateTimeAnchor? = nil
     ) -> String {
         let sorted = segments.sorted { $0.sequence < $1.sequence }
         let count = min(max(windowSize, 1), sorted.count)
@@ -41,6 +91,12 @@ public enum TSSegmentMediaPlaylist {
         for segment in sorted.suffix(count) {
             if segment.discontinuity {
                 lines.append("#EXT-X-DISCONTINUITY")
+            }
+            if let programDateTimeAnchor, let firstVideoPTS = segment.firstVideoPTS {
+                let date = programDateTimeAnchor.date(forPTS: firstVideoPTS)
+                lines.append(
+                    "#EXT-X-PROGRAM-DATE-TIME:\(LiveProgramDateTimeAnchor.string(from: date))"
+                )
             }
             lines.append("#EXTINF:\(format(segment.duration)),")
             lines.append("\(segmentPath(for: segment.sequence))")

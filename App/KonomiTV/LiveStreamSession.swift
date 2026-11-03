@@ -8,11 +8,15 @@ import KonomiStreaming
 ///
 /// Runs off the main actor; the only thread hop is the progress callback.
 enum LiveStreamReader {
-    /// - Parameter onProgress: called with the number of produced segments.
+    /// - Parameters:
+    ///   - onProgress: called with the number of produced segments.
+    ///   - onCaptions: called with the caption / superimpose PES packets
+    ///     completed by a chunk, in stream order.
     static func consume(
         url: URL,
         store: SegmentStore,
-        onProgress: @escaping @Sendable (Int) async -> Void
+        onProgress: @escaping @Sendable (Int) async -> Void,
+        onCaptions: @escaping @Sendable ([CaptionPES]) async -> Void
     ) async throws {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
@@ -43,20 +47,26 @@ enum LiveStreamReader {
 
             guard buffer.count >= 65_536 else { continue }
 
-            let segments = segmenter.append(Data(buffer))
+            let output = segmenter.process(Data(buffer))
             buffer.removeAll(keepingCapacity: true)
-            if !segments.isEmpty {
-                await store.append(contentsOf: segments)
-                produced += segments.count
+            if !output.captions.isEmpty {
+                await onCaptions(output.captions)
+            }
+            if !output.segments.isEmpty {
+                await store.append(contentsOf: output.segments)
+                produced += output.segments.count
                 await onProgress(produced)
             }
         }
 
         if !buffer.isEmpty {
-            let segments = segmenter.append(Data(buffer))
-            if !segments.isEmpty {
-                await store.append(contentsOf: segments)
-                produced += segments.count
+            let output = segmenter.process(Data(buffer))
+            if !output.captions.isEmpty {
+                await onCaptions(output.captions)
+            }
+            if !output.segments.isEmpty {
+                await store.append(contentsOf: output.segments)
+                produced += output.segments.count
                 await onProgress(produced)
             }
         }
@@ -99,12 +109,20 @@ final class LiveStreamSession {
     @ObservationIgnored var onFailed: (@MainActor (String) -> Void)?
     /// Called when the stream's audio track layout becomes known or changes.
     @ObservationIgnored var onAudioTrackChange: (@MainActor (Bool) -> Void)?
+    /// Called for every caption / superimpose PES packet. Packets that arrive
+    /// before the PROGRAM-DATE-TIME anchor is known are buffered here.
+    @ObservationIgnored var onCaption: (@MainActor (CaptionPES) -> Void)?
+
+    /// Fixed reference point for `#EXT-X-PROGRAM-DATE-TIME` and for mapping
+    /// caption PTS values onto the player's wall clock.
+    private(set) var dateTimeAnchor: LiveProgramDateTimeAnchor?
 
     @ObservationIgnored private var store: SegmentStore?
     @ObservationIgnored private var server: LocalHLSServer?
     @ObservationIgnored private var serverURL: URL?
     @ObservationIgnored private var pipeline: Task<Void, Never>?
     @ObservationIgnored private var reader: Task<String?, Never>?
+    @ObservationIgnored private var pendingCaptions: [CaptionPES] = []
 
     init(channel: LiveChannel, client: APIClient, profile: StreamingProfile) {
         self.channel = channel
@@ -146,6 +164,8 @@ final class LiveStreamSession {
         playbackURL = nil
         segmentCount = 0
         hasSecondaryAudio = false
+        dateTimeAnchor = nil
+        pendingCaptions.removeAll()
         phase = .idle
     }
 
@@ -180,10 +200,18 @@ final class LiveStreamSession {
             let progress: @Sendable (Int) async -> Void = { [weak self] count in
                 await self?.applySegmentCount(count)
             }
+            let captions: @Sendable ([CaptionPES]) async -> Void = { [weak self] events in
+                await self?.receiveCaptions(events)
+            }
 
             let reader = Task.detached(priority: .userInitiated) { () -> String? in
                 do {
-                    try await LiveStreamReader.consume(url: upstreamURL, store: store, onProgress: progress)
+                    try await LiveStreamReader.consume(
+                        url: upstreamURL,
+                        store: store,
+                        onProgress: progress,
+                        onCaptions: captions
+                    )
                     return nil
                 } catch is CancellationError {
                     return nil
@@ -222,11 +250,14 @@ final class LiveStreamSession {
         if let store {
             Task { [weak self, store] in
                 let hasSecondary = await store.hasSecondaryAudio
+                let anchor = await store.programDateTimeAnchor
                 guard !Task.isCancelled else { return }
-                if self?.hasSecondaryAudio != hasSecondary {
-                    self?.hasSecondaryAudio = hasSecondary
-                    self?.onAudioTrackChange?(hasSecondary)
+                guard let self else { return }
+                if self.hasSecondaryAudio != hasSecondary {
+                    self.hasSecondaryAudio = hasSecondary
+                    self.onAudioTrackChange?(hasSecondary)
                 }
+                self.applyAnchor(anchor)
             }
         }
 
@@ -235,6 +266,35 @@ final class LiveStreamSession {
         playbackURL = serverURL
         phase = .ready(serverURL)
         onReady?(serverURL)
+    }
+
+    /// Buffers caption PES packets until the segment store has produced its
+    /// first segment (and therefore knows the PROGRAM-DATE-TIME anchor).
+    private func receiveCaptions(_ events: [CaptionPES]) {
+        guard !events.isEmpty else { return }
+        guard dateTimeAnchor != nil else {
+            pendingCaptions.append(contentsOf: events)
+            if pendingCaptions.count > 512 {
+                pendingCaptions.removeFirst(pendingCaptions.count - 512)
+            }
+            return
+        }
+        for event in events {
+            onCaption?(event)
+        }
+    }
+
+    private func applyAnchor(_ anchor: LiveProgramDateTimeAnchor?) {
+        guard let anchor else { return }
+        let isNew = dateTimeAnchor == nil
+        dateTimeAnchor = anchor
+        guard isNew, !pendingCaptions.isEmpty else { return }
+
+        let buffered = pendingCaptions
+        pendingCaptions.removeAll(keepingCapacity: true)
+        for event in buffered {
+            onCaption?(event)
+        }
     }
 }
 

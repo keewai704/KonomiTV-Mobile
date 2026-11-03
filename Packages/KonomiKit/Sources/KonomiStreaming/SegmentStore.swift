@@ -8,6 +8,10 @@ public actor SegmentStore {
     private var storage: [TSSegment] = []
     private var evictedDiscontinuities = 0
     private var publishedTargetDuration = 1
+    /// Wall-clock anchor of the first produced segment, published as
+    /// `#EXT-X-PROGRAM-DATE-TIME` and used to map caption PTS values onto the
+    /// player's `currentDate()`.
+    private var anchor: LiveProgramDateTimeAnchor?
 
     public init(capacity: Int = 12) {
         self.capacity = max(1, capacity)
@@ -31,6 +35,10 @@ public actor SegmentStore {
             storage.removeAll(keepingCapacity: true)
             evictedDiscontinuities = 0
             publishedTargetDuration = 1
+            anchor = nil
+        }
+        if anchor == nil, let firstVideoPTS = segment.firstVideoPTS {
+            anchor = LiveProgramDateTimeAnchor(anchorDate: Date(), anchorPTS: firstVideoPTS)
         }
         storage.append(segment)
         publishedTargetDuration = max(
@@ -83,6 +91,12 @@ public actor SegmentStore {
         storage.removeAll(keepingCapacity: true)
         evictedDiscontinuities = 0
         publishedTargetDuration = 1
+        anchor = nil
+    }
+
+    /// Wall-clock anchor of the first produced segment, if one has arrived.
+    public var programDateTimeAnchor: LiveProgramDateTimeAnchor? {
+        anchor
     }
 
     /// Renders the current sliding-window playlist.
@@ -95,7 +109,8 @@ public actor SegmentStore {
             segments: storage,
             windowSize: windowSize,
             discontinuitySequence: prior,
-            minimumTargetDuration: publishedTargetDuration
+            minimumTargetDuration: publishedTargetDuration,
+            programDateTimeAnchor: anchor
         )
     }
 }
