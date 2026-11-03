@@ -145,6 +145,8 @@ jobs:
           xcrun simctl bootstatus "$IPAD_UDID" -b
 
       # Runs even when the iPhone tests failed, as long as the build succeeded.
+      # Only the suites whose behavior depends on the regular width layout (and
+      # PiP, which the iPhone simulator lacks) run here, to save macOS minutes.
       - name: Test on iPad Pro 13-inch (M5)
         id: test_ipad
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -157,7 +159,10 @@ jobs:
             -destination "id=$IPAD_UDID" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -resultBundlePath "$RUNNER_TEMP/TestResults-ipad-pro-13-inch-m5.xcresult" \
-            -parallel-testing-enabled NO
+            -parallel-testing-enabled NO \
+            -only-testing:KonomiTVUITests/LayoutUITests \
+            -only-testing:KonomiTVUITests/PlaybackUITests \
+            -only-testing:KonomiTVUITests/TimeTableUITests
 
       # Not gated on the test results: the IPA is still useful from a red run.
       - name: Build unsigned IPA
