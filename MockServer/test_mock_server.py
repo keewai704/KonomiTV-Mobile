@@ -20,6 +20,7 @@ import unittest
 from datetime import datetime
 from urllib.parse import quote, urljoin
 
+import caption_injector
 import mock_server
 
 
@@ -369,9 +370,64 @@ class MockServerTestCase(unittest.TestCase):
         status, headers, data = self.request("GET", segment_url)
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("Content-Type"), "video/mp2t")
-        with open(os.path.join(mock_server.HLS_DIR, "segment5.ts"), "rb") as f:
-            expected = f.read()
-        self.assertEqual(data, expected)
+        self.assertEqual(data, mock_server.caption_injected_segment(5))
+
+    def test_video_segment_contains_arib_caption_stream(self) -> None:
+        session_id = "abc12345"
+        segment_url = (
+            f"/api/streams/video/1/720p/segment?session_id={session_id}&sequence=0"
+        )
+        status, headers, data = self.request("GET", segment_url)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "video/mp2t")
+
+        self.assertEqual(caption_injector.caption_pid_in_pmt(data), 0x0130)
+        payloads = caption_injector.caption_data_payloads(data)
+        self.assertEqual(len(payloads), len(caption_injector.DEFAULT_CAPTIONS))
+        for payload in payloads:
+            # ARIB caption PES payload starts at data_identifier 0x80.
+            self.assertEqual(payload[0], 0x80)
+            self.assertEqual(payload[1], 0xFF)
+            self.assertEqual(payload[2] & 0x0F, 0)
+            self.assertEqual((payload[3] & 0xFC) >> 2, 1)  # statement, language 1
+
+        first_video_pts = caption_injector.first_video_pts(data)
+        self.assertIsNotNone(first_video_pts)
+        caption_pts = caption_injector.caption_pts_in_pes(data)
+        self.assertEqual(
+            caption_pts,
+            [
+                (first_video_pts + round(offset * 90_000)) & ((1 << 33) - 1)
+                for offset, _ in caption_injector.DEFAULT_CAPTIONS
+            ],
+        )
+
+    def test_live_stream_contains_arib_caption_stream(self) -> None:
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        response = None
+        try:
+            conn.request("GET", "/api/streams/live/gr011/720p/mpegts")
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Content-Type"), "video/mp2t")
+            # The live stream is endless; read enough for the captions at
+            # 0.2 s and 1.2 s (about 2.7 s of media at the mock's pacing).
+            data = response.read(188 * 600)
+        finally:
+            if response is not None:
+                response.close()
+            conn.close()
+
+        self.assertEqual(data[0], 0x47)
+        self.assertEqual(caption_injector.caption_pid_in_pmt(data), 0x0130)
+        self.assertGreaterEqual(len(caption_injector.caption_pes_packets(data)), 2)
+
+        # Let the server observe the closed connection before the next test.
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if self.stats()["live_active"] == 0:
+                break
+            time.sleep(0.05)
 
     def test_invalid_quality_for_video_stream(self) -> None:
         status, _, payload = self.get_json(

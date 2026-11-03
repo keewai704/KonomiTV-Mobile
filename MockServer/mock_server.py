@@ -28,6 +28,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
+import caption_injector
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FIXTURE_DIR = os.path.join(BASE_DIR, "fixtures")
 MEDIA_DIR = os.path.join(BASE_DIR, "media")
@@ -464,6 +466,9 @@ def load_fixtures() -> dict:
     if os.path.exists(SAMPLE_TS_PATH):
         with open(SAMPLE_TS_PATH, "rb") as f:
             sample_ts = f.read()
+        # 字幕の ELEMENTARY STREAM を持たないフィクスチャに、PMT を書き換えて
+        # 実際の ARIB 字幕 PES を注入する (バイナリはコミットしない)。
+        sample_ts = caption_injector.inject_captions(sample_ts)
 
     # 録画ファイルダウンロード API が返すダミーファイル (実ファイルの先頭を少しだけ)
     download_bytes = sample_ts[:TS_PACKET_SIZE * 10] if sample_ts else b"KonomiTV mock recorded file\n"
@@ -480,6 +485,26 @@ def load_fixtures() -> dict:
         "sample_ts": sample_ts,
         "download_bytes": download_bytes,
     }
+
+
+_CAPTIONED_SEGMENT_CACHE: dict[str, bytes] = {}
+
+
+def caption_injected_segment(sequence: int) -> bytes:
+    """Return a fixture HLS segment with the ARIB caption stream injected.
+
+    Results are cached per source segment so the 60-segment playlist does not
+    regenerate the same six files over and over.
+    """
+    index = sequence % HLS_SEGMENT_COUNT
+    path = os.path.join(HLS_DIR, f"segment{index}.ts")
+    cached = _CAPTIONED_SEGMENT_CACHE.get(path)
+    if cached is not None:
+        return cached
+    with open(path, "rb") as f:
+        data = caption_injector.inject_captions(f.read())
+    _CAPTIONED_SEGMENT_CACHE[path] = data
+    return data
 
 
 def find_channel(channels: dict, display_channel_id: str) -> dict | None:
@@ -1868,8 +1893,7 @@ class MockHandler(BaseHTTPRequestHandler):
             if not os.path.exists(segment_path):
                 self._not_found()
                 return
-            with open(segment_path, "rb") as f:
-                body = f.read()
+            body = caption_injected_segment(sequence)
             self._send_bytes(body, "video/mp2t")
             return
 

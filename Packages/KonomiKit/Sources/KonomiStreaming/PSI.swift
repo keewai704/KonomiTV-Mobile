@@ -119,21 +119,50 @@ public struct PMT: Sendable, Hashable {
         public let language: String?
         /// Raw descriptor bytes of this stream, kept so the PMT can be rebuilt.
         public let descriptors: [UInt8]
+        /// `stream_identifier_descriptor` (tag 0x52) component tag, if present.
+        public let componentTag: Int?
+        /// `data_component_descriptor` (tag 0xFD) data_component_id, if present.
+        public let dataComponentID: UInt16?
 
         public init(
             streamType: UInt8,
             elementaryPID: Int,
             language: String? = nil,
-            descriptors: [UInt8] = []
+            descriptors: [UInt8] = [],
+            componentTag: Int? = nil,
+            dataComponentID: UInt16? = nil
         ) {
             self.streamType = streamType
             self.elementaryPID = elementaryPID
             self.language = language
             self.descriptors = descriptors
+            self.componentTag = componentTag
+            self.dataComponentID = dataComponentID
         }
 
         public var isAudio: Bool {
             PMT.audioStreamTypes.contains(streamType)
+        }
+
+        /// True for an ARIB 字幕 (caption) elementary stream.
+        ///
+        /// ARIB STD-B10 assigns component tags 0x30–0x37 to captions and
+        /// 0x38–0x3F to 文字スーパー (superimpose) in the
+        /// `stream_identifier_descriptor`. Streams that only carry a
+        /// `data_component_descriptor` with data_component_id 0x0008 are
+        /// treated as captions.
+        public var isCaption: Bool {
+            guard streamType == 0x06 else { return false }
+            if let componentTag {
+                return (0x30...0x37).contains(componentTag)
+            }
+            return dataComponentID == 0x0008
+        }
+
+        /// True for an ARIB 文字スーパー (superimpose) elementary stream.
+        public var isSuperimpose: Bool {
+            guard streamType == 0x06, let componentTag else { return false }
+            return (0x38...0x3F).contains(componentTag)
         }
     }
 
@@ -177,12 +206,19 @@ public struct PMT: Sendable, Hashable {
                 start: descriptorStart,
                 end: descriptorEnd
             )
+            let component = Self.componentInfo(
+                bytes: bytes,
+                start: descriptorStart,
+                end: descriptorEnd
+            )
             streams.append(
                 Stream(
                     streamType: streamType,
                     elementaryPID: pid,
                     language: language,
-                    descriptors: descriptors
+                    descriptors: descriptors,
+                    componentTag: component.componentTag,
+                    dataComponentID: component.dataComponentID
                 )
             )
             offset = descriptorStart + esInfoLength
@@ -224,6 +260,24 @@ public struct PMT: Sendable, Hashable {
     /// True when the program carries a second audio elementary stream.
     public var hasSecondaryAudio: Bool {
         audioPIDs.count >= 2
+    }
+
+    /// PID of the ARIB caption (字幕) elementary stream, if the program has one.
+    public var captionPID: Int? {
+        streams.first(where: \.isCaption)?.elementaryPID
+    }
+
+    /// PID of the ARIB superimpose (文字スーパー) elementary stream, if any.
+    public var superimposePID: Int? {
+        streams.first(where: \.isSuperimpose)?.elementaryPID
+    }
+
+    public var captionStream: Stream? {
+        streams.first(where: \.isCaption)
+    }
+
+    public var superimposeStream: Stream? {
+        streams.first(where: \.isSuperimpose)
     }
 
     public var videoPID: Int? {
@@ -277,6 +331,30 @@ public struct PMT: Sendable, Hashable {
             UInt8(sectionLength & 0xFF),
         ]
         return MPEG2CRC.appending(to: header + body)
+    }
+
+    private static func componentInfo(
+        bytes: [UInt8],
+        start: Int,
+        end: Int
+    ) -> (componentTag: Int?, dataComponentID: UInt16?) {
+        var componentTag: Int?
+        var dataComponentID: UInt16?
+        var offset = start
+        while offset + 2 <= end {
+            let tag = bytes[offset]
+            let length = Int(bytes[offset + 1])
+            let payloadStart = offset + 2
+            let payloadEnd = min(payloadStart + length, end)
+            if tag == 0x52, payloadEnd - payloadStart >= 1 {
+                componentTag = Int(bytes[payloadStart])
+            } else if tag == 0xFD, payloadEnd - payloadStart >= 2 {
+                dataComponentID = (UInt16(bytes[payloadStart]) << 8)
+                    | UInt16(bytes[payloadStart + 1])
+            }
+            offset = payloadStart + length
+        }
+        return (componentTag, dataComponentID)
     }
 
     private static func languageDescriptor(bytes: [UInt8], start: Int, end: Int) -> String? {

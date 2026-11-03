@@ -12,6 +12,10 @@ public struct TSSegment: Sendable, Hashable {
     public let pmt: PMT?
     /// PID of `pmt`.
     public let pmtPID: Int?
+    /// Raw 33-bit PTS (90 kHz) of the first video frame in this segment, when
+    /// known. Caption PES PTS values are relative to the same clock, so the app
+    /// can map them onto the playback timeline.
+    public let firstVideoPTS: Int64?
 
     public init(
         sequence: Int,
@@ -19,7 +23,8 @@ public struct TSSegment: Sendable, Hashable {
         data: Data,
         discontinuity: Bool = false,
         pmt: PMT? = nil,
-        pmtPID: Int? = nil
+        pmtPID: Int? = nil,
+        firstVideoPTS: Int64? = nil
     ) {
         self.sequence = sequence
         self.duration = duration
@@ -27,6 +32,7 @@ public struct TSSegment: Sendable, Hashable {
         self.discontinuity = discontinuity
         self.pmt = pmt
         self.pmtPID = pmtPID
+        self.firstVideoPTS = firstVideoPTS
     }
 
     public var byteCount: Int {
@@ -69,17 +75,29 @@ public struct TSSegment: Sendable, Hashable {
             data: filteredData,
             discontinuity: discontinuity,
             pmt: pmt,
-            pmtPID: pmtPID
+            pmtPID: pmtPID,
+            firstVideoPTS: firstVideoPTS
         )
     }
+}
+
+/// Result of feeding a live stream chunk to `LiveSegmenter.process(_:)`.
+public struct LiveSegmenterOutput: Sendable {
+    public let segments: [TSSegment]
+    /// Caption / superimpose PES packets completed by this chunk, in stream
+    /// order, with their PTS. Segment bytes are not modified.
+    public let captions: [CaptionPES]
 }
 
 /// Converts an endless MPEG-TS byte stream into short HLS media segments cut
 /// on video keyframes.
 public struct LiveSegmenter: Sendable {
     public var targetDuration: Double
+    /// Called for every completed caption / superimpose PES packet.
+    public var captionHandler: (@Sendable (CaptionPES) -> Void)?
 
     private var packetizer = TSPacketizer()
+    private var captionExtractor = CaptionPESExtractor()
     private var patPacket: Data?
     private var pmtPacket: Data?
     private var pat: PAT?
@@ -90,6 +108,7 @@ public struct LiveSegmenter: Sendable {
     private var unwrapper = PTSUnwrapper()
     private var lastVideoPTS: Int64?
     private var segmentStartPTS: Int64?
+    private var segmentFirstVideoPTS: Int64?
     private var segmentBuffer = Data()
     private var segmentDiscontinuity = false
     private var nextSequence = 0
@@ -101,20 +120,34 @@ public struct LiveSegmenter: Sendable {
     /// Feeds an arbitrary chunk of the transport stream and returns any
     /// segments completed by this chunk.
     public mutating func append(_ data: Data) -> [TSSegment] {
-        var segments: [TSSegment] = []
-        for packet in packetizer.append(data) {
-            process(packet, into: &segments)
-        }
-        return segments
+        process(data).segments
     }
 
     public mutating func append(_ bytes: [UInt8]) -> [TSSegment] {
         append(Data(bytes))
     }
 
+    /// Feeds a chunk and returns both the completed segments and the caption /
+    /// superimpose PES packets contained in it.
+    public mutating func process(_ data: Data) -> LiveSegmenterOutput {
+        var segments: [TSSegment] = []
+        var captions: [CaptionPES] = []
+        for packet in packetizer.append(data) {
+            process(packet, into: &segments)
+            captions.append(contentsOf: captionExtractor.append(packet))
+        }
+        for caption in captions {
+            captionHandler?(caption)
+        }
+        return LiveSegmenterOutput(segments: segments, captions: captions)
+    }
+
     /// Emits the currently open segment, if any. Live streams normally only
     /// need this when the upstream connection ends.
     public mutating func flush() -> TSSegment? {
+        for caption in captionExtractor.flush() {
+            captionHandler?(caption)
+        }
         guard segmentStartPTS != nil else { return nil }
         return emitCurrentSegment(endPTS: lastVideoPTS)
     }
@@ -131,6 +164,8 @@ public struct LiveSegmenter: Sendable {
         unwrapper.reset()
         lastVideoPTS = nil
         segmentStartPTS = nil
+        segmentFirstVideoPTS = nil
+        captionExtractor.reset()
         segmentBuffer.removeAll(keepingCapacity: true)
         segmentDiscontinuity = false
         nextSequence = 0
@@ -194,9 +229,11 @@ public struct LiveSegmenter: Sendable {
         let previousPTS = lastVideoPTS
         var isKeyframe = packet.randomAccessIndicator
         var timestamp: Int64?
+        var rawTimestamp: Int64?
 
         if packet.payloadUnitStartIndicator, let pes = PESPacket(bytes: packet.payload) {
             if let rawPTS = pes.pts {
+                rawTimestamp = rawPTS
                 let unwrapped = unwrapper.unwrap(rawPTS)
                 timestamp = unwrapped
                 lastVideoPTS = unwrapped
@@ -216,7 +253,12 @@ public struct LiveSegmenter: Sendable {
                 if let segment = emitCurrentSegment(endPTS: previousPTS ?? timestamp) {
                     segments.append(segment)
                 }
-                startSegment(at: timestamp, discontinuity: true, firstPacket: packet.data)
+                startSegment(
+                    at: timestamp,
+                    discontinuity: true,
+                    firstPacket: packet.data,
+                    firstVideoPTS: rawTimestamp
+                )
                 return
             }
 
@@ -225,7 +267,12 @@ public struct LiveSegmenter: Sendable {
                 if let segment = emitCurrentSegment(endPTS: timestamp) {
                     segments.append(segment)
                 }
-                startSegment(at: timestamp, discontinuity: false, firstPacket: packet.data)
+                startSegment(
+                    at: timestamp,
+                    discontinuity: false,
+                    firstPacket: packet.data,
+                    firstVideoPTS: rawTimestamp
+                )
             } else {
                 appendToSegment(packet.data)
             }
@@ -233,7 +280,8 @@ public struct LiveSegmenter: Sendable {
             startSegment(
                 at: timestamp,
                 discontinuity: isJump(timestamp, from: previousPTS),
-                firstPacket: packet.data
+                firstPacket: packet.data,
+                firstVideoPTS: rawTimestamp
             )
         }
     }
@@ -258,7 +306,8 @@ public struct LiveSegmenter: Sendable {
     private mutating func startSegment(
         at timestamp: Int64,
         discontinuity: Bool,
-        firstPacket: Data
+        firstPacket: Data,
+        firstVideoPTS: Int64?
     ) {
         guard let patPacket, let pmtPacket else { return }
         segmentBuffer.removeAll(keepingCapacity: true)
@@ -266,6 +315,7 @@ public struct LiveSegmenter: Sendable {
         segmentBuffer.append(pmtPacket)
         segmentBuffer.append(firstPacket)
         segmentStartPTS = timestamp
+        segmentFirstVideoPTS = firstVideoPTS
         segmentDiscontinuity = discontinuity
     }
 
@@ -279,11 +329,13 @@ public struct LiveSegmenter: Sendable {
             data: segmentBuffer,
             discontinuity: segmentDiscontinuity,
             pmt: pmt,
-            pmtPID: pmtPID
+            pmtPID: pmtPID,
+            firstVideoPTS: segmentFirstVideoPTS
         )
         nextSequence += 1
         segmentBuffer.removeAll(keepingCapacity: true)
         segmentStartPTS = nil
+        segmentFirstVideoPTS = nil
         segmentDiscontinuity = false
         return segment
     }
