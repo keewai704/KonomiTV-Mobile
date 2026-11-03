@@ -110,12 +110,15 @@ iPad では `-destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=
 
 ### CI（`.github/workflows/ci.yml`）
 
-push と pull request で次を実行します。
+`main` / `feat/ios-client` への push、pull request、手動実行（workflow_dispatch）で起動します。
+Markdown などドキュメントだけの変更では起動しません。
 
 - `package-linux`: Swift 6.2 コンテナ上で KonomiKit の `swift test`
 - `mock-server`: モックサーバーの `unittest`
-- `ios-e2e`: macOS 26 + Xcode 26.6 で "iPhone 17" と "iPad Pro 13-inch (M5)" の UI テスト。xcresult とモックサーバーのログを artifact として保存
-- `ipa`: 署名なしの `.ipa` をビルドし、artifact `KonomiTV-unsigned-ipa` として保存（push と pull request のたびに生成）。
+- `ios`: 上記 2 つが成功したあとに動く唯一の macOS ジョブ。macOS 26 + Xcode 26.6 でプロジェクトを 1 回だけ生成・ビルドし、
+  "iPhone 17" で UI テストを実行したあと "iPad Pro 13-inch (M5)" でも実行します（iPhone のテストが失敗しても iPad は実行）。
+  ドラフトの pull request ではスキップします。xcresult とモックサーバーのログは 7 日間 artifact として保存します
+- 署名なしの `.ipa`（artifact `KonomiTV-unsigned-ipa`）は push と手動実行のときだけビルド・保存し、pull request では作りません。
   署名なしのため、インストールには Xcode、AltStore、Sideloadly などで自分の証明書による再署名が必要
 
 ### リリース（`.github/workflows/release.yml`）

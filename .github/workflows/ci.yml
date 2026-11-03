@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
+    branches: [main, feat/ios-client]
+    paths-ignore: ['**/*.md', 'LICENSE', '.gitignore']
   pull_request:
+    paths-ignore: ['**/*.md', 'LICENSE', '.gitignore']
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -42,49 +46,14 @@ jobs:
         working-directory: MockServer
         run: python3 -m unittest discover -v
 
-  ipa:
-    name: Unsigned IPA
+  # One macOS job instead of separate IPA / E2E jobs: the project is generated
+  # and built once, and both simulators are used by the same build.
+  ios:
+    name: iOS (E2E + IPA)
     runs-on: macos-26
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Select Xcode 26.6
-        run: sudo xcode-select -s /Applications/Xcode_26.6.app
-
-      - name: Install XcodeGen
-        run: brew install xcodegen
-
-      - name: Generate Xcode project
-        run: xcodegen generate
-
-      - name: Build unsigned IPA
-        run: |
-          scripts/build-unsigned-ipa.sh \
-            "$RUNNER_TEMP/KonomiTV-unsigned.ipa" \
-            "0.0.${{ github.run_number }}" \
-            "${{ github.run_number }}"
-
-      - name: Upload unsigned IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: KonomiTV-unsigned-ipa
-          path: ${{ runner.temp }}/KonomiTV-unsigned.ipa
-          if-no-files-found: error
-          retention-days: 14
-
-  ios-e2e:
-    name: iOS E2E (${{ matrix.device }})
-    runs-on: macos-26
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - device: iPhone 17
-            artifact: iphone-17
-          - device: iPad Pro 13-inch (M5)
-            artifact: ipad-pro-13-inch-m5
+    timeout-minutes: 75
+    needs: [package-linux, mock-server]
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
 
@@ -95,6 +64,9 @@ jobs:
         run: xcodebuild -version
 
       - name: Install XcodeGen
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: brew install xcodegen
 
       - name: Generate Xcode project
@@ -115,45 +87,122 @@ jobs:
           echo "Mock server did not become ready" >&2
           exit 1
 
-      # Booting ahead of xcodebuild avoids "Timed out while launching
-      # application" on the first UI test of a cold simulator.
-      - name: Boot simulator
+      # Booting here (without waiting) overlaps the simulator boot with the
+      # build. Booting ahead of xcodebuild also avoids "Timed out while
+      # launching application" on the first UI test of a cold simulator.
+      - name: Boot simulators
         run: |
-          udid=$(xcrun simctl list devices available -j \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in d.items() if k.endswith("iOS-26-5") for x in v if x["name"]==sys.argv[1]))' "${{ matrix.device }}")
-          xcrun simctl boot "$udid" || true
-          xcrun simctl bootstatus "$udid" -b
+          set -euo pipefail
+          resolve_udid() {
+            xcrun simctl list devices available -j \
+              | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in d.items() if k.endswith("iOS-26-5") for x in v if x["name"]==sys.argv[1]))' "$1"
+          }
+          iphone_udid=$(resolve_udid "iPhone 17")
+          ipad_udid=$(resolve_udid "iPad Pro 13-inch (M5)")
+          xcrun simctl boot "$iphone_udid" || true
+          xcrun simctl boot "$ipad_udid" || true
+          {
+            echo "IPHONE_UDID=$iphone_udid"
+            echo "IPAD_UDID=$ipad_udid"
+          } >> "$GITHUB_ENV"
 
-      - name: Run UI tests
+      - name: Build for testing
+        id: build
+        run: |
+          xcodebuild build-for-testing \
+            -project KonomiTV.xcodeproj \
+            -scheme KonomiTV \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO
+
+      # The first (slow) boot of both happens during the build; the iPad is
+      # then shut down so only one simulator runs during each test pass.
+      - name: Wait for simulators
+        run: |
+          xcrun simctl bootstatus "$IPHONE_UDID" -b
+          xcrun simctl bootstatus "$IPAD_UDID" -b
+          xcrun simctl shutdown "$IPAD_UDID"
+
+      - name: Test on iPhone 17
+        id: test_iphone
         env:
           TEST_RUNNER_KONOMITV_SERVER_URL: http://127.0.0.1:7010
         run: |
-          xcodebuild test \
+          xcodebuild test-without-building \
             -project KonomiTV.xcodeproj \
             -scheme KonomiTV \
-            -destination "platform=iOS Simulator,name=${{ matrix.device }},OS=26.5" \
+            -destination "id=$IPHONE_UDID" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            -resultBundlePath "$RUNNER_TEMP/TestResults-${{ matrix.artifact }}.xcresult" \
-            -parallel-testing-enabled NO \
-            CODE_SIGNING_ALLOWED=NO
+            -resultBundlePath "$RUNNER_TEMP/TestResults-iphone-17.xcresult" \
+            -parallel-testing-enabled NO
 
-      - name: Upload UI test results
+      - name: Switch to iPad simulator
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          xcrun simctl shutdown "$IPHONE_UDID" || true
+          xcrun simctl boot "$IPAD_UDID" || true
+          xcrun simctl bootstatus "$IPAD_UDID" -b
+
+      # Runs even when the iPhone tests failed, as long as the build succeeded.
+      - name: Test on iPad Pro 13-inch (M5)
+        id: test_ipad
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          TEST_RUNNER_KONOMITV_SERVER_URL: http://127.0.0.1:7010
+        run: |
+          xcodebuild test-without-building \
+            -project KonomiTV.xcodeproj \
+            -scheme KonomiTV \
+            -destination "id=$IPAD_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/TestResults-ipad-pro-13-inch-m5.xcresult" \
+            -parallel-testing-enabled NO
+
+      # Not gated on the test results: the IPA is still useful from a red run.
+      - name: Build unsigned IPA
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: |
+          scripts/build-unsigned-ipa.sh \
+            "$RUNNER_TEMP/KonomiTV-unsigned.ipa" \
+            "0.0.${{ github.run_number }}" \
+            "${{ github.run_number }}"
+
+      - name: Upload unsigned IPA
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: KonomiTV-unsigned-ipa
+          path: ${{ runner.temp }}/KonomiTV-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload iPhone test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: xcresult-${{ matrix.artifact }}
-          path: ${{ runner.temp }}/TestResults-${{ matrix.artifact }}.xcresult
+          name: xcresult-iphone-17
+          path: ${{ runner.temp }}/TestResults-iphone-17.xcresult
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
+
+      - name: Upload iPad test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcresult-ipad-pro-13-inch-m5
+          path: ${{ runner.temp }}/TestResults-ipad-pro-13-inch-m5.xcresult
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload mock server log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mock-server-log-${{ matrix.artifact }}
+          name: mock-server-log
           path: ${{ runner.temp }}/mock-server.log
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
 
       - name: Stop mock server
         if: always()
