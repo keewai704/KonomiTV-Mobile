@@ -192,6 +192,9 @@ public struct Channel: Codable, Sendable, Hashable, Identifiable {
     public var isSubChannel: Bool
     public var isRadioChannel: Bool
     public var isWatchable: Bool
+    /// Jikkyo (real-time comment) momentum, used to sort the channel list when
+    /// `tv_channel_sort_by_jikkyo_force` is enabled. `nil` when unknown.
+    public var jikkyoForce: Int?
 
     public init(
         id: String = "",
@@ -205,7 +208,8 @@ public struct Channel: Codable, Sendable, Hashable, Identifiable {
         name: String = "",
         isSubChannel: Bool = false,
         isRadioChannel: Bool = false,
-        isWatchable: Bool = false
+        isWatchable: Bool = false,
+        jikkyoForce: Int? = nil
     ) {
         self.id = id
         self.displayChannelID = displayChannelID
@@ -219,6 +223,7 @@ public struct Channel: Codable, Sendable, Hashable, Identifiable {
         self.isSubChannel = isSubChannel
         self.isRadioChannel = isRadioChannel
         self.isWatchable = isWatchable
+        self.jikkyoForce = jikkyoForce
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -234,6 +239,7 @@ public struct Channel: Codable, Sendable, Hashable, Identifiable {
         case isSubChannel = "is_subchannel"
         case isRadioChannel = "is_radiochannel"
         case isWatchable = "is_watchable"
+        case jikkyoForce = "jikkyo_force"
     }
 
     public init(from decoder: Decoder) throws {
@@ -251,6 +257,7 @@ public struct Channel: Codable, Sendable, Hashable, Identifiable {
         isSubChannel = container.lenient(Bool.self, forKey: .isSubChannel) ?? false
         isRadioChannel = container.lenient(Bool.self, forKey: .isRadioChannel) ?? false
         isWatchable = container.lenient(Bool.self, forKey: .isWatchable) ?? false
+        jikkyoForce = container.lenient(Int.self, forKey: .jikkyoForce)
     }
 }
 
@@ -273,6 +280,9 @@ public struct LiveChannel: Codable, Sendable, Hashable, Identifiable {
     public var viewerCount: Int
     public var programPresent: Program?
     public var programFollowing: Program?
+    /// Jikkyo (real-time comment) momentum, used for
+    /// `tv_channel_sort_by_jikkyo_force`. `nil` when unknown.
+    public var jikkyoForce: Int?
 
     public init(
         id: String = "",
@@ -290,7 +300,8 @@ public struct LiveChannel: Codable, Sendable, Hashable, Identifiable {
         isDisplay: Bool = true,
         viewerCount: Int = 0,
         programPresent: Program? = nil,
-        programFollowing: Program? = nil
+        programFollowing: Program? = nil,
+        jikkyoForce: Int? = nil
     ) {
         self.id = id
         self.displayChannelID = displayChannelID
@@ -308,6 +319,7 @@ public struct LiveChannel: Codable, Sendable, Hashable, Identifiable {
         self.viewerCount = viewerCount
         self.programPresent = programPresent
         self.programFollowing = programFollowing
+        self.jikkyoForce = jikkyoForce
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -327,6 +339,7 @@ public struct LiveChannel: Codable, Sendable, Hashable, Identifiable {
         case viewerCount = "viewer_count"
         case programPresent = "program_present"
         case programFollowing = "program_following"
+        case jikkyoForce = "jikkyo_force"
     }
 
     public init(from decoder: Decoder) throws {
@@ -348,6 +361,7 @@ public struct LiveChannel: Codable, Sendable, Hashable, Identifiable {
         viewerCount = container.lenient(Int.self, forKey: .viewerCount) ?? 0
         programPresent = container.lenient(Program.self, forKey: .programPresent)
         programFollowing = container.lenient(Program.self, forKey: .programFollowing)
+        jikkyoForce = container.lenient(Int.self, forKey: .jikkyoForce)
     }
 }
 
@@ -431,6 +445,150 @@ public struct LiveChannels: Codable, Sendable, Hashable {
 
 // MARK: - Recorded video / program
 
+/// A CM (commercial) section of a recorded video, in seconds.
+public struct CMSection: Codable, Sendable, Hashable {
+    public var startTime: Double
+    public var endTime: Double
+
+    public init(startTime: Double = 0, endTime: Double = 0) {
+        self.startTime = startTime
+        self.endTime = endTime
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case startTime = "start_time"
+        case endTime = "end_time"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        startTime = container.lenient(Double.self, forKey: .startTime) ?? 0
+        endTime = container.lenient(Double.self, forKey: .endTime) ?? 0
+    }
+}
+
+/// Representative thumbnail image information.
+public struct ThumbnailImageInfo: Codable, Sendable, Hashable {
+    public var format: String
+    public var width: Int
+    public var height: Int
+    /// Monotonically increasing revision, appended to the thumbnail URL as a
+    /// cache buster.
+    public var revision: Int
+
+    public init(format: String = "", width: Int = 0, height: Int = 0, revision: Int = 0) {
+        self.format = format
+        self.width = width
+        self.height = height
+        self.revision = revision
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        format = container.lenient(String.self, forKey: .format) ?? ""
+        width = container.lenient(Int.self, forKey: .width) ?? 0
+        height = container.lenient(Int.self, forKey: .height) ?? 0
+        revision = container.lenient(Int.self, forKey: .revision) ?? 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case format
+        case width
+        case height
+        case revision
+    }
+}
+
+/// Seek-bar tiled thumbnail information.
+public struct ThumbnailTileInfo: Codable, Sendable, Hashable {
+    public var format: String
+    public var imageWidth: Int
+    public var imageHeight: Int
+    public var tileWidth: Int
+    public var tileHeight: Int
+    public var totalTiles: Int
+    public var columnCount: Int
+    public var rowCount: Int
+    public var intervalSec: Double
+
+    public init(
+        format: String = "",
+        imageWidth: Int = 0,
+        imageHeight: Int = 0,
+        tileWidth: Int = 0,
+        tileHeight: Int = 0,
+        totalTiles: Int = 0,
+        columnCount: Int = 0,
+        rowCount: Int = 0,
+        intervalSec: Double = 0
+    ) {
+        self.format = format
+        self.imageWidth = imageWidth
+        self.imageHeight = imageHeight
+        self.tileWidth = tileWidth
+        self.tileHeight = tileHeight
+        self.totalTiles = totalTiles
+        self.columnCount = columnCount
+        self.rowCount = rowCount
+        self.intervalSec = intervalSec
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case format
+        case imageWidth = "image_width"
+        case imageHeight = "image_height"
+        case tileWidth = "tile_width"
+        case tileHeight = "tile_height"
+        case totalTiles = "total_tiles"
+        case columnCount = "column_count"
+        case rowCount = "row_count"
+        case intervalSec = "interval_sec"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        format = container.lenient(String.self, forKey: .format) ?? ""
+        imageWidth = container.lenient(Int.self, forKey: .imageWidth) ?? 0
+        imageHeight = container.lenient(Int.self, forKey: .imageHeight) ?? 0
+        tileWidth = container.lenient(Int.self, forKey: .tileWidth) ?? 0
+        tileHeight = container.lenient(Int.self, forKey: .tileHeight) ?? 0
+        totalTiles = container.lenient(Int.self, forKey: .totalTiles) ?? 0
+        columnCount = container.lenient(Int.self, forKey: .columnCount) ?? 0
+        rowCount = container.lenient(Int.self, forKey: .rowCount) ?? 0
+        intervalSec = container.lenient(Double.self, forKey: .intervalSec) ?? 0
+    }
+}
+
+/// Thumbnail information of a recorded video.
+public struct ThumbnailInfo: Codable, Sendable, Hashable {
+    public var version: Int
+    public var representative: ThumbnailImageInfo?
+    public var tile: ThumbnailTileInfo?
+
+    public init(
+        version: Int = 0,
+        representative: ThumbnailImageInfo? = nil,
+        tile: ThumbnailTileInfo? = nil
+    ) {
+        self.version = version
+        self.representative = representative
+        self.tile = tile
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = container.lenient(Int.self, forKey: .version) ?? 0
+        representative = container.lenient(ThumbnailImageInfo.self, forKey: .representative)
+        tile = container.lenient(ThumbnailTileInfo.self, forKey: .tile)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case representative
+        case tile
+    }
+}
+
 public struct RecordedVideo: Codable, Sendable, Hashable, Identifiable {
     public var id: Int
     public var status: String
@@ -446,6 +604,23 @@ public struct RecordedVideo: Codable, Sendable, Hashable, Identifiable {
     public var createdAt: Date?
     public var updatedAt: Date?
 
+    // Fields shown in the web client's "録画ファイル情報" dialog.
+    public var filePath: String?
+    public var fileHash: String?
+    public var fileCreatedAt: Date?
+    public var fileModifiedAt: Date?
+    public var recordingStartTime: Date?
+    public var recordingEndTime: Date?
+    public var videoCodecProfile: String?
+    public var videoScanType: String?
+    public var hasVideoStreamChanges: Bool
+    public var primaryAudioSamplingRate: Int?
+    public var secondaryAudioCodec: String?
+    public var secondaryAudioChannel: String?
+    public var secondaryAudioSamplingRate: Int?
+    public var cmSections: [CMSection]?
+    public var thumbnailInfo: ThumbnailInfo?
+
     public init(
         id: Int = -1,
         status: String = "",
@@ -459,13 +634,28 @@ public struct RecordedVideo: Codable, Sendable, Hashable, Identifiable {
         primaryAudioCodec: String? = nil,
         primaryAudioChannel: String? = nil,
         createdAt: Date? = nil,
-        updatedAt: Date? = nil
+        updatedAt: Date? = nil,
+        filePath: String? = nil,
+        fileHash: String? = nil,
+        fileCreatedAt: Date? = nil,
+        fileModifiedAt: Date? = nil,
+        recordingStartTime: Date? = nil,
+        recordingEndTime: Date? = nil,
+        videoCodecProfile: String? = nil,
+        videoScanType: String? = nil,
+        hasVideoStreamChanges: Bool = false,
+        primaryAudioSamplingRate: Int? = nil,
+        secondaryAudioCodec: String? = nil,
+        secondaryAudioChannel: String? = nil,
+        secondaryAudioSamplingRate: Int? = nil,
+        cmSections: [CMSection]? = nil,
+        thumbnailInfo: ThumbnailInfo? = nil
     ) {
         self.id = id
         self.status = status
         self.duration = duration
         self.videoResolutionWidth = videoResolutionWidth
-               self.videoResolutionHeight = videoResolutionHeight
+        self.videoResolutionHeight = videoResolutionHeight
         self.videoCodec = videoCodec
         self.fileSize = fileSize
         self.containerFormat = containerFormat
@@ -474,6 +664,21 @@ public struct RecordedVideo: Codable, Sendable, Hashable, Identifiable {
         self.primaryAudioChannel = primaryAudioChannel
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.filePath = filePath
+        self.fileHash = fileHash
+        self.fileCreatedAt = fileCreatedAt
+        self.fileModifiedAt = fileModifiedAt
+        self.recordingStartTime = recordingStartTime
+        self.recordingEndTime = recordingEndTime
+        self.videoCodecProfile = videoCodecProfile
+        self.videoScanType = videoScanType
+        self.hasVideoStreamChanges = hasVideoStreamChanges
+        self.primaryAudioSamplingRate = primaryAudioSamplingRate
+        self.secondaryAudioCodec = secondaryAudioCodec
+        self.secondaryAudioChannel = secondaryAudioChannel
+        self.secondaryAudioSamplingRate = secondaryAudioSamplingRate
+        self.cmSections = cmSections
+        self.thumbnailInfo = thumbnailInfo
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -490,6 +695,21 @@ public struct RecordedVideo: Codable, Sendable, Hashable, Identifiable {
         case primaryAudioChannel = "primary_audio_channel"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case filePath = "file_path"
+        case fileHash = "file_hash"
+        case fileCreatedAt = "file_created_at"
+        case fileModifiedAt = "file_modified_at"
+        case recordingStartTime = "recording_start_time"
+        case recordingEndTime = "recording_end_time"
+        case videoCodecProfile = "video_codec_profile"
+        case videoScanType = "video_scan_type"
+        case hasVideoStreamChanges = "has_video_stream_changes"
+        case primaryAudioSamplingRate = "primary_audio_sampling_rate"
+        case secondaryAudioCodec = "secondary_audio_codec"
+        case secondaryAudioChannel = "secondary_audio_channel"
+        case secondaryAudioSamplingRate = "secondary_audio_sampling_rate"
+        case cmSections = "cm_sections"
+        case thumbnailInfo = "thumbnail_info"
     }
 
     public init(from decoder: Decoder) throws {
@@ -507,6 +727,21 @@ public struct RecordedVideo: Codable, Sendable, Hashable, Identifiable {
         primaryAudioChannel = container.lenient(String.self, forKey: .primaryAudioChannel)
         createdAt = container.lenient(Date.self, forKey: .createdAt)
         updatedAt = container.lenient(Date.self, forKey: .updatedAt)
+        filePath = container.lenient(String.self, forKey: .filePath)
+        fileHash = container.lenient(String.self, forKey: .fileHash)
+        fileCreatedAt = container.lenient(Date.self, forKey: .fileCreatedAt)
+        fileModifiedAt = container.lenient(Date.self, forKey: .fileModifiedAt)
+        recordingStartTime = container.lenient(Date.self, forKey: .recordingStartTime)
+        recordingEndTime = container.lenient(Date.self, forKey: .recordingEndTime)
+        videoCodecProfile = container.lenient(String.self, forKey: .videoCodecProfile)
+        videoScanType = container.lenient(String.self, forKey: .videoScanType)
+        hasVideoStreamChanges = container.lenient(Bool.self, forKey: .hasVideoStreamChanges) ?? false
+        primaryAudioSamplingRate = container.lenient(Int.self, forKey: .primaryAudioSamplingRate)
+        secondaryAudioCodec = container.lenient(String.self, forKey: .secondaryAudioCodec)
+        secondaryAudioChannel = container.lenient(String.self, forKey: .secondaryAudioChannel)
+        secondaryAudioSamplingRate = container.lenient(Int.self, forKey: .secondaryAudioSamplingRate)
+        cmSections = container.lenient([CMSection].self, forKey: .cmSections)
+        thumbnailInfo = container.lenient(ThumbnailInfo.self, forKey: .thumbnailInfo)
     }
 }
 
@@ -530,6 +765,19 @@ public struct RecordedProgram: Codable, Sendable, Hashable, Identifiable {
     public var createdAt: Date?
     public var updatedAt: Date?
 
+    // Series linkage. Both are nil unless the program title could be parsed
+    // and the series exists on the server.
+    public var seriesID: Int?
+    public var seriesBroadcastPeriodID: Int?
+    public var recordingStartMargin: Double
+    public var recordingEndMargin: Double
+    public var isPartiallyRecorded: Bool
+    public var detail: [String: String]
+    public var primaryAudioType: String?
+    public var primaryAudioLanguage: String?
+    public var secondaryAudioType: String?
+    public var secondaryAudioLanguage: String?
+
     public init(
         id: Int = -1,
         title: String = "",
@@ -548,7 +796,17 @@ public struct RecordedProgram: Codable, Sendable, Hashable, Identifiable {
         serviceID: Int? = nil,
         eventID: Int? = nil,
         createdAt: Date? = nil,
-        updatedAt: Date? = nil
+        updatedAt: Date? = nil,
+        seriesID: Int? = nil,
+        seriesBroadcastPeriodID: Int? = nil,
+        recordingStartMargin: Double = 0,
+        recordingEndMargin: Double = 0,
+        isPartiallyRecorded: Bool = false,
+        detail: [String: String] = [:],
+        primaryAudioType: String? = nil,
+        primaryAudioLanguage: String? = nil,
+        secondaryAudioType: String? = nil,
+        secondaryAudioLanguage: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -568,6 +826,16 @@ public struct RecordedProgram: Codable, Sendable, Hashable, Identifiable {
         self.eventID = eventID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.seriesID = seriesID
+        self.seriesBroadcastPeriodID = seriesBroadcastPeriodID
+        self.recordingStartMargin = recordingStartMargin
+        self.recordingEndMargin = recordingEndMargin
+        self.isPartiallyRecorded = isPartiallyRecorded
+        self.detail = detail
+        self.primaryAudioType = primaryAudioType
+        self.primaryAudioLanguage = primaryAudioLanguage
+        self.secondaryAudioType = secondaryAudioType
+        self.secondaryAudioLanguage = secondaryAudioLanguage
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -589,6 +857,16 @@ public struct RecordedProgram: Codable, Sendable, Hashable, Identifiable {
         case eventID = "event_id"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case seriesID = "series_id"
+        case seriesBroadcastPeriodID = "series_broadcast_period_id"
+        case recordingStartMargin = "recording_start_margin"
+        case recordingEndMargin = "recording_end_margin"
+        case isPartiallyRecorded = "is_partially_recorded"
+        case detail
+        case primaryAudioType = "primary_audio_type"
+        case primaryAudioLanguage = "primary_audio_language"
+        case secondaryAudioType = "secondary_audio_type"
+        case secondaryAudioLanguage = "secondary_audio_language"
     }
 
     public init(from decoder: Decoder) throws {
@@ -611,6 +889,16 @@ public struct RecordedProgram: Codable, Sendable, Hashable, Identifiable {
         eventID = container.lenient(Int.self, forKey: .eventID)
         createdAt = container.lenient(Date.self, forKey: .createdAt)
         updatedAt = container.lenient(Date.self, forKey: .updatedAt)
+        seriesID = container.lenient(Int.self, forKey: .seriesID)
+        seriesBroadcastPeriodID = container.lenient(Int.self, forKey: .seriesBroadcastPeriodID)
+        recordingStartMargin = container.lenient(Double.self, forKey: .recordingStartMargin) ?? 0
+        recordingEndMargin = container.lenient(Double.self, forKey: .recordingEndMargin) ?? 0
+        isPartiallyRecorded = container.lenient(Bool.self, forKey: .isPartiallyRecorded) ?? false
+        detail = container.lenient([String: String].self, forKey: .detail) ?? [:]
+        primaryAudioType = container.lenient(String.self, forKey: .primaryAudioType)
+        primaryAudioLanguage = container.lenient(String.self, forKey: .primaryAudioLanguage)
+        secondaryAudioType = container.lenient(String.self, forKey: .secondaryAudioType)
+        secondaryAudioLanguage = container.lenient(String.self, forKey: .secondaryAudioLanguage)
     }
 }
 

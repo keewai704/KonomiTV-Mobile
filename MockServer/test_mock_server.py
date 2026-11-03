@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 from datetime import datetime
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import mock_server
 
@@ -404,6 +404,503 @@ class MockServerTestCase(unittest.TestCase):
 
         total_after = self.stats()["live_total"]
         self.assertGreaterEqual(total_after, status_before["live_total"] + 1)
+
+
+# ---------------------------------------------------------------------------
+# 追加エンドポイント (シリーズ / 番組表 / 番組検索 / クライアント設定 / ダウンロード)
+# ---------------------------------------------------------------------------
+
+ADMIN_HEADERS = {"Authorization": "Bearer mock-access-token"}
+
+
+class MockServerExtensionTestCase(unittest.TestCase):
+    """Non-destructive tests for the newer endpoints (fresh server per class)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = mock_server.create_server("127.0.0.1", 0)
+        cls.host, cls.port = cls.server.server_address[:2]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def request(self, method: str, path: str, body: bytes | None = None,
+                headers: dict | None = None):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            hdrs = {"Accept": "*/*"}
+            if headers:
+                hdrs.update(headers)
+            conn.request(method, path, body=body, headers=hdrs)
+            response = conn.getresponse()
+            data = response.read()
+            return response.status, dict(response.getheaders()), data
+        finally:
+            conn.close()
+
+    def get_json(self, path: str, headers: dict | None = None):
+        status, response_headers, data = self.request("GET", path, headers=headers)
+        return status, response_headers, json.loads(data.decode("utf-8"))
+
+    def post_json(self, path: str, payload, headers: dict | None = None):
+        status, response_headers, data = self.request(
+            "POST", path,
+            body=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", **(headers or {})},
+        )
+        return status, response_headers, json.loads(data.decode("utf-8"))
+
+    # -- series ------------------------------------------------------------
+
+    def test_series_list_and_pagination(self) -> None:
+        status, _, payload = self.get_json("/api/series?order=desc&page=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 3)
+        self.assertEqual(len(payload["series_list"]), 3)
+        self.assertEqual(
+            [entry["id"] for entry in payload["series_list"]], [1, 2, 3]
+        )
+
+        status, _, ascending = self.get_json("/api/series?order=asc&page=1")
+        self.assertEqual(status, 200)
+        self.assertEqual([entry["id"] for entry in ascending["series_list"]], [3, 2, 1])
+
+        status, _, empty = self.get_json("/api/series?order=desc&page=2")
+        self.assertEqual(status, 200)
+        self.assertEqual(empty["total"], 3)
+        self.assertEqual(empty["series_list"], [])
+
+        entry = payload["series_list"][0]
+        for field in ("id", "title", "description", "genres",
+                      "broadcast_periods", "created_at", "updated_at"):
+            self.assertIn(field, entry)
+        period = entry["broadcast_periods"][0]
+        for field in ("channel", "start_date", "end_date", "recorded_programs"):
+            self.assertIn(field, period)
+        self.assertEqual(period["channel"]["type"], "GR")
+        self.assertTrue(period["start_date"].count("-") == 2)
+        self.assertGreaterEqual(len(period["recorded_programs"]), 3)
+
+    def test_series_search(self) -> None:
+        query = quote("フリーレン")
+        status, _, payload = self.get_json(f"/api/series/search?query={query}&order=desc&page=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["series_list"][0]["id"], 2)
+
+        status, _, empty = self.get_json("/api/series/search?query=zzz-no-match")
+        self.assertEqual(status, 200)
+        self.assertEqual(empty["total"], 0)
+        self.assertEqual(empty["series_list"], [])
+
+        # 空クエリは全件取得と同じ
+        status, _, all_series = self.get_json("/api/series/search?query=")
+        self.assertEqual(status, 200)
+        self.assertEqual(all_series["total"], 3)
+
+    def test_series_detail(self) -> None:
+        status, _, payload = self.get_json("/api/series/1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["id"], 1)
+        self.assertEqual(payload["title"], "アニメ 鬼滅の刃")
+        self.assertEqual(len(payload["broadcast_periods"]), 1)
+        self.assertTrue(payload["genres"])
+
+        status, _, payload = self.get_json("/api/series/999")
+        self.assertEqual(status, 422)
+        self.assertIn("detail", payload)
+
+    def test_series_is_linked_from_recorded_programs(self) -> None:
+        status, _, series = self.get_json("/api/series/1")
+        self.assertEqual(status, 200)
+        recorded_ids = [
+            program["id"]
+            for period in series["broadcast_periods"]
+            for program in period["recorded_programs"]
+        ]
+        self.assertGreaterEqual(len(recorded_ids), 3)
+
+        for video_id in recorded_ids:
+            status, _, program = self.get_json(f"/api/videos/{video_id}")
+            self.assertEqual(status, 200)
+            self.assertEqual(program["series_id"], 1)
+            self.assertEqual(program["series_title"], "アニメ 鬼滅の刃")
+            self.assertIsNotNone(program["series_broadcast_period_id"])
+            self.assertIsNotNone(program["episode_number"])
+
+        # シリーズに属さない録画番組は series_id が null のまま
+        status, _, unrelated = self.get_json("/api/videos/1")
+        self.assertEqual(status, 200)
+        self.assertIsNone(unrelated["series_id"])
+
+    # -- videos: order and ids --------------------------------------------
+
+    def test_videos_order_asc(self) -> None:
+        status, _, payload = self.get_json("/api/videos?order=asc&page=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 35)
+        self.assertEqual(
+            [program["id"] for program in payload["recorded_programs"]],
+            list(range(35, 5, -1)),
+        )
+        start_times = [program["start_time"] for program in payload["recorded_programs"]]
+        self.assertEqual(start_times, sorted(start_times))
+
+    def test_videos_ids_preserve_requested_order(self) -> None:
+        status, _, payload = self.get_json("/api/videos?ids=5&ids=1&ids=4&order=ids&page=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 3)
+        self.assertEqual(
+            [program["id"] for program in payload["recorded_programs"]], [5, 1, 4]
+        )
+
+        # 存在しない ID は無視されるが total には数えない
+        status, _, payload = self.get_json("/api/videos?ids=2&ids=9999&order=ids&page=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual([program["id"] for program in payload["recorded_programs"]], [2])
+
+        # order=ids 以外なら通常のソート順 (開始時刻の新しい順) になる
+        status, _, payload = self.get_json("/api/videos?ids=5&ids=1&ids=4&order=desc&page=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [program["id"] for program in payload["recorded_programs"]], [1, 4, 5]
+        )
+
+    def test_videos_ids_paging(self) -> None:
+        ids = "&".join(f"ids={index}" for index in range(1, 36))
+        status, _, payload = self.get_json(f"/api/videos?{ids}&order=ids&page=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 35)
+        self.assertEqual(len(payload["recorded_programs"]), 30)
+        self.assertEqual(payload["recorded_programs"][0]["id"], 1)
+
+        status, _, payload = self.get_json(f"/api/videos?{ids}&order=ids&page=2")
+        self.assertEqual(status, 200)
+        self.assertEqual([program["id"] for program in payload["recorded_programs"]], list(range(31, 36)))
+
+    # -- videos: download / reanalyze / regenerate ------------------------
+
+    def test_video_download(self) -> None:
+        status, headers, body = self.request("GET", "/api/videos/1/download")
+        self.assertEqual(status, 200)
+        self.assertIn("video/mp2t", headers.get("Content-Type", ""))
+        disposition = headers.get("Content-Disposition", "")
+        self.assertTrue(disposition.startswith("attachment;"))
+        self.assertIn('filename="program1.m2ts"', disposition)
+        self.assertGreater(len(body), 0)
+
+        status, _, payload = self.get_json("/api/videos/9999/download")
+        self.assertEqual(status, 422)
+        self.assertIn("detail", payload)
+
+    def test_video_reanalyze_requires_admin_token(self) -> None:
+        status, _, _ = self.request("POST", "/api/videos/1/reanalyze")
+        self.assertEqual(status, 401)
+
+        status, _, body = self.request(
+            "POST", "/api/videos/1/reanalyze", headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+
+        status, _, body = self.request(
+            "POST", "/api/videos/9999/reanalyze", headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("detail", json.loads(body.decode("utf-8")))
+
+    def test_video_thumbnail_regenerate(self) -> None:
+        status, _, _ = self.request("POST", "/api/videos/1/thumbnail/regenerate")
+        self.assertEqual(status, 401)
+
+        status, _, body = self.request(
+            "POST", "/api/videos/1/thumbnail/regenerate", headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+
+        status, _, body = self.request(
+            "POST", "/api/videos/9999/thumbnail/regenerate", headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("detail", json.loads(body.decode("utf-8")))
+
+    # -- programs ----------------------------------------------------------
+
+    def test_programs_search(self) -> None:
+        status, _, payload = self.post_json(
+            "/api/programs/search", {"keyword": "ショッピング", "is_enabled": True}
+        )
+        self.assertEqual(status, 200)
+        self.assertGreater(payload["total"], 0)
+        self.assertEqual(len(payload["programs"]), payload["total"])
+        for program in payload["programs"]:
+            self.assertTrue(
+                any(genre["middle"] == "ショッピング・通販" for genre in program["genres"])
+            )
+            for field in (
+                "id", "channel_id", "network_id", "service_id", "event_id",
+                "title", "description", "detail", "start_time", "end_time",
+                "duration", "is_free", "genres",
+            ):
+                self.assertIn(field, program)
+
+        status, _, empty = self.post_json("/api/programs/search", {"keyword": "zzz-no-match"})
+        self.assertEqual(status, 200)
+        self.assertEqual(empty["total"], 0)
+        self.assertEqual(empty["programs"], [])
+
+        # 除外キーワード
+        status, _, excluded = self.post_json(
+            "/api/programs/search", {"keyword": "ショッピング", "exclude_keyword": "BS"}
+        )
+        self.assertEqual(status, 200)
+        for program in excluded["programs"]:
+            self.assertNotIn("BS", program["title"])
+        self.assertLess(excluded["total"], payload["total"])
+
+        # ジャンル絞り込み
+        status, _, genre_filtered = self.post_json(
+            "/api/programs/search",
+            {"keyword": "", "genre_ranges": [{"major": "ドラマ", "middle": "国内ドラマ"}]},
+        )
+        self.assertEqual(status, 200)
+        self.assertGreater(genre_filtered["total"], 0)
+        for program in genre_filtered["programs"]:
+            self.assertTrue(
+                any(genre["middle"] == "国内ドラマ" for genre in program["genres"])
+            )
+
+    def test_programs_search_accepts_get(self) -> None:
+        status, _, payload = self.get_json(
+            "/api/programs/search?query=" + quote("ショッピング")
+        )
+        self.assertEqual(status, 200)
+        self.assertGreater(payload["total"], 0)
+
+    def test_programs_timetable(self) -> None:
+        status, _, payload = self.get_json("/api/programs/timetable")
+        self.assertEqual(status, 200)
+        self.assertIn("channels", payload)
+        self.assertIn("date_range", payload)
+        self.assertIn("earliest", payload["date_range"])
+        self.assertIn("latest", payload["date_range"])
+        self.assertEqual(len(payload["channels"]), 7)
+
+        served_genres = set()
+        for entry in payload["channels"]:
+            self.assertIn("channel", entry)
+            self.assertIn("programs", entry)
+            self.assertIn("subchannels", entry)
+            self.assertGreaterEqual(len(entry["programs"]), 12)
+            self.assertEqual(entry["channel"]["type"], entry["channel"]["type"].upper())
+            for program in entry["programs"]:
+                self.assertIn("reservation", program)
+                self.assertEqual(program["channel_id"], entry["channel"]["id"])
+                for genre in program["genres"]:
+                    served_genres.add(genre["middle"])
+
+        self.assertIn("ショッピング・通販", served_genres)
+        self.assertIn("国内アニメ", served_genres)
+        self.assertIn("定時・総合", served_genres)
+
+    def test_programs_timetable_channel_type_and_pinned(self) -> None:
+        status, _, payload = self.get_json("/api/programs/timetable?channel_type=BS")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["channels"]), 3)
+        for entry in payload["channels"]:
+            self.assertEqual(entry["channel"]["type"], "BS")
+
+        status, _, payload = self.get_json(
+            "/api/programs/timetable?pinned_channel_ids=bs101,gr011"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [entry["channel"]["display_channel_id"] for entry in payload["channels"]],
+            ["bs101", "gr011"],
+        )
+
+        status, _, payload = self.get_json(
+            "/api/programs/timetable?start_time=2026-11-02T00:00:00%2B09:00"
+            "&end_time=2026-11-02T06:00:00%2B09:00"
+        )
+        self.assertEqual(status, 200)
+        for entry in payload["channels"]:
+            self.assertTrue(entry["programs"])
+            for program in entry["programs"]:
+                self.assertTrue(program["start_time"].startswith("2026-11-02"))
+                self.assertLess(program["start_time"], "2026-11-02T06:00:00")
+
+    # -- client settings ---------------------------------------------------
+
+    def test_client_settings_requires_token(self) -> None:
+        status, _, _ = self.request("GET", "/api/settings/client")
+        self.assertEqual(status, 401)
+
+    def test_client_settings_defaults_match_web_client(self) -> None:
+        status, _, payload = self.get_json("/api/settings/client", headers=ADMIN_HEADERS)
+        self.assertEqual(status, 200)
+        # Web クライアント (SettingsStore.ts) のデフォルト値
+        self.assertEqual(payload["last_synced_at"], 0)
+        self.assertEqual(payload["pinned_channel_ids"], [])
+        self.assertEqual(payload["mylist"], [])
+        self.assertEqual(payload["watched_history"], [])
+        self.assertEqual(payload["video_watched_history_max_count"], 50)
+        self.assertIs(payload["tv_channel_sort_by_jikkyo_force"], False)
+        self.assertIs(payload["use_28hour_clock"], False)
+        self.assertIs(payload["timetable_dim_shopping_programs"], True)
+        self.assertEqual(payload["timetable_channel_width"], "Normal")
+        self.assertEqual(payload["panel_display_state"], "RestorePreviousState")
+        for key in mock_server.SYNCED_CLIENT_SETTING_KEYS:
+            self.assertIn(key, payload)
+
+
+# ---------------------------------------------------------------------------
+# 破壊的な操作 (録画削除 / クライアント設定の更新) は専用のサーバーで検証する
+# ---------------------------------------------------------------------------
+
+class MockServerMutationTestCase(unittest.TestCase):
+    """Destructive endpoint tests (fresh server per class)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = mock_server.create_server("127.0.0.1", 0)
+        cls.host, cls.port = cls.server.server_address[:2]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def request(self, method: str, path: str, body: bytes | None = None,
+                headers: dict | None = None):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            hdrs = {"Accept": "*/*"}
+            if headers:
+                hdrs.update(headers)
+            conn.request(method, path, body=body, headers=hdrs)
+            response = conn.getresponse()
+            data = response.read()
+            return response.status, dict(response.getheaders()), data
+        finally:
+            conn.close()
+
+    def get_json(self, path: str, headers: dict | None = None):
+        status, response_headers, data = self.request("GET", path, headers=headers)
+        return status, response_headers, json.loads(data.decode("utf-8"))
+
+    def put_json(self, path: str, payload, headers: dict | None = None):
+        status, response_headers, data = self.request(
+            "PUT", path,
+            body=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", **(headers or {})},
+        )
+        return status, response_headers, data
+
+    def stats(self) -> dict:
+        status, _, payload = self.get_json("/__mock/stats")
+        self.assertEqual(status, 200)
+        return payload
+
+    def test_client_settings_put_and_unknown_keys(self) -> None:
+        status, _, data = self.request(
+            "GET", "/api/settings/client", headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 200)
+        settings = json.loads(data.decode("utf-8"))
+        settings["last_synced_at"] = 1700000000.5
+        settings["pinned_channel_ids"] = ["gr011", "bs101"]
+        settings["mylist"] = [{"type": "RecordedProgram", "id": 1, "created_at": 1700000000}]
+        settings["watched_history"] = [{
+            "video_id": 1,
+            "last_playback_position": 12.5,
+            "created_at": 1700000000,
+            "updated_at": 1700000001,
+        }]
+        settings["video_watched_history_max_count"] = 10
+        settings["unknown_client_key"] = {"nested": [1, 2, 3]}
+        settings["future_key"] = "keep-me"
+
+        before = self.stats()["settings_put_count"]
+        status, _, body = self.put_json(
+            "/api/settings/client", settings, headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+        self.assertEqual(self.stats()["settings_put_count"], before + 1)
+
+        status, _, payload = self.get_json("/api/settings/client", headers=ADMIN_HEADERS)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["last_synced_at"], 1700000000.5)
+        self.assertEqual(payload["pinned_channel_ids"], ["gr011", "bs101"])
+        self.assertEqual(payload["mylist"][0]["id"], 1)
+        self.assertEqual(payload["watched_history"][0]["last_playback_position"], 12.5)
+        self.assertEqual(payload["video_watched_history_max_count"], 10)
+        self.assertEqual(payload["unknown_client_key"], {"nested": [1, 2, 3]})
+        self.assertEqual(payload["future_key"], "keep-me")
+
+    def test_client_settings_put_requires_token(self) -> None:
+        status, _, _ = self.put_json("/api/settings/client", {"last_synced_at": 1})
+        self.assertEqual(status, 401)
+
+    def test_client_settings_put_rejects_outdated_settings(self) -> None:
+        status, _, payload = self.get_json("/api/settings/client", headers=ADMIN_HEADERS)
+        current = payload["last_synced_at"]
+        payload["last_synced_at"] = max(0, current - 100)
+        status, _, body = self.put_json(
+            "/api/settings/client", payload, headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("outdated", json.loads(body.decode("utf-8"))["detail"])
+
+    def test_client_settings_put_requires_last_synced_at(self) -> None:
+        status, _, body = self.put_json(
+            "/api/settings/client", {"mylist": []}, headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("last_synced_at", json.loads(body.decode("utf-8"))["detail"])
+
+    def test_delete_video_requires_admin_and_removes_it(self) -> None:
+        status, _, _ = self.request("DELETE", "/api/videos/35")
+        self.assertEqual(status, 401)
+
+        before = self.stats()
+        status, _, body = self.request(
+            "DELETE", "/api/videos/35", headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+
+        # 録画番組はプロセスの生存期間中は戻らない
+        status, _, _ = self.get_json("/api/videos/35")
+        self.assertEqual(status, 404)
+        status, _, payload = self.get_json("/api/videos?order=desc&page=1")
+        self.assertEqual(payload["total"], 34)
+        self.assertNotIn(35, [program["id"] for program in payload["recorded_programs"]])
+
+        # 二度目の削除は 422
+        status, _, payload = self.get_json(
+            "/api/videos/35", headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 404)
+        status, _, body = self.request(
+            "DELETE", "/api/videos/35", headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 422)
+
+        after = self.stats()
+        self.assertEqual(after["video_delete_count"], before["video_delete_count"] + 1)
+        self.assertIn(35, after["deleted_video_ids"])
 
 
 if __name__ == "__main__":

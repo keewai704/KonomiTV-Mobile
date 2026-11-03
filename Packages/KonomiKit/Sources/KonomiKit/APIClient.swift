@@ -22,6 +22,16 @@ public struct URLSessionTransport: HTTPTransport {
     }
 }
 
+/// Sort order accepted by the recorded program / series list endpoints.
+///
+/// `ids` is only used with the `ids` query parameter of `/api/videos`, where it
+/// tells the server to keep the requested order.
+public enum VideoListOrder: String, Codable, CaseIterable, Sendable, Hashable {
+    case desc
+    case asc
+    case ids
+}
+
 /// Async client for the KonomiTV HTTP API.
 public struct APIClient: Sendable {
     public let baseURL: URL
@@ -53,23 +63,49 @@ public struct APIClient: Sendable {
         try await perform(makeRequest(path: ["channels"]), as: LiveChannels.self)
     }
 
-    public func videos(page: Int = 1) async throws -> RecordedPrograms {
+    public func videos(page: Int = 1, order: VideoListOrder = .desc) async throws -> RecordedPrograms {
         let request = makeRequest(
             path: ["videos"],
             query: [
-                URLQueryItem(name: "order", value: "desc"),
+                URLQueryItem(name: "order", value: order.rawValue),
                 URLQueryItem(name: "page", value: String(max(page, 1))),
             ]
         )
         return try await perform(request, as: RecordedPrograms.self)
     }
 
-    public func searchVideos(query: String, page: Int = 1) async throws -> RecordedPrograms {
+    /// Recorded programs for the given IDs, in the order requested.
+    ///
+    /// Used for My List and the watch history, which store IDs rather than
+    /// programs. Sends `GET /api/videos?ids=1&ids=2&...&order=ids`.
+    public func videos(ids: [Int], page: Int = 1) async throws -> RecordedPrograms {
+        // An empty list would be sent as "no ids filter", which the server answers
+        // with every recorded program; an empty My List must stay empty.
+        guard !ids.isEmpty else {
+            return RecordedPrograms(total: 0, recordedPrograms: [])
+        }
+        let request = makeRequest(
+            path: ["videos"],
+            query: {
+                var query = ids.map { URLQueryItem(name: "ids", value: String($0)) }
+                query.append(URLQueryItem(name: "order", value: VideoListOrder.ids.rawValue))
+                query.append(URLQueryItem(name: "page", value: String(max(page, 1))))
+                return query
+            }()
+        )
+        return try await perform(request, as: RecordedPrograms.self)
+    }
+
+    public func searchVideos(
+        query: String,
+        page: Int = 1,
+        order: VideoListOrder = .desc
+    ) async throws -> RecordedPrograms {
         let request = makeRequest(
             path: ["videos", "search"],
             query: [
                 URLQueryItem(name: "query", value: query),
-                URLQueryItem(name: "order", value: "desc"),
+                URLQueryItem(name: "order", value: order.rawValue),
                 URLQueryItem(name: "page", value: String(max(page, 1))),
             ]
         )
@@ -78,6 +114,165 @@ public struct APIClient: Sendable {
 
     public func video(id: Int) async throws -> RecordedProgram {
         try await perform(makeRequest(path: ["videos", String(id)]), as: RecordedProgram.self)
+    }
+
+    /// Deletes a recorded program and its file (`DELETE /api/videos/{id}`).
+    ///
+    /// Requires an admin account on the server.
+    public func deleteVideo(id: Int) async throws {
+        let request = makeRequest(path: ["videos", String(id)], method: "DELETE")
+        _ = try await sendRaw(request)
+    }
+
+    /// Re-analyzes the metadata of a recorded program
+    /// (`POST /api/videos/{id}/reanalyze`). Requires an admin account.
+    public func reanalyzeVideo(id: Int) async throws {
+        let request = makeRequest(path: ["videos", String(id), "reanalyze"], method: "POST")
+        _ = try await sendRaw(request)
+    }
+
+    /// Regenerates the thumbnails of a recorded program
+    /// (`POST /api/videos/{id}/thumbnail/regenerate`). Requires an admin account.
+    public func regenerateThumbnail(id: Int) async throws {
+        let request = makeRequest(
+            path: ["videos", String(id), "thumbnail", "regenerate"],
+            method: "POST"
+        )
+        _ = try await sendRaw(request)
+    }
+
+    // MARK: - Series
+
+    public func seriesList(
+        page: Int = 1,
+        order: VideoListOrder = .desc
+    ) async throws -> SeriesList {
+        let request = makeRequest(
+            path: ["series"],
+            query: [
+                URLQueryItem(name: "order", value: order.rawValue),
+                URLQueryItem(name: "page", value: String(max(page, 1))),
+            ]
+        )
+        return try await perform(request, as: SeriesList.self)
+    }
+
+    public func searchSeries(
+        query: String,
+        page: Int = 1,
+        order: VideoListOrder = .desc
+    ) async throws -> SeriesList {
+        let request = makeRequest(
+            path: ["series", "search"],
+            query: [
+                URLQueryItem(name: "query", value: query),
+                URLQueryItem(name: "order", value: order.rawValue),
+                URLQueryItem(name: "page", value: String(max(page, 1))),
+            ]
+        )
+        return try await perform(request, as: SeriesList.self)
+    }
+
+    public func series(id: Int) async throws -> Series {
+        try await perform(makeRequest(path: ["series", String(id)]), as: Series.self)
+    }
+
+    // MARK: - Programs
+
+    /// Searches the EPG with a program search condition.
+    ///
+    /// The server exposes this as `POST /api/programs/search` with the condition
+    /// as the JSON body (see `ProgramsRouter.ProgramSearchAPI`); the web client
+    /// calls it the same way.
+    public func searchPrograms(_ condition: ProgramSearchCondition) async throws -> Programs {
+        let body: Data
+        do {
+            body = try JSONCoding.encode(condition)
+        } catch {
+            throw APIError.decoding(error.localizedDescription)
+        }
+        let request = makeRequest(
+            path: ["programs", "search"],
+            method: "POST",
+            body: body,
+            contentType: "application/json"
+        )
+        return try await perform(request, as: Programs.self)
+    }
+
+    /// Programs of every channel (or of one channel type / of the pinned
+    /// channels) in the given time range.
+    ///
+    /// `pinnedChannelIDs` takes precedence over `channelType` on the server, and
+    /// also fixes the column order.
+    public func timetable(
+        startTime: Date,
+        endTime: Date,
+        channelType: ChannelType? = nil,
+        pinnedChannelIDs: [String] = []
+    ) async throws -> TimeTable {
+        let request = makeRequest(
+            path: ["programs", "timetable"],
+            query: {
+                var query: [URLQueryItem] = [
+                    URLQueryItem(
+                        name: "start_time",
+                        value: JSONCoding.formatQueryDateTime(startTime)
+                    ),
+                    URLQueryItem(
+                        name: "end_time",
+                        value: JSONCoding.formatQueryDateTime(endTime)
+                    ),
+                ]
+                if let channelType {
+                    query.append(
+                        URLQueryItem(name: "channel_type", value: channelType.rawValue)
+                    )
+                }
+                if !pinnedChannelIDs.isEmpty {
+                    query.append(
+                        URLQueryItem(
+                            name: "pinned_channel_ids",
+                            value: pinnedChannelIDs.joined(separator: ",")
+                        )
+                    )
+                }
+                return query
+            }()
+        )
+        return try await perform(request, as: TimeTable.self)
+    }
+
+    // MARK: - Client settings
+
+    /// The client settings stored for the logged in user.
+    ///
+    /// Unknown keys are preserved in `ClientSettings.values`, so feeding the
+    /// result back into `updateClientSettings` never drops other clients'
+    /// settings.
+    public func clientSettings() async throws -> ClientSettings {
+        try await perform(makeRequest(path: ["settings", "client"]), as: ClientSettings.self)
+    }
+
+    /// Stores the client settings (`PUT /api/settings/client`).
+    ///
+    /// The server answers 422 when `last_synced_at` is older than the stored
+    /// value; use `ClientSettingsRules.nextLastSyncedAt(now:serverLastSyncedAt:)`
+    /// to build a timestamp that cannot be rejected.
+    public func updateClientSettings(_ settings: ClientSettings) async throws {
+        let body: Data
+        do {
+            body = try JSONCoding.encode(settings)
+        } catch {
+            throw APIError.decoding(error.localizedDescription)
+        }
+        let request = makeRequest(
+            path: ["settings", "client"],
+            method: "PUT",
+            body: body,
+            contentType: "application/json"
+        )
+        _ = try await sendRaw(request)
     }
 
     // MARK: - Users
@@ -121,6 +316,11 @@ public struct APIClient: Sendable {
 
     public func thumbnailURL(videoID: Int) -> URL {
         Endpoints.thumbnail(baseURL: baseURL, videoID: videoID)
+    }
+
+    /// Download URL of a recorded program's file (`GET /api/videos/{id}/download`).
+    public func videoDownloadURL(id: Int) -> URL {
+        Endpoints.videoDownload(baseURL: baseURL, id: id)
     }
 
     public func videoPlaylistURL(

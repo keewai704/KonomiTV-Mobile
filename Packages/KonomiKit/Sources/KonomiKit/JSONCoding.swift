@@ -95,6 +95,21 @@ public enum JSONCoding {
         isoFormatter(fractionalSeconds: true).string(from: date)
     }
 
+    /// Formats a date for an ISO 8601 query parameter (e.g.
+    /// `2026-11-03T12:00:00Z`), the format the KonomiTV API accepts for
+    /// `start_time` / `end_time`.
+    ///
+    /// UTC is used unless a time zone is given explicitly: the web client sends
+    /// the browser's local offset, but both are the same instant.
+    public static func formatQueryDateTime(_ date: Date, timeZone: TimeZone? = nil) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        if let timeZone {
+            formatter.timeZone = timeZone
+        }
+        return formatter.string(from: date)
+    }
+
     private static func isoFormatter(fractionalSeconds: Bool) -> ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = fractionalSeconds
