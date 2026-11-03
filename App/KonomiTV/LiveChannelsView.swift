@@ -51,20 +51,12 @@ struct LiveChannelsView: View {
             .task { await load() }
             .task(id: "\(trimmedQuery)-\(filterRevision)") { await search() }
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        // The sheet edits a copy; start it from the current
-                        // search field so both stay in sync.
-                        searchCondition.keyword = trimmedQuery
-                        showsFilterSheet = true
-                    } label: {
-                        Image(systemName: "line.3.horizontal.decrease.circle")
+                // While searching, the navigation bar hides trailing items;
+                // the button moves above the results then.
+                if !isSearchActive {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        filterButton
                     }
-                    .accessibilityLabel("検索条件")
-                    .accessibilityValue(
-                        activeFilterCount == 0 ? "指定なし" : "\(activeFilterCount) 件"
-                    )
-                    .accessibilityIdentifier("search.filter.button")
                 }
 
                 if isCompact {
@@ -205,6 +197,41 @@ struct LiveChannelsView: View {
 
     @ViewBuilder
     private var searchResultsView: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Spacer()
+                filterButton
+                    .labelStyle(.titleAndIcon)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 6)
+
+            searchResultsBody
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var filterButton: some View {
+        Button {
+            // The sheet edits a copy; start it from the current search field
+            // so both stay in sync.
+            searchCondition.keyword = trimmedQuery
+            showsFilterSheet = true
+        } label: {
+            Label(
+                activeFilterCount == 0 ? "検索条件" : "検索条件 (\(activeFilterCount))",
+                systemImage: "line.3.horizontal.decrease.circle"
+            )
+        }
+        .accessibilityLabel("検索条件")
+        .accessibilityValue(activeFilterCount == 0 ? "指定なし" : "\(activeFilterCount) 件")
+        .accessibilityIdentifier("search.filter.button")
+    }
+
+    @ViewBuilder
+    private var searchResultsBody: some View {
         if isSearching && searchResults.isEmpty {
             ProgressView("検索中…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

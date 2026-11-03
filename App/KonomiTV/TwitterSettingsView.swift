@@ -82,6 +82,8 @@ struct TwitterSettingsView: View {
                     .accessibilityIdentifier("settings.twitter.account.twitter.\(account.id).delete")
                     .accessibilityLabel("連携を解除")
                 }
+                // Keep the row's own buttons addressable inside the row.
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("settings.twitter.account.twitter.\(account.id)")
             }
 
@@ -106,6 +108,8 @@ struct TwitterSettingsView: View {
                     .accessibilityIdentifier("settings.twitter.account.bluesky.\(account.id).delete")
                     .accessibilityLabel("連携を解除")
                 }
+                // Keep the row's own buttons addressable inside the row.
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("settings.twitter.account.bluesky.\(account.id)")
             }
 

@@ -128,9 +128,6 @@ struct LivePlayerView: View {
 
             qualityMenu
 
-            if playback.hasSecondaryAudio {
-                audioMenu
-            }
 
             Button {
                 showsRemocon = true
@@ -144,15 +141,25 @@ struct LivePlayerView: View {
 
     private var qualityMenu: some View {
         Menu {
-            ForEach(StreamQuality.liveQualities, id: \.self) { quality in
-                Button {
-                    playback.switchQuality(quality)
-                } label: {
-                    if playback.profile.quality == quality {
-                        Label(quality.displayName, systemImage: "checkmark")
-                    } else {
-                        Text(quality.displayName)
+            Section("画質") {
+                ForEach(StreamQuality.liveQualities, id: \.self) { quality in
+                    Button {
+                        playback.switchQuality(quality)
+                    } label: {
+                        if playback.profile.quality == quality {
+                            Label(quality.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(quality.displayName)
+                        }
                     }
+                }
+            }
+
+            // 主音声 / 副音声 share the menu so the toolbar keeps room for
+            // every control on a compact width.
+            if playback.hasSecondaryAudio {
+                Section("音声") {
+                    audioButtons
                 }
             }
         } label: {
@@ -162,32 +169,27 @@ struct LivePlayerView: View {
         .accessibilityLabel("画質")
     }
 
-    private var audioMenu: some View {
-        Menu {
-            Button {
-                playback.selectLiveAudio(.primary)
-            } label: {
-                if playback.liveAudioSelection == .primary {
-                    Label("主音声", systemImage: "checkmark")
-                } else {
-                    Text("主音声")
-                }
-            }
-
-            Button {
-                playback.selectLiveAudio(.secondary)
-            } label: {
-                if playback.liveAudioSelection == .secondary {
-                    Label("副音声", systemImage: "checkmark")
-                } else {
-                    Text("副音声")
-                }
-            }
+    @ViewBuilder
+    private var audioButtons: some View {
+        Button {
+            playback.selectLiveAudio(.primary)
         } label: {
-            Image(systemName: "waveform")
+            if playback.liveAudioSelection == .primary {
+                Label("主音声", systemImage: "checkmark")
+            } else {
+                Text("主音声")
+            }
         }
-        .accessibilityIdentifier("player.audio")
-        .accessibilityLabel("音声")
+
+        Button {
+            playback.selectLiveAudio(.secondary)
+        } label: {
+            if playback.liveAudioSelection == .secondary {
+                Label("副音声", systemImage: "checkmark")
+            } else {
+                Text("副音声")
+            }
+        }
     }
 
     // MARK: - Player

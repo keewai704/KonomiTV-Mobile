@@ -134,14 +134,6 @@ struct VideoDetailView: View {
 
             qualityMenu
 
-            Button {
-                model.toggleMylist(videoID: video.id)
-            } label: {
-                Image(systemName: isInMylist ? "bookmark.fill" : "bookmark")
-            }
-            .accessibilityIdentifier("video.mylist")
-            .accessibilityLabel(isInMylist ? "マイリストから削除" : "マイリストに追加")
-
             Menu {
                 Button {
                     activeSheet = .fileInfo
@@ -338,10 +330,23 @@ struct VideoDetailView: View {
     /// The program information tab.
     private var programInfo: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(current.title)
-                .font(.title3.weight(.semibold))
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("video.detail.title")
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(current.title)
+                    .font(.title3.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("video.detail.title")
+
+                Button {
+                    model.toggleMylist(videoID: video.id)
+                } label: {
+                    Image(systemName: isInMylist ? "bookmark.fill" : "bookmark")
+                        .font(.title3)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("video.mylist")
+                .accessibilityLabel(isInMylist ? "マイリストから削除" : "マイリストに追加")
+            }
 
             HStack(spacing: 8) {
                 if let channel = current.channel {

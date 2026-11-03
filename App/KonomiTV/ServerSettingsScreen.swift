@@ -42,14 +42,28 @@ struct ServerSettingsScreen: View {
 
     private var form: some View {
         Form {
+            // The save result goes first so it is in view after saving from
+            // the navigation bar.
+            statusSection
             generalSection
             serverSection
             televisionSection
             videoSection
             captureSection
-            saveSection
         }
         .accessibilityIdentifier("settings.server.form")
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                if isSaving {
+                    ProgressView()
+                } else {
+                    Button("保存") {
+                        Task { await save() }
+                    }
+                    .accessibilityIdentifier("settings.server.save")
+                }
+            }
+        }
     }
 
     private var generalSection: some View {
@@ -270,40 +284,29 @@ struct ServerSettingsScreen: View {
         }
     }
 
-    private var saveSection: some View {
-        Section {
-            Button {
-                Task { await save() }
-            } label: {
-                HStack(spacing: 8) {
-                    Text("サーバー設定を更新")
-                    if isSaving {
-                        Spacer(minLength: 0)
-                        ProgressView()
-                    }
-                }
-            }
-            .disabled(isSaving)
-            .accessibilityIdentifier("settings.server.save")
-
-            if let errorMessage {
-                Text(errorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-                    .accessibilityIdentifier("settings.server.error")
-            }
-
-            if let savedMessage {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(savedMessage)
+    @ViewBuilder
+    private var statusSection: some View {
+        if errorMessage != nil || savedMessage != nil {
+            Section {
+                if let errorMessage {
+                    Text(errorMessage)
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("settings.server.saved")
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("settings.server.error")
+                }
 
-                    NavigationLink(value: SectionRoute.maintenance) {
-                        Label("メンテナンスを開く", systemImage: "wrench.and.screwdriver")
+                if let savedMessage {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(savedMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("settings.server.saved")
+
+                        NavigationLink(value: SectionRoute.maintenance) {
+                            Label("メンテナンスを開く", systemImage: "wrench.and.screwdriver")
+                        }
+                        .accessibilityIdentifier("settings.server.maintenanceLink")
                     }
-                    .accessibilityIdentifier("settings.server.maintenanceLink")
                 }
             }
         }
