@@ -574,7 +574,7 @@ struct ReservationDetailScreen: View {
                                 }
                             }
                         } label: {
-                            LabeledContent("プリセット")
+                            Text("プリセット")
                         }
                         .accessibilityIdentifier("reservation.preset")
                     }

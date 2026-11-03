@@ -938,7 +938,12 @@ private struct TimeTableProgramDetail: View {
         isWorking = true
         defer { isWorking = false }
 
-        let settings = preset ?? (await model.loadDefaultRecordSettings())
+        let settings: RecordSettings
+        if let preset {
+            settings = preset
+        } else {
+            settings = await model.loadDefaultRecordSettings()
+        }
         do {
             try await client.addReservation(
                 programID: program.id,
