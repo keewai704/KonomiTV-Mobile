@@ -103,6 +103,13 @@ final class PlaybackController {
     /// playback. Changing it through `switchQuality` restarts the stream.
     private(set) var profile = StreamingProfile.default
     private(set) var isMuted = false
+    /// True while the player is actually advancing. The comment overlay freezes
+    /// its animations when playback pauses.
+    private(set) var isPlaying = false
+
+    /// Danmaku overlay state, shared with the live / recorded comment sessions.
+    /// Created once so a channel switch keeps using the same renderer.
+    let comments = CommentOverlayModel()
 
     @ObservationIgnored private var delegateProxy = PlayerViewControllerDelegate()
     @ObservationIgnored private var player: AVPlayer?
@@ -110,6 +117,8 @@ final class PlaybackController {
     @ObservationIgnored private let liveEvents = LiveEventsMonitor()
     @ObservationIgnored private var keepAliveTask: Task<Void, Never>?
     @ObservationIgnored private var client: APIClient?
+
+    @ObservationIgnored private weak var commentOverlayView: CommentOverlayUIView?
 
     @ObservationIgnored private var timeControlObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemStatusObservation: NSKeyValueObservation?
@@ -137,6 +146,7 @@ final class PlaybackController {
         delegateProxy.owner = self
         playerViewController.delegate = delegateProxy
 
+        attachCommentOverlay()
         observeAudioSessionInterruptions()
     }
 
@@ -223,8 +233,36 @@ final class PlaybackController {
         hasSecondaryAudio = false
         liveAudioSelection = .primary
         isMuted = false
+        isPlaying = false
         isPictureInPictureActive = false
         isRestoringFromPictureInPicture = false
+        comments.isPlaying = false
+        comments.isPictureInPictureActive = false
+        comments.reset()
+    }
+
+    // MARK: - Comment overlay
+
+    /// Adds the danmaku renderer to the player's content overlay view, which is
+    /// drawn above the video inline and in the fullscreen presentation alike.
+    private func attachCommentOverlay() {
+        guard commentOverlayView == nil else { return }
+        playerViewController.loadViewIfNeeded()
+        guard let contentOverlay = playerViewController.contentOverlayView else { return }
+        let overlay = CommentOverlayUIView(model: comments)
+        overlay.frame = contentOverlay.bounds
+        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        contentOverlay.addSubview(overlay)
+        commentOverlayView = overlay
+    }
+
+    private func updatePlaying(_ playing: Bool) {
+        if isPlaying != playing {
+            isPlaying = playing
+        }
+        if comments.isPlaying != playing {
+            comments.isPlaying = playing
+        }
     }
 
     // MARK: - Player controls
@@ -338,12 +376,14 @@ final class PlaybackController {
     /// Called by the delegate proxy when PiP starts.
     func pictureInPictureDidStart() {
         isPictureInPictureActive = true
+        comments.isPictureInPictureActive = true
         pictureInPictureStartCount += 1
     }
 
     /// Called by the delegate proxy when PiP stops.
     func pictureInPictureDidStop() {
         isPictureInPictureActive = false
+        comments.isPictureInPictureActive = false
 
         // Restoring brings the screen back; that must not stop playback.
         if isRestoringFromPictureInPicture {
@@ -366,6 +406,9 @@ final class PlaybackController {
     // MARK: - Item lifecycle
 
     private func startCurrentItem(startAt: Double) {
+        // AVPlayerViewController creates its content overlay view lazily; by
+        // the first play it exists, so this is a second chance to attach.
+        attachCommentOverlay()
         guard let item, let client else { return }
         switch item {
         case .video(let video):
@@ -405,6 +448,9 @@ final class PlaybackController {
         hasSecondaryAudio = false
         state = "buffering"
         positionSeconds = Int(startAt)
+        isPlaying = false
+        comments.isPlaying = false
+        comments.reset()
 
         activateAudioSession()
 
@@ -661,9 +707,13 @@ final class PlaybackController {
         }
 
         // Late callbacks may arrive after stop(); keep the last state.
-        guard let player else { return }
+        guard let player else {
+            updatePlaying(false)
+            return
+        }
 
         if let currentItem = player.currentItem, currentItem.status == .failed {
+            updatePlaying(false)
             state = "error"
             errorDetail = currentItem.error.map { error in
                 let nsError = error as NSError
@@ -676,6 +726,8 @@ final class PlaybackController {
 
         let seconds = player.currentTime().seconds
         let position = seconds.isFinite ? seconds : 0
+
+        updatePlaying(player.timeControlStatus == .playing)
 
         switch player.timeControlStatus {
         case .playing, .paused:

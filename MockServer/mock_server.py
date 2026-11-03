@@ -56,7 +56,10 @@ JIKKYO_THREAD_REQUEST_TIMEOUT = 5.0
 # コメントセッションが接続直後にまとめて送る過去コメントの件数
 JIKKYO_INITIAL_COMMENT_COUNT = 12
 # 録画番組の過去ログコメントの件数
-JIKKYO_PAST_COMMENT_COUNT = 24
+# 過去ログコメントの件数。録画の尺に対してこの件数を等間隔に並べるため、
+# 多いほど最初のコメントが再生開始直後に現れる (UI テストは再生開始から
+# 数十秒以内に 1 件目のコメントが流れることを確認する)。
+JIKKYO_PAST_COMMENT_COUNT = 200
 # 投稿されたコメントに付ける vpos (10 ミリ秒単位) の基準
 JIKKYO_MOCK_USER_KEY = "nicolive:mock-user"
 # ニコニコ OAuth 連携で設定されるモックユーザーの情報

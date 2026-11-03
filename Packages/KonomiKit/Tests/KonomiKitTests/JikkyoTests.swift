@@ -299,7 +299,7 @@ final class JikkyoAPITests: XCTestCase {
         }
         let client = APIClient(baseURL: jikkyoBaseURL, transport: transport, token: "token")
 
-        let auth = try await client.niconicoAuthURL()
+        let auth = try await client.niconicoAuthURL(origin: "konomitv://")
         XCTAssertEqual(auth.authorizationURL?.host, "oauth.nicovideo.jp")
         XCTAssertEqual(auth.authorizationURL?.path, "/oauth2/authorize")
         let authRequest = await transport.lastRequest()
@@ -308,6 +308,11 @@ final class JikkyoAPITests: XCTestCase {
         XCTAssertEqual(
             authRequest?.value(forHTTPHeaderField: "Authorization"),
             "Bearer token"
+        )
+        // The native app tells the server its own callback URL scheme.
+        XCTAssertEqual(
+            authRequest?.value(forHTTPHeaderField: "Origin"),
+            "konomitv://"
         )
 
         try await client.unlinkNiconico()

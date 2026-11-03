@@ -329,8 +329,16 @@ public struct APIClient: Sendable {
     /// or `ASWebAuthenticationSession`; after the user approves, Niconico
     /// redirects to the server's callback which finishes the link and redirects
     /// to `{client}/settings/jikkyo`.
-    public func niconicoAuthURL() async throws -> NiconicoAuthURL {
-        try await perform(makeRequest(path: ["niconico", "auth"]), as: NiconicoAuthURL.self)
+    ///
+    /// - Parameter origin: `Origin` header of the API request. The server uses
+    ///   it as the client URL of the OAuth callback, so a native app passes its
+    ///   own URL scheme (the web client relies on the browser's `Origin`).
+    public func niconicoAuthURL(origin: String? = nil) async throws -> NiconicoAuthURL {
+        var request = makeRequest(path: ["niconico", "auth"])
+        if let origin {
+            request.setValue(origin, forHTTPHeaderField: "Origin")
+        }
+        return try await perform(request, as: NiconicoAuthURL.self)
     }
 
     /// Unlinks the Niconico account (`DELETE /api/niconico/logout`).

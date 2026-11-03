@@ -14,6 +14,9 @@ struct LaunchOptions: Sendable {
     /// Shortens the watch history threshold (30 s) to a couple of seconds so a
     /// UI test does not have to keep a video playing for half a minute.
     let usesShortWatchedHistoryThreshold: Bool
+    /// Replaces the Niconico `ASWebAuthenticationSession` sheet with a plain
+    /// URLSession round trip, so the link flow runs on CI without a system sheet.
+    let disablesASWebAuthentication: Bool
 
     init(
         arguments: [String] = ProcessInfo.processInfo.arguments,
@@ -23,6 +26,7 @@ struct LaunchOptions: Sendable {
         self.showsSetup = arguments.contains("-UITestingShowSetup")
         self.disablesAutomaticPictureInPicture = arguments.contains("-UITestingDisableAutoPiP")
         self.usesShortWatchedHistoryThreshold = arguments.contains("-UITestingShortHistoryThreshold")
+        self.disablesASWebAuthentication = arguments.contains("-UITestingDisableASWebAuth")
 
         if let raw = environment["KONOMITV_SERVER_URL"]?.trimmingCharacters(in: .whitespacesAndNewlines),
            !raw.isEmpty,

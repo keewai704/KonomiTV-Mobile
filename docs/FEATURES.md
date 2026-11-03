@@ -25,6 +25,7 @@ API が 404 を返すサーバーでは画面に出しません。
 | 視聴中の状態（Standby / ONAir など）と視聴人数 | `GET /api/streams/live/{id}/{quality}/events`（SSE） | ✅ |
 | チャンネル切り替え（上下・リモコンパネル） | — | ✅ |
 | ライブ視聴の番組・チャンネルパネル | `GET /api/channels` | ✅ |
+| ライブのコメントパネル（一覧・自動スクロール・投稿・色／位置／サイズ） | `GET /api/channels/{id}/jikkyo`、WebSocket | ✅ |
 
 ## 番組表・番組検索
 
@@ -59,8 +60,8 @@ API が 404 を返すサーバーでは画面に出しません。
 | デュアルモノ（1 本のステレオトラックに左右で別音声） | ⚠️ AVPlayer の HLS 再生ではチャンネルをミックスし直せない |
 | キーボードショートカット（iPad のハードウェアキーボード） | ✅ |
 | PiP・バックグラウンド再生・ロック画面の再生中情報 | ✅ |
-| ニコニコ実況コメントの表示・投稿・NG 設定 | 🚧 3 |
-| 録画番組の過去ログコメント | 🚧 3 |
+| ニコニコ実況コメントの表示・投稿・NG 設定 | ✅ |
+| 録画番組の過去ログコメント | ✅ |
 | ARIB 字幕・文字スーパー | 🚧 4 |
 | キャプチャ（字幕・コメント合成、写真への保存、サーバーへのアップロード） | 🚧 5 |
 | Twitter / Bluesky パネル（投稿・タイムライン・検索・RT・いいね） | 🚧 6 |
@@ -87,7 +88,7 @@ API が 404 を返すサーバーでは画面に出しません。
 | ログイン・ログアウト | `POST /api/users/token` | ✅ |
 | アカウント作成 | `POST /api/users` | 🚧 8 |
 | ユーザー名・パスワード変更、アイコン、アカウント削除 | `/api/users/me*` | 🚧 8 |
-| ニコニコ・Twitter・Bluesky アカウント連携 | `/api/niconico/*`, `/api/twitter/*`, `/api/bluesky/*` | 🚧 3, 6 |
+| ニコニコ・Twitter・Bluesky アカウント連携 | `/api/niconico/*`, `/api/twitter/*`, `/api/bluesky/*` | ✅（ニコニコ）／🚧 6（Twitter・Bluesky） |
 | 設定の同期 | `GET/PUT /api/settings/client` | ✅ |
 | 管理者: ユーザー管理 | `/api/users`, `/api/users/{name}` | 🚧 8 |
 | 管理者: サーバー設定 | `GET/PUT /api/settings/server` | 🚧 8 |

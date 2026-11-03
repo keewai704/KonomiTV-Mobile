@@ -19,10 +19,14 @@ struct LivePlayerView: View {
     @State private var panelTab: LivePanelTab = .program
     @State private var showsPanel = true
     @State private var showsRemocon = false
+    @State private var commentSession: LiveCommentSession?
+    /// Incremented by the M shortcut so the posting form focuses its field.
+    @State private var commentFocusRequest = 0
 
     private enum LivePanelTab: String, Hashable {
         case program
         case channel
+        case comment
     }
 
     init(model: AppModel, channel: LiveChannel) {
@@ -50,10 +54,23 @@ struct LivePlayerView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .background(playerShortcuts)
-        .task(id: channel.displayChannelID) { startPlayback() }
+        .task(id: channel.displayChannelID) {
+            startPlayback()
+            startComments()
+        }
         .task { await loadChannels() }
-        .onAppear { playback.viewAppeared(for: playbackItem) }
-        .onDisappear { playback.viewDisappeared(for: playbackItem) }
+        .onAppear {
+            playback.comments.apply(settings: model.settings)
+            playback.viewAppeared(for: playbackItem)
+        }
+        .onDisappear {
+            commentSession?.stop()
+            commentSession = nil
+            playback.viewDisappeared(for: playbackItem)
+        }
+        .onChange(of: model.settings) { _, newValue in
+            playback.comments.apply(settings: newValue)
+        }
         .sheet(isPresented: $showsRemocon) {
             RemoconSheet(
                 channels: channels,
@@ -70,6 +87,15 @@ struct LivePlayerView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
+            Button {
+                playback.comments.toggleVisibility()
+            } label: {
+                Image(systemName: playback.comments.isVisible ? "text.bubble.fill" : "text.bubble")
+            }
+            .accessibilityIdentifier("player.comments.toggle")
+            .accessibilityLabel("コメント")
+            .accessibilityValue(playback.comments.isVisible ? "表示" : "非表示")
+
             qualityMenu
 
             if playback.hasSecondaryAudio {
@@ -214,6 +240,8 @@ struct LivePlayerView: View {
                 programPanel
             case .channel:
                 channelPanel
+            case .comment:
+                commentPanel
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -223,6 +251,7 @@ struct LivePlayerView: View {
         HStack(spacing: 2) {
             panelTabButton(.program, title: "番組", identifier: "panel.program")
             panelTabButton(.channel, title: "チャンネル", identifier: "panel.channel")
+            panelTabButton(.comment, title: "コメント", identifier: "panel.comment")
         }
         .padding(2)
         .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
@@ -352,6 +381,38 @@ struct LivePlayerView: View {
     }
 
     @ViewBuilder
+    private var commentPanel: some View {
+        if let session = commentSession {
+            VStack(alignment: .leading, spacing: 10) {
+                CommentListPanel(
+                    title: "コメント",
+                    comments: session.comments,
+                    statusMessage: session.statusMessage,
+                    height: 360,
+                    onMuteUser: muteUser
+                )
+
+                CommentPostingForm(
+                    isEnabled: session.isConnected,
+                    successfulPostCount: session.successfulPostCount,
+                    closeAfterSending: model.settings.closeCommentFormAfterSending,
+                    focusRequest: commentFocusRequest
+                ) { text, color, position, size in
+                    session.postComment(
+                        text: text,
+                        color: color,
+                        position: position,
+                        size: size
+                    )
+                }
+            }
+        } else {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder
     private var channelPanel: some View {
         if !typeChannels.isEmpty {
             VStack(spacing: 0) {
@@ -421,6 +482,12 @@ struct LivePlayerView: View {
                 showsPanel = true
                 panelTab = .channel
             })
+            shortcut("d", action: playback.comments.toggleVisibility)
+            shortcut("m", action: {
+                showsPanel = true
+                panelTab = .comment
+                commentFocusRequest += 1
+            })
 
             remoconShortcuts(type: .gr, modifiers: [])
             remoconShortcuts(type: .bs, modifiers: [.shift])
@@ -466,6 +533,28 @@ struct LivePlayerView: View {
             client: client,
             profile: QualityPreferences.liveProfile(cellular: model.networkMonitor.isCellular)
         )
+    }
+
+    /// Starts a fresh comment session for the current channel. Called from the
+    /// same task that starts playback, so switching channels stops the old
+    /// sockets before the new channel starts.
+    private func startComments() {
+        commentSession?.stop()
+        commentSession = nil
+        guard model.client != nil else { return }
+
+        let session = LiveCommentSession(
+            model: model,
+            channel: channel,
+            overlay: playback.comments
+        )
+        commentSession = session
+        session.start()
+    }
+
+    private func muteUser(_ userID: String) {
+        model.addMutedNiconicoUser(userID)
+        commentSession?.removeComments(from: userID)
     }
 
     private func loadChannels() async {

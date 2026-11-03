@@ -57,6 +57,7 @@ struct RootView: View {
             )
             statusText(playback.liveStatus, identifier: "live.status")
             statusText(String(playback.liveViewerCount), identifier: "live.viewerCount")
+            statusText(String(playback.comments.drawnCount), identifier: "comments.drawnCount")
         }
         .font(.system(size: 1))
         .opacity(0.01)

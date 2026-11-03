@@ -17,6 +17,18 @@ enum Formatters {
         formatter("HH:mm").string(from: date)
     }
 
+    /// `HH:mm:ss` for comment lists. With `use28HourClock`, hours 0–3 are
+    /// shown as 24–27, like the web client's `Utils.apply28HourClock()`.
+    static func clock(_ date: Date, use28HourClock: Bool = false) -> String {
+        let text = formatter("HH:mm:ss").string(from: date)
+        guard use28HourClock else { return text }
+        let parts = text.split(separator: ":")
+        guard parts.count == 3, let hour = Int(parts[0]), hour >= 0, hour <= 3 else {
+            return text
+        }
+        return "\(hour + 24):\(parts[1]):\(parts[2])"
+    }
+
     static func timeRange(start: Date, end: Date) -> String {
         "\(time(start))〜\(time(end))"
     }
@@ -36,6 +48,13 @@ enum Formatters {
             return "\(minutes)分"
         }
         return "\(total)秒"
+    }
+
+    /// `90` → `01:30`. Used for comment times when the recording start time
+    /// is unknown.
+    static func offset(_ seconds: Double) -> String {
+        let total = max(Int(seconds.rounded()), 0)
+        return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
     /// `1000001000` → `953.67 MB`.

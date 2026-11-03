@@ -142,7 +142,8 @@ enum MockServerControl {
 func launchApp(
     showSetup: Bool = false,
     disableAutoPiP: Bool = false,
-    shortHistoryThreshold: Bool = false
+    shortHistoryThreshold: Bool = false,
+    disableASWebAuth: Bool = false
 ) -> XCUIApplication {
     let app = XCUIApplication()
     app.launchArguments = ["-UITesting"]
@@ -157,6 +158,11 @@ func launchApp(
     if shortHistoryThreshold {
         // Adds the watch history after 2 s instead of 30 s of playback.
         app.launchArguments.append("-UITestingShortHistoryThreshold")
+    }
+    if disableASWebAuth {
+        // Links the Niconico account with URLSession instead of showing the
+        // system ASWebAuthenticationSession sheet (CI has no user to tap it).
+        app.launchArguments.append("-UITestingDisableASWebAuth")
     }
     app.launchEnvironment["KONOMITV_SERVER_URL"] = TestEnvironment.serverURL
     app.launch()
@@ -188,7 +194,8 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
     func startApp(
         showSetup: Bool = false,
         disableAutoPiP: Bool = false,
-        shortHistoryThreshold: Bool = false
+        shortHistoryThreshold: Bool = false,
+        disableASWebAuth: Bool = false
     ) -> XCUIApplication {
         // Also set here so fast-fail behavior does not depend on the
         // test runner invoking the async setUp override.
@@ -196,7 +203,8 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
         let application = launchApp(
             showSetup: showSetup,
             disableAutoPiP: disableAutoPiP,
-            shortHistoryThreshold: shortHistoryThreshold
+            shortHistoryThreshold: shortHistoryThreshold,
+            disableASWebAuth: disableASWebAuth
         )
         app = application
         return application

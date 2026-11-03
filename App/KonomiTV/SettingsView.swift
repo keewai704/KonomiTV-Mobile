@@ -18,6 +18,7 @@ struct SettingsView: View {
         Form {
             serverSection
             qualitySection
+            jikkyoSection
             accountSection
             televisionSection
             timetableSection
@@ -76,6 +77,17 @@ struct SettingsView: View {
                 Label("画質", systemImage: "slider.horizontal.3")
             }
             .accessibilityIdentifier("settings.quality")
+        }
+    }
+
+    private var jikkyoSection: some View {
+        Section {
+            NavigationLink {
+                NiconicoJikkyoSettingsView(model: model)
+            } label: {
+                Label("ニコニコ実況", systemImage: "text.bubble")
+            }
+            .accessibilityIdentifier("settings.jikkyo")
         }
     }
 

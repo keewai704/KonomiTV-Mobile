@@ -19,6 +19,7 @@ struct VideoDetailView: View {
     @State private var actionMessage: String?
     @State private var isDownloading = false
     @State private var downloadProgress: Double = 0
+    @State private var commentSession: RecordedCommentSession?
 
     private var current: RecordedProgram { detail ?? video }
 
@@ -39,10 +40,35 @@ struct VideoDetailView: View {
         .navigationTitle(current.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
-        .task { startPlayback() }
+        .task {
+            startPlayback()
+            startComments()
+        }
         .task { await loadDetail() }
-        .onAppear { model.playback.viewAppeared(for: playbackItem) }
-        .onDisappear { model.playback.viewDisappeared(for: playbackItem) }
+        .onAppear {
+            model.playback.comments.apply(settings: model.settings)
+            model.playback.viewAppeared(for: playbackItem)
+        }
+        .onDisappear {
+            commentSession?.stop()
+            commentSession = nil
+            model.playback.viewDisappeared(for: playbackItem)
+        }
+        .onChange(of: model.playback.positionSeconds) { _, newValue in
+            commentSession?.update(
+                position: Double(newValue),
+                isPlaying: model.playback.isPlaying
+            )
+        }
+        .onChange(of: model.playback.isPlaying) { _, newValue in
+            commentSession?.update(
+                position: Double(model.playback.positionSeconds),
+                isPlaying: newValue
+            )
+        }
+        .onChange(of: model.settings) { _, newValue in
+            model.playback.comments.apply(settings: newValue)
+        }
         .background(playerShortcuts)
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
@@ -71,6 +97,15 @@ struct VideoDetailView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
+            Button {
+                model.playback.comments.toggleVisibility()
+            } label: {
+                Image(systemName: model.playback.comments.isVisible ? "text.bubble.fill" : "text.bubble")
+            }
+            .accessibilityIdentifier("player.comments.toggle")
+            .accessibilityLabel("コメント")
+            .accessibilityValue(model.playback.comments.isVisible ? "表示" : "非表示")
+
             qualityMenu
 
             Button {
@@ -229,6 +264,19 @@ struct VideoDetailView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if let commentSession {
+                CommentListPanel(
+                    title: "コメント",
+                    comments: commentSession.visibleComments,
+                    statusMessage: commentSession.statusMessage,
+                    height: 320,
+                    onMuteUser: { userID in
+                        model.addMutedNiconicoUser(userID)
+                        commentSession.removeComments(from: userID)
+                    }
+                )
+            }
+
             if !seriesEpisodes.isEmpty {
                 seriesSection
             }
@@ -293,6 +341,7 @@ struct VideoDetailView: View {
             shortcut(.rightArrow, modifiers: [.option], action: { model.playback.seek(by: 60) })
             shortcut("q", action: model.playback.toggleMute)
             shortcut("r", action: model.playback.restart)
+            shortcut("d", action: model.playback.comments.toggleVisibility)
         }
         .frame(width: 0, height: 0)
         .opacity(0)
@@ -320,6 +369,24 @@ struct VideoDetailView: View {
             profile: QualityPreferences.videoProfile(cellular: model.networkMonitor.isCellular),
             startAt: model.resumePosition(for: video)
         )
+    }
+
+    /// Loads the past log comments of the recording (step 2 of the comment
+    /// feature) and lets `RecordedCommentSession` feed the overlay while the
+    /// playback position advances.
+    private func startComments() {
+        commentSession?.stop()
+        commentSession = nil
+        guard let client = model.client else { return }
+
+        let session = RecordedCommentSession(
+            video: video,
+            model: model,
+            client: client,
+            overlay: model.playback.comments
+        )
+        commentSession = session
+        session.start()
     }
 
     private func loadDetail() async {

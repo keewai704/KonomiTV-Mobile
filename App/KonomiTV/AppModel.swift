@@ -192,6 +192,10 @@ final class AppModel {
     /// client's `sync_settings` key.
     private(set) var syncSettings = true
 
+    /// UI tests replace the system `ASWebAuthenticationSession` sheet with a
+    /// plain URLSession round trip (`-UITestingDisableASWebAuth`).
+    let disablesASWebAuthentication: Bool
+
     /// Recorded programs deleted in this session, so lists can drop them without
     /// waiting for a reload.
     private(set) var deletedVideoIDs: Set<Int> = []
@@ -218,6 +222,7 @@ final class AppModel {
 
     init(defaults: UserDefaults = .standard, options: LaunchOptions = LaunchOptions()) {
         self.defaults = defaults
+        self.disablesASWebAuthentication = options.disablesASWebAuthentication
         self.watchedHistoryThresholdSeconds = options.usesShortWatchedHistoryThreshold ? 2 : 30
 
         if let raw = defaults.string(forKey: PreferenceKeys.serverURL),
@@ -337,6 +342,24 @@ final class AppModel {
         KeychainStore.save(result.accessToken, account: KeychainStore.tokenAccount)
         user = try await client.withToken(result.accessToken).me()
         await syncSettingsFromServer()
+    }
+
+    /// Reloads `/api/users/me`, e.g. after linking or unlinking a Niconico
+    /// account.
+    func refreshUser() async {
+        guard let token, !token.isEmpty, let client else { return }
+        if let refreshed = try? await client.withToken(token).me() {
+            user = refreshed
+        }
+    }
+
+    /// Adds a Niconico user ID to the mute list (comment context menu).
+    func addMutedNiconicoUser(_ userID: String) {
+        guard !userID.isEmpty else { return }
+        mutateSettings { settings in
+            guard !settings.mutedNiconicoUserIDs.contains(userID) else { return }
+            settings.mutedNiconicoUserIDs.append(userID)
+        }
     }
 
     func logout() {
