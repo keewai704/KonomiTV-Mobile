@@ -49,7 +49,7 @@ jobs:
 
       # Secrets cannot be referenced in `if`, so decide once and expose the
       # result as a step output. Any missing value falls back to an unsigned
-      # simulator build instead of failing the release.
+      # IPA instead of failing the release.
       - name: Detect signing credentials
         id: signing
         env:
@@ -72,7 +72,7 @@ jobs:
             echo "All signing secrets found; building a signed App Store IPA." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
-            echo "Signing secrets are incomplete; building an unsigned simulator app." >> "$GITHUB_STEP_SUMMARY"
+            echo "Signing secrets are incomplete; building an unsigned IPA." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Run UI tests against the mock server
@@ -233,34 +233,23 @@ jobs:
             --clobber
 
       - name: Upload signed IPA artifact
-        if: steps.signing.outputs.signed == 'true' && github.ref_type != 'tag'
+        if: steps.signing.outputs.signed == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: KonomiTV-${{ steps.version.outputs.marketing_version }}.ipa
           path: ${{ runner.temp }}/KonomiTV-${{ steps.version.outputs.marketing_version }}.ipa
           retention-days: 7
 
-      - name: Build unsigned simulator app
+      - name: Build unsigned IPA
         if: steps.signing.outputs.signed != 'true'
         run: |
           set -euo pipefail
-          xcodebuild build \
-            -project KonomiTV.xcodeproj \
-            -scheme KonomiTV \
-            -configuration Release \
-            -destination "generic/platform=iOS Simulator" \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData-unsigned" \
-            MARKETING_VERSION="$MARKETING_VERSION" \
-            CURRENT_PROJECT_VERSION="$CURRENT_PROJECT_VERSION" \
-            CODE_SIGNING_ALLOWED=NO
+          scripts/build-unsigned-ipa.sh \
+            "$RUNNER_TEMP/KonomiTV-$MARKETING_VERSION-unsigned.ipa" \
+            "$MARKETING_VERSION" \
+            "$CURRENT_PROJECT_VERSION"
 
-          APP_PATH="$RUNNER_TEMP/DerivedData-unsigned/Build/Products/Release-iphonesimulator/KonomiTV.app"
-          test -d "$APP_PATH"
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$APP_PATH" \
-            "$RUNNER_TEMP/KonomiTV-$MARKETING_VERSION-simulator.zip"
-
-      - name: Publish unsigned simulator app to GitHub Release
+      - name: Publish unsigned IPA to GitHub Release
         if: steps.signing.outputs.signed != 'true' && github.ref_type == 'tag'
         run: |
           set -euo pipefail
@@ -269,15 +258,16 @@ jobs:
               --title "$GITHUB_REF_NAME" \
               --generate-notes
           gh release upload "$GITHUB_REF_NAME" \
-            "$RUNNER_TEMP/KonomiTV-$MARKETING_VERSION-simulator.zip" \
+            "$RUNNER_TEMP/KonomiTV-$MARKETING_VERSION-unsigned.ipa" \
             --clobber
 
-      - name: Upload unsigned simulator app artifact
-        if: steps.signing.outputs.signed != 'true' && github.ref_type != 'tag'
+      - name: Upload unsigned IPA artifact
+        if: steps.signing.outputs.signed != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: KonomiTV-${{ steps.version.outputs.marketing_version }}-simulator
-          path: ${{ runner.temp }}/KonomiTV-${{ steps.version.outputs.marketing_version }}-simulator.zip
+          name: KonomiTV-${{ steps.version.outputs.marketing_version }}-unsigned-ipa
+          path: ${{ runner.temp }}/KonomiTV-${{ steps.version.outputs.marketing_version }}-unsigned.ipa
+          if-no-files-found: error
           retention-days: 7
 
       - name: Upload mock server log

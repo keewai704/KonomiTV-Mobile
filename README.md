@@ -115,13 +115,15 @@ push と pull request で次を実行します。
 - `package-linux`: Swift 6.2 コンテナ上で KonomiKit の `swift test`
 - `mock-server`: モックサーバーの `unittest`
 - `ios-e2e`: macOS 26 + Xcode 26.6 で "iPhone 17" と "iPad Pro 13-inch (M5)" の UI テスト。xcresult とモックサーバーのログを artifact として保存
+- `ipa`: 署名なしの `.ipa` をビルドし、artifact `KonomiTV-unsigned-ipa` として保存（push と pull request のたびに生成）。
+  署名なしのため、インストールには Xcode、AltStore、Sideloadly などで自分の証明書による再署名が必要
 
 ### リリース（`.github/workflows/release.yml`）
 
 `v*` タグの push、または手動実行（workflow_dispatch）で起動します。
 
 次の Secrets がすべて設定されている場合は、署名済みの App Store 用 IPA をビルドして
-App Store Connect へアップロードし、タグの GitHub Release に IPA を添付します。
+App Store Connect へアップロードし、タグの GitHub Release に IPA を添付します（artifact としても保存）。
 
 | Secret | 内容 |
 | --- | --- |
@@ -133,9 +135,11 @@ App Store Connect へアップロードし、タグの GitHub Release に IPA �
 | `ASC_ISSUER_ID` | App Store Connect API の Issuer ID |
 | `ASC_PRIVATE_KEY` | API キー（.p8）の中身、またはその Base64 |
 
-Secrets が不足している場合は署名を行わず、シミュレータ用の `.app` を zip にしたものを
-タグでは GitHub Release、手動実行では artifact として公開します。Apple の資格情報が
-ないフォークでもリリース処理を確認できる構成です。
+Secrets が不足している場合は署名を行わず、`scripts/build-unsigned-ipa.sh` で作った署名なしの
+`.ipa` をタグでは GitHub Release に添付し、artifact `KonomiTV-<version>-unsigned-ipa` としても
+保存します（タグ以外の手動実行では artifact のみ）。署名なしのため、インストールには
+Xcode、AltStore、Sideloadly などで自分の証明書による再署名が必要です。
+Apple の資格情報がないフォークでもリリース処理を確認できる構成です。
 
 ## 補足
 
