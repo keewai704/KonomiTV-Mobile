@@ -44,6 +44,35 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Cache VLCKit
+        uses: actions/cache@v4
+        with:
+          path: Vendor/VLCKit.xcframework
+          key: vlckit-${{ hashFiles('scripts/fetch-vlckit.py') }}
+
+      - name: Fetch VLCKit
+        run: python3 scripts/fetch-vlckit.py
+
+      # Reuses the compiler outputs CI stored (see ci.yml); a release only
+      # reads the store.
+      - name: Enable compilation caching
+        run: |
+          cat > "$RUNNER_TEMP/compilation-cache.xcconfig" <<EOF
+          COMPILATION_CACHE_ENABLE_CACHING = YES
+          COMPILATION_CACHE_CAS_PATH = $RUNNER_TEMP/CompilationCache
+          COMPILATION_CACHE_LIMIT_SIZE = 3G
+          EOF
+          echo "XCODE_XCCONFIG_FILE=$RUNNER_TEMP/compilation-cache.xcconfig" >> "$GITHUB_ENV"
+
+      - name: Restore compilation cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/CompilationCache
+          key: xcode-cas-26.6-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            xcode-cas-26.6-feat/ios-client-
+            xcode-cas-26.6-
+
       - name: Generate Xcode project
         run: xcodegen generate
 
