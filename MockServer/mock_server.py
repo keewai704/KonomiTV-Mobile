@@ -32,6 +32,10 @@ SAMPLE_TS_PATH = os.path.join(MEDIA_DIR, "sample.ts")
 
 # 疑似ライブストリームの実時間長 (sample.ts は約 12 秒)
 LIVE_DURATION_SECONDS = 12.0
+# 録画ビデオの HLS は 6 本のセグメント (各 2 秒) を 10 回繰り返して 120 秒にする。
+# バックグラウンド再生や PiP を観察できる長さを確保するため。
+HLS_SEGMENT_COUNT = 6
+HLS_PLAYLIST_REPEATS = 10
 # MPEG-TS パケット (188 バイト) x 64 ずつ送る
 TS_PACKET_SIZE = 188
 STREAM_CHUNK_SIZE = TS_PACKET_SIZE * 64
@@ -506,8 +510,15 @@ class MockHandler(BaseHTTPRequestHandler):
             if "session_id" not in query:
                 self._send_json({"detail": "session_id is required"}, 422)
                 return
-            segment_path = os.path.join(HLS_DIR, f"segment{sequence}.ts")
-            if sequence < 0 or not os.path.exists(segment_path):
+            # プレイリストは 0…59 のシーケンスを持ち、実ファイルは 0…5 を
+            # 繰り返し使う (6 セグメント x 10 回 = 120 秒)。
+            if sequence < 0 or sequence >= HLS_SEGMENT_COUNT * HLS_PLAYLIST_REPEATS:
+                self._not_found()
+                return
+            segment_path = os.path.join(
+                HLS_DIR, f"segment{sequence % HLS_SEGMENT_COUNT}.ts"
+            )
+            if not os.path.exists(segment_path):
                 self._not_found()
                 return
             with open(segment_path, "rb") as f:
@@ -539,19 +550,47 @@ class MockHandler(BaseHTTPRequestHandler):
         ) % (bandwidth, quote(session_id, safe=""))
 
     @staticmethod
-    def _build_media_playlist(session_id: str, fixtures: dict) -> str:
-        source = fixtures["media_playlist"] or "#EXTM3U\n#EXT-X-ENDLIST\n"
-        escaped_session = quote(session_id, safe="")
-        lines = []
-        for line in source.splitlines():
+    def _source_playlist_entries(fixtures: dict) -> list[str]:
+        """EXTINF lines of the fixture playlist (one per source segment)."""
+        entries: list[str] = []
+        pending = "#EXTINF:2.000000,"
+        for line in (fixtures["media_playlist"] or "").splitlines():
             stripped = line.strip()
-            if stripped.startswith("segment") and stripped.endswith(".ts"):
-                sequence = stripped[len("segment"):-len(".ts")]
-                lines.append(
-                    f"segment?session_id={escaped_session}&sequence={sequence}"
-                )
-            else:
-                lines.append(line)
+            if stripped.startswith("#EXTINF"):
+                pending = stripped
+            elif stripped.startswith("segment") and stripped.endswith(".ts"):
+                entries.append(pending)
+                pending = "#EXTINF:2.000000,"
+        return entries
+
+    @classmethod
+    def _build_media_playlist(cls, session_id: str, fixtures: dict) -> str:
+        """Build a 120 s VOD playlist by repeating the source segments.
+
+        6 本のセグメント (各 2 秒) を 10 回繰り返し、繰り返しの境目に
+        #EXT-X-DISCONTINUITY を挿入する。録画ビデオの再生時間を
+        バックグラウンド再生・PiP を観察できる長さにするため。
+        """
+        entries = cls._source_playlist_entries(fixtures)
+        if not entries:
+            entries = ["#EXTINF:2.000000,"]
+
+        escaped_session = quote(session_id, safe="")
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:3",
+            "#EXT-X-TARGETDURATION:2",
+            "#EXT-X-MEDIA-SEQUENCE:0",
+            "#EXT-X-PLAYLIST-TYPE:VOD",
+        ]
+        for sequence in range(len(entries) * HLS_PLAYLIST_REPEATS):
+            if sequence > 0 and sequence % len(entries) == 0:
+                lines.append("#EXT-X-DISCONTINUITY")
+            lines.append(entries[sequence % len(entries)])
+            lines.append(
+                f"segment?session_id={escaped_session}&sequence={sequence}"
+            )
+        lines.append("#EXT-X-ENDLIST")
         return "\n".join(lines) + "\n"
 
     def _handle_live_stream(self, parts: list[str], state: MockServerState,

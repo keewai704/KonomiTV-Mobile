@@ -8,6 +8,9 @@ struct LaunchOptions: Sendable {
     let isUITesting: Bool
     let showsSetup: Bool
     let serverURLOverride: URL?
+    /// UI tests that check background playback without picture in picture pass
+    /// `-UITestingDisableAutoPiP`.
+    let disablesAutomaticPictureInPicture: Bool
 
     init(
         arguments: [String] = ProcessInfo.processInfo.arguments,
@@ -15,6 +18,7 @@ struct LaunchOptions: Sendable {
     ) {
         self.isUITesting = arguments.contains("-UITesting")
         self.showsSetup = arguments.contains("-UITestingShowSetup")
+        self.disablesAutomaticPictureInPicture = arguments.contains("-UITestingDisableAutoPiP")
 
         if let raw = environment["KONOMITV_SERVER_URL"]?.trimmingCharacters(in: .whitespacesAndNewlines),
            !raw.isEmpty,

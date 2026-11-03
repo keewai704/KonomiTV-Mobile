@@ -48,11 +48,16 @@ enum TestEnvironment {
 /// `KONOMITV_SERVER_URL` launch environment value configures the saved server
 /// unless `-UITestingShowSetup` forces the first-run screen.
 @MainActor
-func launchApp(showSetup: Bool = false) -> XCUIApplication {
+func launchApp(showSetup: Bool = false, disableAutoPiP: Bool = false) -> XCUIApplication {
     let app = XCUIApplication()
     app.launchArguments = ["-UITesting"]
     if showSetup {
         app.launchArguments.append("-UITestingShowSetup")
+    }
+    if disableAutoPiP {
+        // Keeps playback inline so background playback can be tested on its
+        // own, without picture in picture taking over the player.
+        app.launchArguments.append("-UITestingDisableAutoPiP")
     }
     app.launchEnvironment["KONOMITV_SERVER_URL"] = TestEnvironment.serverURL
     app.launch()
@@ -78,11 +83,11 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
 
     /// Launches the app and remembers it so `tearDown` can capture failures.
     @discardableResult
-    func startApp(showSetup: Bool = false) -> XCUIApplication {
+    func startApp(showSetup: Bool = false, disableAutoPiP: Bool = false) -> XCUIApplication {
         // Also set here so fast-fail behavior does not depend on the
         // test runner invoking the async setUp override.
         continueAfterFailure = false
-        let application = launchApp(showSetup: showSetup)
+        let application = launchApp(showSetup: showSetup, disableAutoPiP: disableAutoPiP)
         app = application
         return application
     }
@@ -118,6 +123,40 @@ func uiElement(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
     // SwiftUI can expose one identifier on several nested elements (for
     // example a sidebar List cell and its Label), so resolve the first match.
     app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+}
+
+/// Accessibility label of the first element with the given identifier.
+@MainActor
+func label(of identifier: String, in app: XCUIApplication) -> String {
+    uiElement(app, identifier).label
+}
+
+/// Parsed integer value of the first element with the given identifier.
+@MainActor
+func intLabel(of identifier: String, in app: XCUIApplication) -> Int? {
+    Int(label(of: identifier, in: app))
+}
+
+/// Waits for a fixed amount of time while keeping the run loop serviced, so
+/// XCTest can update its snapshot of the app.
+@MainActor
+func waitSeconds(_ seconds: TimeInterval) {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else { break }
+        RunLoop.current.run(until: Date().addingTimeInterval(min(remaining, 0.1)))
+    }
+}
+
+/// Sends the app to the home screen, waits, and brings it back. The playback
+/// status elements are then waited for, so callers can read them immediately.
+@MainActor
+func sendToBackgroundAndReturn(app: XCUIApplication, after seconds: TimeInterval) {
+    XCUIDevice.shared.press(.home)
+    waitSeconds(seconds)
+    app.activate()
+    _ = uiElement(app, "playback.state").waitForExistence(timeout: TestTimeout.ui)
 }
 
 /// Polls the condition while servicing the run loop. This avoids fixed sleeps

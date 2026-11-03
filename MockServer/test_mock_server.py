@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import threading
 import time
 import unittest
@@ -287,6 +288,61 @@ class MockServerTestCase(unittest.TestCase):
         self.assertEqual(headers.get("Content-Type"), "video/mp2t")
         self.assertGreaterEqual(len(data), 188)
         self.assertEqual(data[0], 0x47)
+
+    def test_video_media_playlist_covers_120_seconds(self) -> None:
+        session_id = "abc12345"
+        playlist_path = (
+            f"/api/streams/video/1/720p/playlist?session_id={session_id}"
+            "&type=primary-audio"
+        )
+        status, headers, body = self.request("GET", playlist_path)
+        self.assertEqual(status, 200)
+        self.assertIn("mpegurl", headers.get("Content-Type", ""))
+        media = body.decode("utf-8")
+
+        # 6 セグメント (各 2 秒) x 10 回 = 60 セグメント / 120 秒
+        segments = [
+            line for line in media.splitlines() if line and not line.startswith("#")
+        ]
+        self.assertEqual(len(segments), 60)
+        self.assertTrue(segments[0].endswith("sequence=0"))
+        self.assertTrue(segments[-1].endswith("sequence=59"))
+        for sequence, uri in enumerate(segments):
+            self.assertEqual(
+                uri, f"segment?session_id={session_id}&sequence={sequence}"
+            )
+
+        # 繰り返しの境目 (6, 12, ..., 54) にだけ不連続点を置く
+        self.assertEqual(media.count("#EXT-X-DISCONTINUITY"), 9)
+        lines = media.splitlines()
+        first_segment = lines.index(segments[0])
+        self.assertTrue(lines[first_segment - 1].startswith("#EXTINF:"))
+        for index, line in enumerate(lines):
+            if line != "#EXT-X-DISCONTINUITY":
+                continue
+            self.assertTrue(lines[index + 1].startswith("#EXTINF:"))
+            number = int(lines[index + 2].rsplit("sequence=", 1)[1])
+            self.assertEqual(number % 6, 0)
+
+        durations = [
+            float(line[len("#EXTINF:"):].rstrip(","))
+            for line in lines
+            if line.startswith("#EXTINF:")
+        ]
+        self.assertEqual(len(durations), 60)
+        self.assertAlmostEqual(sum(durations), 120.0, places=3)
+
+        self.assertIn("#EXT-X-PLAYLIST-TYPE:VOD", media)
+        self.assertTrue(media.rstrip().endswith("#EXT-X-ENDLIST"))
+
+        # sequence=59 は segment5.ts を返す
+        segment_url = urljoin(playlist_path, segments[-1])
+        status, headers, data = self.request("GET", segment_url)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "video/mp2t")
+        with open(os.path.join(mock_server.HLS_DIR, "segment5.ts"), "rb") as f:
+            expected = f.read()
+        self.assertEqual(data, expected)
 
     def test_invalid_quality_for_video_stream(self) -> None:
         status, _, payload = self.get_json(

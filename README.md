@@ -17,6 +17,22 @@ KonomiTV のライブ配信 API は MPEG-TS をそのまま流し続けるため
 アプリ内で MPEG-TS をキーフレーム単位の約 1 秒のセグメントに区切り（`KonomiStreaming`）、
 `127.0.0.1` で待ち受ける小さな HTTP サーバー（Network.framework）からライブ HLS として AVPlayer に渡します。
 
+## ピクチャ・イン・ピクチャとバックグラウンド再生
+
+- **ピクチャ・イン・ピクチャ (PiP)**: 録画ビデオ・ライブのどちらも、画面内で再生を始めると iOS が自動で PiP を開始します。
+  PiP 中にアプリ内を移動しても再生は止まりません。PiP の「元の画面に戻る」ボタンを押すと、
+  再生中のビデオ／チャンネルの画面へ戻ります。iOS の設定や環境によって自動開始が使えない場合は、
+  プレイヤーの PiP ボタンから開始できます。
+- **バックグラウンド再生**: ホーム画面に戻っても再生を継続します（`UIBackgroundModes: audio` と
+  `audiovisualBackgroundPlaybackPolicy = .continuesIfPossible`）。PiP を使わない音声だけの継続も同じ経路です。
+- **再生中情報**: ロック画面・コントロールセンターには、ビデオ名（ライブは放送中の番組名、番組情報がなければチャンネル名）と
+  チャンネル名を表示します。
+
+再生はアプリ全体で 1 台の `PlaybackController` が所有する `AVPlayerViewController` が行うため、
+画面（`VideoDetailView` / `LivePlayerView`）を離れても再生が破棄されません。
+
+UI テストでは `-UITestingDisableAutoPiP` を渡すと PiP の自動開始を無効にし、バックグラウンド再生だけを検証できます。
+
 ## 動作環境
 
 - iOS / iPadOS 17.0 以上

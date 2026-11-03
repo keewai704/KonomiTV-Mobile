@@ -1,18 +1,20 @@
 import SwiftUI
-import AVFoundation
 import KonomiKit
 
 /// A recorded program, with the HLS player above (or beside) the details.
+///
+/// Playback itself is owned by the app wide PlaybackController, so picture in
+/// picture and background playback survive navigating away from this screen.
 struct VideoDetailView: View {
     let model: AppModel
     let video: RecordedProgram
 
     @AppStorage(PreferenceKeys.videoQuality) private var qualityRaw: String = StreamQuality.p1080.rawValue
     @State private var detail: RecordedProgram?
-    @State private var player: AVPlayer?
-    @State private var sessionID = String(UUID().uuidString.prefix(8)).lowercased()
 
     private var current: RecordedProgram { detail ?? video }
+
+    private var playbackItem: PlaybackItem { .video(video) }
 
     private var quality: StreamQuality {
         StreamQuality(rawValue: qualityRaw)?.videoSafe ?? .p1080
@@ -25,21 +27,18 @@ struct VideoDetailView: View {
         )
         .navigationTitle(current.title)
         .navigationBarTitleDisplayMode(.inline)
-        .task { await startPlaybackIfNeeded() }
+        .task { startPlayback() }
         .task { await loadDetail() }
-        .task { await keepAliveLoop() }
-        .onDisappear {
-            player?.pause()
-            player = nil
-        }
+        .onAppear { model.playback.viewAppeared(for: playbackItem) }
+        .onDisappear { model.playback.viewDisappeared(for: playbackItem) }
     }
 
     // MARK: - Views
 
     @ViewBuilder
     private var playerArea: some View {
-        if let player {
-            PlayerView(player: player)
+        if model.playback.item == playbackItem, model.playback.isPlayerAttached {
+            PlayerView(playback: model.playback)
         } else {
             ZStack {
                 Color.black
@@ -83,21 +82,11 @@ struct VideoDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: - Playback
+    // MARK: - Loading
 
-    private func startPlaybackIfNeeded() async {
-        guard player == nil, let client = model.client else { return }
-
-        let url = client.videoPlaylistURL(
-            videoID: video.id,
-            quality: quality,
-            sessionID: sessionID
-        )
-        let item = AVPlayerItem(url: url)
-        let newPlayer = AVPlayer(playerItem: item)
-        newPlayer.automaticallyWaitsToMinimizeStalling = true
-        player = newPlayer
-        newPlayer.play()
+    private func startPlayback() {
+        guard let client = model.client else { return }
+        model.playback.play(playbackItem, client: client, quality: quality)
     }
 
     private func loadDetail() async {
@@ -105,17 +94,5 @@ struct VideoDetailView: View {
         guard let loaded = try? await client.video(id: video.id) else { return }
         detail = loaded
     }
-
-    /// KonomiTV stops a recording session that stops sending keep-alives.
-    private func keepAliveLoop() async {
-        guard let client = model.client else { return }
-        while !Task.isCancelled {
-            try? await client.keepAlive(
-                videoID: video.id,
-                quality: quality,
-                sessionID: sessionID
-            )
-            try? await Task.sleep(for: .seconds(5))
-        }
-    }
 }
+

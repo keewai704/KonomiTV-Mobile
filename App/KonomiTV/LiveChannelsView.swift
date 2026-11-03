@@ -82,9 +82,7 @@ struct LiveChannelsView: View {
                     spacing: 16
                 ) {
                     ForEach(activeChannels) { channel in
-                        NavigationLink {
-                            LivePlayerView(model: model, channel: channel)
-                        } label: {
+                        NavigationLink(value: channel) {
                             ChannelCard(
                                 channel: channel,
                                 logoURL: model.client?.logoURL(channelID: channel.displayChannelID)

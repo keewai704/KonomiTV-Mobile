@@ -45,6 +45,14 @@ final class AppModel {
 
     var section: AppSection = .live
 
+    /// Navigation paths, so picture in picture restore (and anything else) can
+    /// open a program programmatically.
+    var livePath: [LiveChannel] = []
+    var videosPath: [RecordedProgram] = []
+
+    /// App-wide playback. Owned here so it survives view transitions.
+    let playback = PlaybackController()
+
     @ObservationIgnored private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -54,6 +62,23 @@ final class AppModel {
             self.serverURL = url
         }
         self.token = KeychainStore.read(account: KeychainStore.tokenAccount)
+
+        playback.onRestore = { [weak self] item in
+            self?.restore(item)
+        }
+    }
+
+    /// Brings the screen that owns `item` back to the front, used when the
+    /// user taps the picture-in-picture restore button.
+    func restore(_ item: PlaybackItem) {
+        switch item {
+        case .video(let video):
+            section = .videos
+            videosPath = [video]
+        case .live(let channel):
+            section = .live
+            livePath = [channel]
+        }
     }
 
     var isConfigured: Bool { serverURL != nil }

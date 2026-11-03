@@ -1,20 +1,24 @@
 import SwiftUI
-import AVFoundation
 import KonomiKit
 
 /// テレビ: live playback. The raw MPEG-TS stream is re-packaged into HLS by
-/// `LiveStreamSession` and played from a loopback HTTP server.
+/// LiveStreamSession and played from a loopback HTTP server.
+///
+/// Playback itself is owned by the app wide PlaybackController, so picture in
+/// picture and background playback survive navigating away from this screen.
 struct LivePlayerView: View {
     let model: AppModel
     let channel: LiveChannel
 
     @AppStorage(PreferenceKeys.liveQuality) private var qualityRaw: String = StreamQuality.p1080.rawValue
-    @State private var session: LiveStreamSession?
-    @State private var player: AVPlayer?
 
     private var quality: StreamQuality {
         StreamQuality(rawValue: qualityRaw) ?? .p1080
     }
+
+    private var playbackItem: PlaybackItem { .live(channel) }
+
+    private var playback: PlaybackController { model.playback }
 
     var body: some View {
         AdaptivePlayerLayout(
@@ -23,45 +27,53 @@ struct LivePlayerView: View {
         )
         .navigationTitle(channel.name)
         .navigationBarTitleDisplayMode(.inline)
-        .task { startSessionIfNeeded() }
-        .task(id: session?.playbackURL) { await attachPlayerIfNeeded() }
-        .onDisappear { teardown() }
+        .task { startPlayback() }
+        .onAppear { playback.viewAppeared(for: playbackItem) }
+        .onDisappear { playback.viewDisappeared(for: playbackItem) }
     }
 
     // MARK: - Views
 
     @ViewBuilder
     private var playerArea: some View {
-        if let player {
-            PlayerView(player: player)
-        } else if let session, case .failed(let message) = session.phase {
-            ZStack {
-                Color.black
-                VStack(spacing: 14) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.largeTitle)
-                        .foregroundStyle(.white)
-                    Text(message)
-                        .font(.footnote)
-                        .foregroundStyle(.white.opacity(0.85))
-                        .multilineTextAlignment(.center)
-                    Button("再試行") {
-                        retry()
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .padding(24)
-            }
+        if playback.item == playbackItem, playback.isPlayerAttached {
+            PlayerView(playback: playback)
+        } else if playback.item == playbackItem, let message = playback.liveErrorMessage {
+            errorArea(message)
         } else {
-            ZStack {
-                Color.black
-                VStack(spacing: 10) {
-                    ProgressView()
-                        .tint(.white)
-                    Text("ライブ配信を準備しています…")
-                        .font(.footnote)
-                        .foregroundStyle(.white.opacity(0.8))
+            loadingArea
+        }
+    }
+
+    private func errorArea(_ message: String) -> some View {
+        ZStack {
+            Color.black
+            VStack(spacing: 14) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.largeTitle)
+                    .foregroundStyle(.white)
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .multilineTextAlignment(.center)
+                Button("再試行") {
+                    playback.retry()
                 }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(24)
+        }
+    }
+
+    private var loadingArea: some View {
+        ZStack {
+            Color.black
+            VStack(spacing: 10) {
+                ProgressView()
+                    .tint(.white)
+                Text("ライブ配信を準備しています…")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.8))
             }
         }
     }
@@ -126,33 +138,9 @@ struct LivePlayerView: View {
 
     // MARK: - Session
 
-    private func startSessionIfNeeded() {
-        guard session == nil, let client = model.client else { return }
-        let newSession = LiveStreamSession(channel: channel, client: client, quality: quality)
-        session = newSession
-        newSession.start()
-    }
-
-    private func attachPlayerIfNeeded() async {
-        guard player == nil, let url = session?.playbackURL else { return }
-        let newPlayer = AVPlayer(url: url)
-        newPlayer.automaticallyWaitsToMinimizeStalling = true
-        player = newPlayer
-        newPlayer.play()
-    }
-
-    private func retry() {
-        player?.pause()
-        player = nil
-        session?.stop()
-        session = nil
-        startSessionIfNeeded()
-    }
-
-    private func teardown() {
-        player?.pause()
-        player = nil
-        session?.stop()
-        session = nil
+    private func startPlayback() {
+        guard let client = model.client else { return }
+        playback.play(playbackItem, client: client, quality: quality)
     }
 }
+

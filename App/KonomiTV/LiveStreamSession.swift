@@ -90,6 +90,11 @@ final class LiveStreamSession {
     private(set) var segmentCount = 0
     private(set) var playbackURL: URL?
 
+    /// Called once when the loopback playlist URL is published.
+    @ObservationIgnored var onReady: (@MainActor (URL) -> Void)?
+    /// Called when the pipeline fails (network error, stream ended, ...).
+    @ObservationIgnored var onFailed: (@MainActor (String) -> Void)?
+
     @ObservationIgnored private var store: SegmentStore?
     @ObservationIgnored private var server: LocalHLSServer?
     @ObservationIgnored private var serverURL: URL?
@@ -180,16 +185,21 @@ final class LiveStreamSession {
             guard !Task.isCancelled else { return }
 
             if let failure {
-                phase = .failed(failure)
+                fail(failure)
             } else {
-                phase = .failed("ライブ配信が終了しました。")
+                fail("ライブ配信が終了しました。")
             }
         } catch is CancellationError {
             // Cancelled by `stop()`.
         } catch {
             guard !Task.isCancelled else { return }
-            phase = .failed(liveStreamErrorMessage(error))
+            fail(liveStreamErrorMessage(error))
         }
+    }
+
+    private func fail(_ message: String) {
+        phase = .failed(message)
+        onFailed?(message)
     }
 
     private func applySegmentCount(_ count: Int) {
@@ -198,6 +208,7 @@ final class LiveStreamSession {
         guard playbackURL == nil else { return }
         playbackURL = serverURL
         phase = .ready(serverURL)
+        onReady?(serverURL)
     }
 }
 

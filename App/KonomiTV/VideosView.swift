@@ -62,9 +62,7 @@ struct VideosView: View {
                 spacing: 16
             ) {
                 ForEach(items) { video in
-                    NavigationLink {
-                        VideoDetailView(model: model, video: video)
-                    } label: {
+                    NavigationLink(value: video) {
                         VideoCard(
                             video: video,
                             thumbnailURL: model.client?.thumbnailURL(videoID: video.id)

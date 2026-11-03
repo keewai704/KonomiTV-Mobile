@@ -1,4 +1,5 @@
 import SwiftUI
+import KonomiKit
 
 /// Chooses between the first run setup flow and the main interface, and
 /// between a tab bar (compact widths) and a sidebar (regular widths).
@@ -24,34 +25,58 @@ struct RootView: View {
 
     @ViewBuilder
     private var mainInterface: some View {
-        if isCompact {
-            compactInterface
-        } else {
-            regularInterface
+        Group {
+            if isCompact {
+                compactInterface
+            } else {
+                regularInterface
+            }
         }
+        .overlay(alignment: .topLeading) {
+            playbackStatus
+        }
+    }
+
+    /// Invisible status strings for the UI tests: background playback, the
+    /// playback position and picture-in-picture state are readable from any
+    /// screen.
+    private var playbackStatus: some View {
+        let playback = model.playback
+        return VStack(spacing: 0) {
+            statusText(playback.state, identifier: "playback.state")
+            statusText(String(playback.positionSeconds), identifier: "playback.position")
+            statusText(
+                playback.isPictureInPictureActive ? "active" : "inactive",
+                identifier: "playback.pip"
+            )
+            statusText(String(playback.pictureInPictureStartCount), identifier: "playback.pipStarts")
+        }
+        .font(.system(size: 1))
+        .opacity(0.01)
+        .allowsHitTesting(false)
+    }
+
+    private func statusText(_ value: String, identifier: String) -> some View {
+        Text(value)
+            .accessibilityLabel(value)
+            .accessibilityIdentifier(identifier)
     }
 
     // MARK: - Compact (iPhone, narrow windows)
 
     private var compactInterface: some View {
         TabView(selection: $model.section) {
-            NavigationStack {
-                LiveChannelsView(model: model)
-            }
-            .tabItem { tabLabel(for: .live) }
-            .tag(AppSection.live)
+            sectionStack(.live)
+                .tabItem { tabLabel(for: .live) }
+                .tag(AppSection.live)
 
-            NavigationStack {
-                VideosView(model: model)
-            }
-            .tabItem { tabLabel(for: .videos) }
-            .tag(AppSection.videos)
+            sectionStack(.videos)
+                .tabItem { tabLabel(for: .videos) }
+                .tag(AppSection.videos)
 
-            NavigationStack {
-                SettingsView(model: model)
-            }
-            .tabItem { tabLabel(for: .settings) }
-            .tag(AppSection.settings)
+            sectionStack(.settings)
+                .tabItem { tabLabel(for: .settings) }
+                .tag(AppSection.settings)
         }
     }
 
@@ -77,12 +102,10 @@ struct RootView: View {
             .navigationTitle("KonomiTV")
             .accessibilityIdentifier("sidebar")
         } detail: {
-            NavigationStack {
-                sectionContent(model.section)
-            }
-            // A fresh stack per section, so screens pushed in one section do
-            // not stay on top after switching to another.
-            .id(model.section)
+            sectionStack(model.section)
+                // A fresh stack per section, so screens pushed in one section
+                // do not stay on top after switching to another.
+                .id(model.section)
         }
         .navigationSplitViewStyle(.balanced)
     }
@@ -98,15 +121,32 @@ struct RootView: View {
         )
     }
 
+    // MARK: - Per section navigation stack
+
+    /// Each section owns its navigation path on `AppModel`, so picture in
+    /// picture restore can push the screen that owns the playback.
     @ViewBuilder
-    private func sectionContent(_ section: AppSection) -> some View {
+    private func sectionStack(_ section: AppSection) -> some View {
         switch section {
         case .live:
-            LiveChannelsView(model: model)
+            NavigationStack(path: $model.livePath) {
+                LiveChannelsView(model: model)
+                    .navigationDestination(for: LiveChannel.self) { channel in
+                        LivePlayerView(model: model, channel: channel)
+                    }
+            }
         case .videos:
-            VideosView(model: model)
+            NavigationStack(path: $model.videosPath) {
+                VideosView(model: model)
+                    .navigationDestination(for: RecordedProgram.self) { video in
+                        VideoDetailView(model: model, video: video)
+                    }
+            }
         case .settings:
-            SettingsView(model: model)
+            NavigationStack {
+                SettingsView(model: model)
+            }
         }
     }
 }
+
