@@ -64,6 +64,8 @@ final class PlaybackController {
     /// Current playback position in whole seconds.
     private(set) var positionSeconds = 0
     private(set) var isPictureInPictureActive = false
+    /// False on iPhone simulators, which do not implement PiP.
+    let isPictureInPictureSupported = AVPictureInPictureController.isPictureInPictureSupported()
     /// Number of PiP sessions started since launch (UI tests assert on it).
     private(set) var pictureInPictureStartCount = 0
     /// Whether an AVPlayer is attached to playerViewController.

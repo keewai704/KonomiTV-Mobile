@@ -50,6 +50,10 @@ struct RootView: View {
                 identifier: "playback.pip"
             )
             statusText(String(playback.pictureInPictureStartCount), identifier: "playback.pipStarts")
+            statusText(
+                playback.isPictureInPictureSupported ? "true" : "false",
+                identifier: "playback.pipSupported"
+            )
         }
         .font(.system(size: 1))
         .opacity(0.01)

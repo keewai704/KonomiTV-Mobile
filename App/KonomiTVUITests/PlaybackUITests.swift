@@ -45,9 +45,14 @@ final class PlaybackUITests: KonomiTVUITestCase {
 
     // MARK: - Picture in Picture
 
-    func testPictureInPictureStartsFromInlineAndKeepsPlaying() {
+    func testPictureInPictureStartsFromInlineAndKeepsPlaying() throws {
         // 自動 PiP を有効にしたまま起動する。
         let app = startApp()
+        let supported = uiElement(app, "playback.pipSupported")
+        XCTAssertTrue(supported.waitForExistence(timeout: TestTimeout.ui), "PiP 対応状況が取得できない")
+        // iPhone シミュレーターは PiP を実装していない (実機と iPad シミュレーターは対応)。
+        try XCTSkipIf(supported.label == "false", "この環境は PiP に対応していない")
+
         openVideo(in: app)
         let started = position(in: app)
 
