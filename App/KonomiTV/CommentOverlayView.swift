@@ -6,7 +6,7 @@ import Observation
 ///
 /// The overlay renderer lives in `PlaybackController` so it survives switching
 /// between the live player and the recorded video screen and stays attached to
-/// the single `AVPlayerViewController`.
+/// the single player host view controller.
 @MainActor
 @Observable
 final class CommentOverlayModel {
@@ -341,9 +341,9 @@ final class CommentDanmakuEngine {
 
 /// Danmaku overlay.
 ///
-/// It is added to `AVPlayerViewController.contentOverlayView` instead of being
-/// stacked in SwiftUI: that view sits above the video both inline and in the
-/// fullscreen presentation, so one renderer covers every player presentation.
+/// It is added to the player host view above libVLC's video output instead of
+/// being stacked in SwiftUI: that view sits above the video, so one renderer
+/// covers every player presentation.
 /// A `CADisplayLink` moves the comment layers; it does no work while there is
 /// nothing on screen or playback is paused.
 @MainActor

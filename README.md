@@ -1,7 +1,7 @@
 # KonomiTV for iOS / iPadOS
 
 KonomiTV サーバーに接続して、テレビ放送のライブ視聴と録画ビデオの再生ができるネイティブクライアントです。
-SwiftUI と AVKit だけで構成し、WebView やサードパーティ製 UI ライブラリは使っていません。
+SwiftUI と AVKit / VLCKit で構成し、WebView やサードパーティ製 UI ライブラリは使っていません。
 
 ## 主な機能
 
@@ -52,16 +52,29 @@ SwiftUI と AVKit だけで構成し、WebView やサードパーティ製 UI �
 
 ## ライブ再生のしくみ
 
-KonomiTV のライブ配信 API は MPEG-TS をそのまま流し続けるため、AVPlayer では直接再生できません。
+KonomiTV のライブ配信 API は MPEG-TS をそのまま流し続けるため、AVPlayer も libVLC も直接は再生できません。
 アプリ内で MPEG-TS をキーフレーム単位の約 1 秒のセグメントに区切り（`KonomiStreaming`）、
-`127.0.0.1` で待ち受ける小さな HTTP サーバー（Network.framework）からライブ HLS として AVPlayer に渡します。
-各セグメントには `#EXT-X-PROGRAM-DATE-TIME` を付け、ストリーム内の字幕 PES を同じ PTS の時計で
-字幕レンダラーに渡すため、再生位置と字幕がずれません。
+`127.0.0.1` で待ち受ける小さな HTTP サーバー（Network.framework）からライブ HLS として
+VLCKit（libVLC）に渡します。各セグメントには `#EXT-X-PROGRAM-DATE-TIME` を付けます。
+
+遅延はプレイリストの窓と libVLC の開始位置で決まります。窓は 6 セグメント（約 6 秒）で、
+libVLC の HLS は既定で窓の後ろから 3 セグメント目（`hls-live-start` の既定値 3）から再生を始めるため、
+ライブエッジの約 3 秒後ろを再生します（AVPlayer 時代の `configuredTimeOffsetFromLive = 3` と同じ）。
+libVLC のネットワークキャッシュはライブ 1000 ms、録画ビデオ 3000 ms、オフライン保存 300 ms です。
+
+libVLC は入力ごとに自分のタイムラインを 0 から数え直すため、再生位置と PTS はロードをまたいで
+そのままでは比較できません。そこでループバックサーバーが実際に配信した最初のセグメント
+（＝ libVLC が再生を始めたセグメント）の PROGRAM-DATE-TIME と先頭映像 PTS を固定点にして、
+libVLC の再生位置 ↔ 壁時計 ↔ PTS の対応（`LivePlaybackClock`、`KonomiStreaming`）を作ります。
+字幕 PES はこの対応で再生位置に変換し、録画と同じ字幕レンダラーに渡します。対応はロードのたび、
+およびライブエッジへの復帰・再読み込みのたびに作り直します。
 
 録画ビデオも同じループバックサーバー経由で再生します。サーバーの master / media プレイリストと
 セグメントをアプリ内でプロキシし、映像のセグメントから字幕 PES を取り出して
 `HLSMediaPlaylist.playbackTime(segmentIndex:pts:firstPTS:)` で再生位置に変換します。
 サーバーへの master プレイリスト要求・keep-alive・画質切り替えはそのまま維持されます。
+字幕 PES はセグメントから取り除いた複製を渡すため、libVLC 側の字幕デコーダーは動きません
+（字幕は libaribcaption で描画するので、二重に出ることはありません）。
 
 オフライン保存したビデオは、保存時に書いた VOD プレイリスト（`#EXT-X-ENDLIST`）と
 `Application Support/OfflineVideos/<録画番組 ID>/` のセグメントを同じループバックサーバーから配信します。
@@ -70,15 +83,25 @@ KonomiTV のライブ配信 API は MPEG-TS をそのまま流し続けるため
 
 ## ピクチャ・イン・ピクチャとバックグラウンド再生
 
+- **プレイヤー**: 映像は libVLC が `PlayerDrawableView`（`VLCDrawable`）に描画し、その上に字幕とコメントの
+  オーバーレイ、さらに SwiftUI の操作パネル（タップで表示／再生中は約 3 秒で自動的に非表示、再生／一時停止、
+  録画はシークバーと ±10 秒／±30 秒スキップ、ライブは「ライブ」ボタン、ミュート、AirPlay、PiP）が重なります。
 - **ピクチャ・イン・ピクチャ (PiP)**: 録画ビデオ・ライブのどちらも、再生中にホーム画面へ移ると iOS が自動で PiP を開始します。
-  プレイヤーの PiP ボタンからも開始できます。PiP 中はアプリ内でほかの画面へ移っても再生が止まらず、
-  PiP の「元の画面に戻る」ボタンで再生中のビデオ／チャンネルの画面へ戻ります。
+  操作パネルの PiP ボタンからも開始できます。PiP は libVLC の
+  `VLCPictureInPictureWindowControlling` を `PlayerDrawableView` が受け取って駆動し、
+  AVKit から呼ばれる再生位置・長さ・再生中かどうか・シーク可否はロックで保護したスナップショットから
+  同期的に答えます（ライブはシーク不可）。PiP 中はアプリ内でほかの画面へ移っても再生が止まらず、
+  アプリに戻すと再生中のビデオ／チャンネルの画面へ戻ります。
 - **バックグラウンド再生**: ホーム画面に戻っても再生を継続します（`UIBackgroundModes: audio` と
-  `audiovisualBackgroundPlaybackPolicy = .continuesIfPossible`）。PiP を使わない音声だけの継続も同じ経路です。
+  `.playback` のオーディオセッション）。PiP を使わない音声だけの継続も同じ経路で、
+  映像を表示しないバックグラウンドでは 2 秒後に libVLC の映像トラックを外して消費電力を抑え、
+  前面に戻ると再び選択します。
 - **再生中情報**: ロック画面・コントロールセンターには、ビデオ名（ライブは放送中の番組名、番組情報がなければチャンネル名）と
-  チャンネル名を表示します。
+  チャンネル名、再生位置・長さ・再生速度、チャンネルのロゴ／サムネイルを表示します。
+  再生／一時停止・10 秒スキップ・シーク（録画のみ）は `MPRemoteCommandCenter` から操作できます。
 
-再生はアプリ全体で 1 つの `PlaybackController` が所有する `AVPlayerViewController` が行います。
+再生はアプリ全体で 1 つの `PlaybackController` が所有する `VLCMediaPlayer` と、共有の
+`PlayerHostViewController`（`PlayerDrawableView` + 字幕・コメントオーバーレイ）が行います。
 PiP を使っていないときに再生画面を離れると、再生を止めます。
 
 UI テストでは `-UITestingDisableAutoPiP` を渡すと PiP の自動開始を無効にし、バックグラウンド再生だけを検証できます。
@@ -93,9 +116,12 @@ iPhone のシミュレーターは PiP に対応していないため、PiP の�
 ## セットアップ
 
 `KonomiTV.xcodeproj` は生成物のためリポジトリに含めていません。初回と `project.yml` の変更後に生成してください。
+先に `scripts/fetch-vlckit.py` で VLCKit 4 を `Vendor/VLCKit.xcframework` に取得します
+（動的フレームワークのため `Vendor/` は `.gitignore` 済み）。
 
 ```sh
 brew install xcodegen
+python3 scripts/fetch-vlckit.py   # Vendor/VLCKit.xcframework (iOS device + simulator)
 xcodegen generate
 open KonomiTV.xcodeproj
 ```
@@ -106,11 +132,12 @@ Xcode でスキーム `KonomiTV` を選択して実行します。初回起動�
 
 | パス | 内容 |
 | --- | --- |
-| `App/KonomiTV/` | iOS アプリ本体（SwiftUI） |
+| `App/KonomiTV/` | iOS アプリ本体（SwiftUI + VLCKit） |
 | `App/KonomiTVUITests/` | XCUITest による E2E テスト |
 | `Packages/KonomiKit` | API クライアント・モデルと MPEG-TS → HLS セグメンタ（SwiftPM） |
 | `Packages/ARIBCaption` | libaribcaption の Swift ラッパー（ARIB 字幕のデコードと描画、SwiftPM） |
 | `MockServer/` | 開発・テスト用のモックサーバー（Python 標準ライブラリのみ。オフライン保存ストリームも配信） |
+| `scripts/fetch-vlckit.py` | VLCKit 4（`Vendor/VLCKit.xcframework`）の取得 |
 | `project.yml` | XcodeGen のプロジェクト定義 |
 
 ## ローカルでのテスト
@@ -200,6 +227,10 @@ Apple の資格情報がないフォークでもリリース処理を確認で�
 
 - 字幕のデコードと描画には [libaribcaption](https://github.com/magicxqq/libaribcaption)（MIT License,
   Copyright (c) 2022 magicxqq）を `Packages/ARIBCaption` に同梱しています。
+- 再生エンジンには [VLCKit 4](https://code.videolan.org/videolan/VLCKit)（libVLC, LGPL-2.1-or-later,
+  Copyright (c) VideoLAN and VLC authors）を動的フレームワークとして同梱しています。LGPL のため、
+  アプリと静的にリンクせず `VLCKit.framework` をそのまま埋め込み・署名しています
+  （`scripts/fetch-vlckit.py` で取得）。
 - バージョンは `v1.2.3` のようなタグから `MARKETING_VERSION` に設定され、
   `CURRENT_PROJECT_VERSION` は GitHub Actions の実行番号になります。
 - `KonomiTV.xcodeproj`、`DerivedData`、`.build`、`*.xcresult`、`__pycache__` などは

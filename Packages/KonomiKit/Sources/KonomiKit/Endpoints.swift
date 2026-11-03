@@ -411,7 +411,7 @@ enum Endpoints {
     /// `type=master` returns the audio-group master playlist; the media
     /// playlists (`primary-audio` / `secondary-audio`) are what the master
     /// playlist points at. The segment URIs inside a media playlist are
-    /// relative, so AVPlayer resolves them against this URL.
+    /// relative, so the player resolves them against this URL.
     static func videoPlaylist(
         baseURL: URL,
         videoID: Int,

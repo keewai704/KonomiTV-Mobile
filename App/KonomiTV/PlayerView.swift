@@ -1,11 +1,9 @@
 import SwiftUI
-import AVKit
 import Foundation
-import UIKit
 
 /// Thin UIViewControllerRepresentable around the app wide
-/// AVPlayerViewController, so the standard playback controls, AirPlay, Now
-/// Playing info and picture in picture are available.
+/// PlayerHostViewController, so the VLC drawable, the caption / comment
+/// overlays and libVLC's picture-in-picture window are available.
 ///
 /// It returns the existing controller instance instead of creating a new one:
 /// that is what keeps picture in picture alive while the user moves between
@@ -13,35 +11,75 @@ import UIKit
 struct PlayerRepresentable: UIViewControllerRepresentable {
     let playback: PlaybackController
 
-    func makeUIViewController(context: Context) -> AVPlayerViewController {
-        playback.playerViewController
+    func makeUIViewController(context: Context) -> PlayerHostViewController {
+        playback.hostViewController
     }
 
-    func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
-        // The controller configures its shared player view controller itself.
+    func updateUIViewController(_ uiViewController: PlayerHostViewController, context: Context) {
+        // The controller configures its shared host view controller itself.
     }
 }
 
-/// Player plus an invisible status label that UI tests can read.
+/// Player plus the transport controls and an invisible status label that UI
+/// tests can read.
+///
+/// Tapping the picture shows and hides the controls; they hide themselves
+/// after three seconds while playback runs, and stay on screen while paused.
 struct PlayerView: View {
     let playback: PlaybackController
+
+    @State private var areControlsVisible = true
+    @State private var autoHideTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
             PlayerRepresentable(playback: playback)
                 .accessibilityIdentifier("player.view")
 
+            tapSurface
+
+            if areControlsVisible, !playback.isPictureInPictureActive {
+                PlayerTransportControls(playback: playback, onInteraction: revealControls)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("player.controls")
+                    .transition(.opacity)
+            }
+
             captureNotice
 
-            Text(playback.state)
-                .font(.system(size: 1))
-                .opacity(0.01)
-                .accessibilityLabel(playback.state)
-                .accessibilityValue(playback.errorDetail ?? playback.state)
-                .accessibilityIdentifier("player.state")
-                .allowsHitTesting(false)
+            statusLabel
         }
         .background(Color.black)
+        .animation(.easeInOut(duration: 0.2), value: areControlsVisible)
+        .onAppear { scheduleAutoHide() }
+        .onDisappear { autoHideTask?.cancel() }
+        .onChange(of: playback.isPlaying) { _, isPlaying in
+            if isPlaying {
+                scheduleAutoHide()
+            } else {
+                autoHideTask?.cancel()
+                areControlsVisible = true
+            }
+        }
+    }
+
+    /// Tapping the picture toggles the controls. It sits below them, so a tap
+    /// on a button never reaches it.
+    private var tapSurface: some View {
+        Button {
+            if areControlsVisible {
+                autoHideTask?.cancel()
+                areControlsVisible = false
+            } else {
+                revealControls()
+            }
+        } label: {
+            Color.clear
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("player.surface")
+        .accessibilityLabel("再生コントロール")
     }
 
     /// Transient message of the capture pipeline ("保存しました", "ラジオ
@@ -65,5 +103,31 @@ struct PlayerView: View {
             .accessibilityLabel(notice)
         }
     }
-}
 
+    private var statusLabel: some View {
+        Text(playback.state)
+            .font(.system(size: 1))
+            .opacity(0.01)
+            .accessibilityLabel(playback.state)
+            .accessibilityValue(playback.errorDetail ?? playback.state)
+            .accessibilityIdentifier("player.state")
+            .allowsHitTesting(false)
+    }
+
+    // MARK: - Controls visibility
+
+    private func revealControls() {
+        areControlsVisible = true
+        scheduleAutoHide()
+    }
+
+    private func scheduleAutoHide() {
+        autoHideTask?.cancel()
+        guard playback.isPlaying else { return }
+        autoHideTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            areControlsVisible = false
+        }
+    }
+}

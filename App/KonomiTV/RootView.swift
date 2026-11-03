@@ -46,6 +46,7 @@ struct RootView: View {
         return VStack(spacing: 0) {
             statusText(playback.state, identifier: "playback.state")
             statusText(String(playback.positionSeconds), identifier: "playback.position")
+            statusText(String(Int(playback.durationSeconds)), identifier: "playback.duration")
             statusText(
                 playback.isPictureInPictureActive ? "active" : "inactive",
                 identifier: "playback.pip"

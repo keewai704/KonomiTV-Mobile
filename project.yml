@@ -40,6 +40,12 @@ targets:
         product: KonomiStreaming
       - package: ARIBCaption
         product: ARIBCaption
+      # Fetched by scripts/fetch-vlckit.py before xcodegen generate. VLCKit 4 is
+      # an LGPL-2.1 dynamic framework, so it is embedded and signed but never
+      # statically linked.
+      - framework: Vendor/VLCKit.xcframework
+        embed: true
+        codeSign: true
     info:
       path: App/KonomiTV/Info.plist
       properties:

@@ -112,7 +112,7 @@ public struct StreamingProfile: Codable, Sendable, Hashable {
 /// Playlist variant of `GET /api/streams/video/{id}/{quality}/playlist`.
 ///
 /// `master` exposes 主音声 / 副音声 as an `EXT-X-MEDIA` audio group, which
-/// AVPlayer shows natively.
+/// the player can show natively.
 public enum VideoPlaylistType: String, Codable, CaseIterable, Sendable, Hashable {
     case master
     case primaryAudio = "primary-audio"

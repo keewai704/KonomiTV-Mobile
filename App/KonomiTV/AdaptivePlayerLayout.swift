@@ -10,7 +10,7 @@ import SwiftUI
 /// Manager, rotation) even when the size class does not change.
 ///
 /// Both arrangements share one `AnyLayout`, so switching between them keeps
-/// the player's identity: the `AVPlayerViewController` is not recreated and
+/// the player's identity: the player host view controller is not recreated and
 /// playback continues while the window is resized.
 struct AdaptivePlayerLayout<Player: View, BelowPlayer: View, Info: View>: View {
     private let threshold: CGFloat

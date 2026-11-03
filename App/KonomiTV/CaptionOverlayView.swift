@@ -1,25 +1,26 @@
-import AVKit
+import AVFoundation
 import UIKit
 
 /// Draws ARIB captions over the video.
 ///
-/// It is added to `AVPlayerViewController.contentOverlayView` below the
-/// comment overlay, so captions appear inline and in fullscreen alike. The
+/// It is added to the player host view above libVLC's video output, so captions
+/// appear inline and in the picture-in-picture window's source alike. The
 /// rendered images are plain `CGImage`s on `CALayer`s: the renderer already
 /// produced the bitmap, so nothing is redrawn here.
 @MainActor
 final class CaptionOverlayUIView: UIView {
     private let controller: CaptionController
-    private weak var playerViewController: AVPlayerViewController?
+    /// Decoded video size in pixels (`VLCMediaPlayer.videoSize`).
+    private let videoSize: @MainActor () -> CGSize
 
     private var captionLayers: [CALayer] = []
     private var displayLink: CADisplayLink?
     private var lastGeneration = -1
     private var lastVideoRect: CGRect = .zero
 
-    init(controller: CaptionController, playerViewController: AVPlayerViewController) {
+    init(controller: CaptionController, videoSize: @escaping @MainActor () -> CGSize) {
         self.controller = controller
-        self.playerViewController = playerViewController
+        self.videoSize = videoSize
         super.init(frame: .zero)
 
         backgroundColor = .clear
@@ -117,44 +118,20 @@ final class CaptionOverlayUIView: UIView {
 
     /// Video rect in this overlay's coordinates.
     ///
-    /// `AVPlayerViewController.videoBounds` accounts for the actual video
-    /// gravity and letterboxing; before it is available the overlay falls back
-    /// to an aspect-fit 16:9 rect, which is the shape of Japanese broadcasts.
+    /// libVLC letterboxes the picture inside its drawable, so the video rect is
+    /// the decoded size fitted into the overlay. Japanese broadcasts are 16:9;
+    /// before libVLC has decoded the first frame the aspect ratio falls back to
+    /// that shape.
     private func videoRect() -> CGRect {
-        if let controller = playerViewController,
-           let bounds = Self.videoBounds(of: controller) {
-            let converted = convert(bounds, from: controller.view)
-            if converted.width > 1, converted.height > 1 {
-                return converted
-            }
-        }
-
         let container = bounds
-        guard container.width > 0, container.height > 0 else { return .zero }
-        let aspect: CGFloat = 16.0 / 9.0
-        var size = CGSize(width: container.width, height: container.width / aspect)
-        if size.height > container.height {
-            size = CGSize(width: container.height * aspect, height: container.height)
-        }
-        return CGRect(
-            x: (container.width - size.width) / 2,
-            y: (container.height - size.height) / 2,
-            width: size.width,
-            height: size.height
-        )
-    }
+        guard container.width > 1, container.height > 1 else { return .zero }
 
-    /// `AVPlayerViewController.videoBounds` is the video rect the player
-    /// currently shows. It is read through KVC so the overlay still builds
-    /// against SDKs that do not expose it; nil means "use aspect fit".
-    private static func videoBounds(of controller: AVPlayerViewController) -> CGRect? {
-        let selector = NSSelectorFromString("videoBounds")
-        guard controller.responds(to: selector),
-              let value = controller.value(forKey: "videoBounds") as? NSValue else {
-            return nil
+        var size = videoSize()
+        if size.width < 1 || size.height < 1 || !size.width.isFinite || !size.height.isFinite {
+            size = CGSize(width: 16, height: 9)
         }
-        let bounds = value.cgRectValue
-        guard bounds.width > 1, bounds.height > 1 else { return nil }
-        return bounds
+        let rect = AVMakeRect(aspectRatio: size, insideRect: container)
+        guard rect.width > 1, rect.height > 1 else { return .zero }
+        return rect
     }
 }

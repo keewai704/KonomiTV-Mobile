@@ -44,6 +44,15 @@ struct AboutScreen: View {
                 }
             }
 
+            // Third-party components that are copied into the app bundle.
+            Section("ライセンス") {
+                LabeledContent("libaribcaption", value: "MIT")
+                    .accessibilityIdentifier("settings.about.license.aribcaption")
+
+                LabeledContent("VLCKit 4 / libVLC", value: "LGPL-2.1（動的リンク）")
+                    .accessibilityIdentifier("settings.about.license.vlckit")
+            }
+
             Section {
                 Button {
                     Task { await refresh() }

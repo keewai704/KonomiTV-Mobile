@@ -3,7 +3,7 @@ import Foundation
 /// Builds the HLS playlist of a saved video from its stored segments.
 ///
 /// The playlist is a finished VOD playlist (`#EXT-X-PLAYLIST-TYPE:VOD` +
-/// `#EXT-X-ENDLIST`), so AVPlayer knows the duration up front and seeking works
+/// `#EXT-X-ENDLIST`), so the player knows the duration up front and seeking works
 /// without the server. Segment URIs are relative, which lets the loopback
 /// server serve the playlist at `/offline/playlist.m3u8` and the segments at
 /// `/offline/segments/<n>.ts`.

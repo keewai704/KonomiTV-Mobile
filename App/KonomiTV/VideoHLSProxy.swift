@@ -5,9 +5,9 @@ import KonomiStreaming
 
 /// Serves a recorded program's HLS through a loopback HTTP server.
 ///
-/// AVPlayer cannot be pointed at the KonomiTV server directly any more,
-/// because the caption pipeline has to see the MPEG-TS segments that go past.
-/// This proxy rewrites the server's master and media playlists so AVPlayer
+/// libVLC cannot be pointed at the KonomiTV server directly any more, because
+/// the caption pipeline has to see the MPEG-TS segments that go past.
+/// This proxy rewrites the server's master and media playlists so the player
 /// fetches everything from `127.0.0.1`; every segment request is forwarded to
 /// the server (with the bearer token) and, for the primary video playlist, fed
 /// to `TSSegmentProbe`/`CaptionPESExtractor` to produce captions with a
@@ -341,8 +341,8 @@ final class VideoHLSProxy: @unchecked Sendable {
         do {
             let segmentURL = playlist.segments[index].url
             let data = try await fetch(segmentURL)
-            // Extracted on every fetch: after a seek back AVPlayer fetches the
-            // segment again and the caption buffer needs its captions again.
+            // Extracted on every fetch: after a seek back the player fetches
+            // the segment again and the caption buffer needs its captions again.
             // A duplicate caption at the same PTS just replaces the same one.
             if media.extractsCaptions {
                 extractCaptions(from: data, playlist: playlist, index: index)
@@ -351,8 +351,8 @@ final class VideoHLSProxy: @unchecked Sendable {
                 status: 200,
                 reason: "OK",
                 contentType: "video/mp2t",
-                // The caption streams are read above; AVPlayer rejects
-                // segments that still carry them.
+                // The caption streams are read above; the player must not
+                // decode them as subtitles (libaribcaption renders them).
                 body: PlayerStreamFilter.audioVideoOnly(data)
             )
         } catch {

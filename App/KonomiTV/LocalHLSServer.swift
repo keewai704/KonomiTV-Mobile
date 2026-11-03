@@ -38,7 +38,7 @@ private final class AudioSelectionBox: @unchecked Sendable {
 /// Where a saved (offline) video is served from.
 ///
 /// The playlist is the finished VOD playlist of the save; its segment URIs are
-/// relative, so AVPlayer resolves them against the loopback playlist URL.
+/// relative, so the player resolves them against the loopback playlist URL.
 struct OfflinePlaybackSource: Sendable {
     let playlist: String
     /// Directory that contains the playlist and its segments.
@@ -56,8 +56,9 @@ struct OfflinePlaybackSource: Sendable {
 /// A minimal HTTP/1.1 server bound to `127.0.0.1` that exposes the live
 /// segment store (or a saved video) as an HLS playlist.
 ///
-/// `AVPlayer` cannot consume the endless raw MPEG-TS stream KonomiTV serves, so
-/// the app re-packetises it into short HLS segments and plays them from here.
+/// Neither AVPlayer nor libVLC can consume the endless raw MPEG-TS stream
+/// KonomiTV serves, so the app re-packetises it into short HLS segments and
+/// plays them from here.
 ///
 /// All `NWListener` / `NWConnection` callbacks run on one serial queue; the
 /// class is `@unchecked Sendable` and only hands `Sendable` values (the actor,
@@ -71,22 +72,29 @@ final class LocalHLSServer: @unchecked Sendable {
     private let offline: OfflinePlaybackSource?
     private let offlinePlaylist: HLSMediaPlaylist?
     private let audio = AudioSelectionBox()
+    /// Called with the sequence number of every live segment served, in request
+    /// order. The player anchors its live clock to the first one after a load:
+    /// that is the segment libVLC starts from, so its PROGRAM-DATE-TIME and
+    /// first video PTS are the mapping's fixed point.
+    private let onSegmentServed: (@Sendable (Int) -> Void)?
 
     private var listener: NWListener?
     private var connections: [UUID: NWConnection] = [:]
     private var boundPort: UInt16?
     private var pendingStart: CheckedContinuation<UInt16, Error>?
 
-    init(store: SegmentStore) {
+    init(store: SegmentStore, onSegmentServed: (@Sendable (Int) -> Void)? = nil) {
         self.store = store
         self.offline = nil
         self.offlinePlaylist = nil
+        self.onSegmentServed = onSegmentServed
     }
 
     /// Serves a saved video from disk instead of the live segment store.
     init(offline: OfflinePlaybackSource) {
         self.store = nil
         self.offline = offline
+        self.onSegmentServed = nil
         self.offlinePlaylist = HLSMediaPlaylist(
             text: offline.playlist,
             url: URL(string: "http://127.0.0.1/offline/playlist.m3u8")!
@@ -269,7 +277,8 @@ final class LocalHLSServer: @unchecked Sendable {
                 store: store,
                 offline: offline,
                 offlinePlaylist: offlinePlaylist,
-                audio: audio
+                audio: audio,
+                onSegmentServed: self?.onSegmentServed
             )
             guard let self else { return }
             self.queue.async {
@@ -292,7 +301,8 @@ final class LocalHLSServer: @unchecked Sendable {
         store: SegmentStore?,
         offline: OfflinePlaybackSource?,
         offlinePlaylist: HLSMediaPlaylist?,
-        audio: AudioSelection
+        audio: AudioSelection,
+        onSegmentServed: (@Sendable (Int) -> Void)?
     ) async -> Data {
         let path = target
             .split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
@@ -318,12 +328,14 @@ final class LocalHLSServer: @unchecked Sendable {
             let number = path.dropFirst("/seg/".count).dropLast(".ts".count)
             if let sequence = Int(number),
                let segment = await store?.segment(sequence: sequence, audio: audio) {
+                onSegmentServed?(sequence)
                 return httpResponse(
                     status: 200,
                     reason: "OK",
                     contentType: "video/mp2t",
                     // Captions were already extracted from the original
-                    // bytes; AVPlayer only gets the audio and video.
+                    // bytes; the player only gets the audio and video (which
+                    // also keeps libVLC's own caption decoder idle).
                     body: PlayerStreamFilter.audioVideoOnly(
                         segment.data,
                         pmt: segment.pmt,

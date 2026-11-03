@@ -79,6 +79,14 @@ enum LiveStreamReader {
     }
 }
 
+/// Program-date-time anchor of a served live segment, used by the player to
+/// map libVLC's timeline onto the wall clock and the caption PTS clock.
+struct SegmentAnchor: Sendable, Hashable {
+    let sequence: Int
+    let firstPTS: Int64
+    let date: Date
+}
+
 /// UI facing facade for live playback: starts the local HLS server, streams
 /// and segments the upstream MPEG-TS, and publishes the loopback playlist URL
 /// once enough segments exist.
@@ -112,9 +120,13 @@ final class LiveStreamSession {
     /// Called for every caption / superimpose PES packet. Packets that arrive
     /// before the PROGRAM-DATE-TIME anchor is known are buffered here.
     @ObservationIgnored var onCaption: (@MainActor (CaptionPES) -> Void)?
+    /// Called with the sequence number of every segment the loopback server
+    /// served, in request order. The player anchors its live clock to the first
+    /// one after a load.
+    @ObservationIgnored var onSegmentServed: (@MainActor (Int) -> Void)?
 
-    /// Fixed reference point for `#EXT-X-PROGRAM-DATE-TIME` and for mapping
-    /// caption PTS values onto the player's wall clock.
+    /// Fixed reference point for `#EXT-X-PROGRAM-DATE-TIME` of the sliding
+    /// window (the wall clock the caption PTS values were produced on).
     private(set) var dateTimeAnchor: LiveProgramDateTimeAnchor?
 
     @ObservationIgnored private var store: SegmentStore?
@@ -152,6 +164,26 @@ final class LiveStreamSession {
         }
     }
 
+    /// Program-date-time anchor of one segment the loopback server served.
+    ///
+    /// The first segment libVLC fetches after a load is the segment it starts
+    /// playing, so its date and first video PTS are the fixed point of
+    /// `LivePlaybackClock`.
+    func segmentAnchor(sequence: Int) async -> SegmentAnchor? {
+        guard let store else { return nil }
+        guard let segment = await store.segment(sequence: sequence),
+              let firstPTS = segment.firstVideoPTS,
+              let programAnchor = await store.programDateTimeAnchor
+        else {
+            return nil
+        }
+        return SegmentAnchor(
+            sequence: sequence,
+            firstPTS: firstPTS,
+            date: programAnchor.date(forPTS: firstPTS)
+        )
+    }
+
     func stop() {
         pipeline?.cancel()
         pipeline = nil
@@ -178,7 +210,12 @@ final class LiveStreamSession {
     // MARK: - Pipeline
 
     private func bootstrap(upstreamURL: URL, store: SegmentStore) async {
-        let server = LocalHLSServer(store: store)
+        let served: @Sendable (Int) -> Void = { [weak self] sequence in
+            Task { @MainActor in
+                self?.onSegmentServed?(sequence)
+            }
+        }
+        let server = LocalHLSServer(store: store, onSegmentServed: served)
         server.setAudio(audioSelection)
         self.server = server
 
@@ -192,7 +229,7 @@ final class LiveStreamSession {
                 return
             }
             // The loopback URL is only published once enough segments exist,
-            // so AVPlayer never sees an empty playlist.
+            // so libVLC never sees an empty playlist.
             serverURL = localURL
 
             // Captured as a constant so the nested progress closure does not

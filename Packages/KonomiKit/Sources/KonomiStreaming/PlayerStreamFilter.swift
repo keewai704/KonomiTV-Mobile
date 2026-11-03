@@ -1,13 +1,14 @@
 import Foundation
 
-/// Restricts an MPEG-TS segment to what AVPlayer plays: PAT, PMT, video and
+/// Restricts an MPEG-TS segment to what the player needs: PAT, PMT, video and
 /// audio.
 ///
 /// Broadcast TS (and KonomiTV's HLS, which keeps `-map 0:d?`) carries ARIB
 /// caption, superimpose and data-carousel streams as private PES (stream type
-/// 0x06 / 0x0D). AVPlayer rejects such segments (CoreMediaErrorDomain -12971),
+/// 0x06 / 0x0D). AVPlayer rejected such segments (CoreMediaErrorDomain -12971),
 /// so the app extracts the captions itself from the original bytes and hands
-/// AVPlayer this filtered copy. Every PMT in the segment is rewritten (section
+/// the player this filtered copy; it also keeps libVLC's own caption decoder
+/// idle, because the app renders ARIB captions itself. Every PMT is rewritten (section
 /// length and CRC recomputed, continuity counter kept) so none of them still
 /// lists a dropped stream.
 public enum PlayerStreamFilter {

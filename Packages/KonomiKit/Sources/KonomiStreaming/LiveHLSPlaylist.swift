@@ -5,9 +5,10 @@ import Foundation
 ///
 /// The app sets the anchor when the first segment is produced
 /// (`anchorDate` = the wall-clock time of that moment, `anchorPTS` =
-/// `TSSegment.firstVideoPTS`). Captions and the player's
-/// `AVPlayerItem.currentDate()` share this clock, which is what lets the
-/// caption renderer line up with the video.
+/// `TSSegment.firstVideoPTS`). The playlist's PROGRAM-DATE-TIME and the caption
+/// PTS values share this clock; `LivePlaybackClock` maps the player's own
+/// timeline onto it, which is what lets the caption renderer line up with the
+/// video.
 public struct LiveProgramDateTimeAnchor: Sendable, Hashable {
     public let anchorDate: Date
     public let anchorPTS: Int64

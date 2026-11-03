@@ -402,7 +402,7 @@ public struct APIClient: Sendable {
     /// Recorded-video HLS playlist URL.
     ///
     /// The default `playlistType` is `master`, whose `EXT-X-MEDIA` audio
-    /// group exposes 主音声 / 副音声 to AVPlayer natively.
+    /// group exposes 主音声 / 副音声 to the player natively.
     public func videoPlaylistURL(
         videoID: Int,
         profile: StreamingProfile,

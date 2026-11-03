@@ -1,7 +1,5 @@
 import AVFoundation
 import CoreGraphics
-import CoreImage
-import CoreVideo
 import Foundation
 import ImageIO
 import KonomiKit
@@ -41,8 +39,8 @@ private struct CaptureInputs: @unchecked Sendable {
 /// and the comment overlay (CaptureManager.ts + CaptureCompositor.ts).
 ///
 /// Owned by `PlaybackController` next to `captions` and `comments`, because the
-/// frame comes from the shared AVPlayer and the overlays live on the player's
-/// content overlay view.
+/// frame comes from the shared player and the overlays live on the player host
+/// view.
 @MainActor
 @Observable
 final class CaptureController {
@@ -61,35 +59,7 @@ final class CaptureController {
     /// The player this controller captures from. Set by PlaybackController.
     @ObservationIgnored weak var playback: PlaybackController?
 
-    @ObservationIgnored private var output: AVPlayerItemVideoOutput?
-    @ObservationIgnored private weak var outputItem: AVPlayerItem?
-    @ObservationIgnored private let ciContext = CIContext()
     @ObservationIgnored private var noticeTask: Task<Void, Never>?
-
-    // MARK: - Video output
-
-    /// Attaches a BGRA video output to the item the player is about to show.
-    /// Anamorphic streams (1440x1080 with a 16:9 display aspect) keep their
-    /// pixel size here; the capture is scaled to the item's presentation size.
-    func attach(to item: AVPlayerItem) {
-        detach()
-        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-        ])
-        item.add(output)
-        self.output = output
-        outputItem = item
-    }
-
-    /// Removes the video output from the current item (item replaced, playback
-    /// stopped).
-    func detach() {
-        if let outputItem, let output {
-            outputItem.remove(output)
-        }
-        output = nil
-        outputItem = nil
-    }
 
     // MARK: - Capture
 
@@ -108,21 +78,47 @@ final class CaptureController {
 
         guard !isCapturing else { return }
 
-        let capturedAt = Date()
-        guard let frame = grabFrame() else {
-            showNotice("読み込み中はキャプチャできません。")
-            return
-        }
-
         if includeComments, !playback.comments.isVisible {
             showNotice("コメントを付けてキャプチャするには、コメント表示をオンにしてください。")
             return
         }
 
-        // Everything below must be read on the main actor before the
-        // composition moves to a background task.
+        // libVLC writes the frame asynchronously, so everything from the frame
+        // grab onwards runs in a task.
+        isCapturing = true
+        Task { [weak self] in
+            guard let self else { return }
+            guard let frame = await self.grabFrame() else {
+                self.isCapturing = false
+                self.showNotice("読み込み中はキャプチャできません。")
+                return
+            }
+            self.produce(
+                frame: frame,
+                item: playbackItem,
+                includeComments: includeComments,
+                settings: settings
+            )
+        }
+    }
+
+    /// Composites and saves one capture. Everything is read on the main actor
+    /// before the composition moves to a background task.
+    private func produce(
+        frame: CGImage,
+        item playbackItem: PlaybackItem,
+        includeComments: Bool,
+        settings: ClientSettings
+    ) {
+        guard let playback else {
+            isCapturing = false
+            return
+        }
+
+        let capturedAt = Date()
         let size = captureSize(for: frame)
         guard let scaledFrame = Self.scaled(frame, to: size) else {
+            isCapturing = false
             showNotice("キャプチャを保存できませんでした。")
             return
         }
@@ -131,6 +127,7 @@ final class CaptureController {
         let captionText = captionPlanes.isEmpty ? nil : playback.captions.captionText
         let commentImage = includeComments ? renderCommentOverlay(size: size) : nil
         if includeComments, commentImage == nil {
+            isCapturing = false
             showNotice("コメントを付けてキャプチャするには、コメント表示をオンにしてください。")
             return
         }
@@ -160,7 +157,6 @@ final class CaptureController {
             baseName: baseName
         )
 
-        isCapturing = true
         let client = playback.captureClient
         let saveMode = settings.captureSaveMode
         let copyToClipboard = settings.captureCopyToClipboard
@@ -253,35 +249,35 @@ final class CaptureController {
         return output.jpegData(compressionQuality: 1)
     }
 
-    /// Reads the current frame of the shared player, in the renderer's pixel
-    /// space. nil before the first frame has been decoded.
-    private func grabFrame() -> CGImage? {
-        guard let output, let item = playback?.capturePlayer?.currentItem else { return nil }
+    /// Reads the current frame of the shared player at its decoded
+    /// resolution.
+    ///
+    /// libVLC takes a snapshot asynchronously into a file and posts its
+    /// snapshot-taken callback when it is written; the callback is waited for
+    /// with a timeout, so a stalled video output cannot hang the capture button.
+    private func grabFrame() async -> CGImage? {
+        guard let playback else { return nil }
 
-        var pixelBuffer = output.copyPixelBuffer(
-            forItemTime: output.itemTime(forHostTime: CACurrentMediaTime()),
-            itemTimeForDisplay: nil
-        )
-        if pixelBuffer == nil {
-            let time = item.currentTime()
-            if time.isValid, item.status == .readyToPlay {
-                pixelBuffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil)
-            }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("konomitv-snapshot-(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard await playback.saveSnapshot(to: url) else { return nil }
+        if let data = try? Data(contentsOf: url), let image = UIImage(data: data)?.cgImage {
+            return image
         }
-        guard let buffer = pixelBuffer else { return nil }
-
-        let image = CIImage(cvPixelBuffer: buffer)
-        guard image.extent.width >= 1, image.extent.height >= 1 else { return nil }
-        return ciContext.createCGImage(image, from: image.extent)
+        // VLCKit also keeps the last snapshot as an image.
+        return playback.captureLastSnapshot?.cgImage
     }
 
-    /// The size the capture is written at: the item's presentation size, so an
-    /// anamorphic 1440x1080 frame becomes 1920x1080.
+    /// The size the capture is written at: the decoded video size
+    /// (`VLCMediaPlayer.videoSize`), so an anamorphic 1440x1080 frame becomes
+    /// 1920x1080.
     private func captureSize(for frame: CGImage) -> CGSize {
-        let presentationSize = playback?.capturePlayer?.currentItem?.presentationSize ?? .zero
-        if presentationSize.width >= 1, presentationSize.height >= 1,
-           presentationSize.width.isFinite, presentationSize.height.isFinite {
-            return presentationSize
+        let videoSize = playback?.captureVideoSize ?? .zero
+        if videoSize.width >= 1, videoSize.height >= 1,
+           videoSize.width.isFinite, videoSize.height.isFinite {
+            return videoSize
         }
         return CGSize(width: frame.width, height: frame.height)
     }

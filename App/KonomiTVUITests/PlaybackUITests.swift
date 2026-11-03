@@ -2,8 +2,9 @@ import XCTest
 
 /// 再生: バックグラウンド再生とピクチャ・イン・ピクチャ。
 ///
-/// 再生はアプリ全体で 1 台の PlaybackController / AVPlayerViewController が
-/// 所有するため、画面を離れても PiP とバックグラウンド再生が継続する。
+/// 再生はアプリ全体で 1 台の PlaybackController（VLCKit の VLCMediaPlayer）と
+/// 共有の PlayerHostViewController が所有するため、画面を離れても PiP と
+/// バックグラウンド再生が継続する。
 final class PlaybackUITests: KonomiTVUITestCase {
     // MARK: - Background playback
 

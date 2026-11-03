@@ -2,15 +2,17 @@ import AVFoundation
 import AVKit
 import Foundation
 import KonomiKit
+import KonomiStreaming
 import Observation
 import UIKit
+import VLCKit
 
 /// What the app wide player is currently playing.
 ///
 /// Both models are Hashable, so a value identifies the screen that owns the
 /// playback: returning to that screen can reuse the running player instead of
 /// starting a new one.
-enum PlaybackItem: Hashable {
+enum PlaybackItem: Hashable, Sendable {
     case video(RecordedProgram)
     case live(LiveChannel)
     /// A saved video played from local storage (no server involved).
@@ -44,13 +46,17 @@ enum PlaybackItem: Hashable {
     }
 }
 
-/// App wide owner of the single AVPlayerViewController used by every player
-/// screen.
+/// App wide owner of the single libVLC player used by every player screen.
 ///
 /// Keeping playback here (instead of inside the detail views) is what makes
 /// picture in picture and background playback work: leaving the screen while
-/// PiP is active no longer tears the player down, the PiP "restore" button can
+/// PiP is active no longer tears the player down, the PiP restore button can
 /// navigate back to the screen, and the Now Playing info has a title.
+///
+/// One VLCLibrary and one VLCMediaPlayer live as long as the app does; every
+/// load replaces only the media. libVLC reports state, time, length and
+/// snapshots from its own threads (PlayerDelegateProxy), so all of that is
+/// funnelled through nonisolated methods that hop to the main actor.
 @MainActor
 @Observable
 final class PlaybackController {
@@ -68,25 +74,26 @@ final class PlaybackController {
     /// Called when playback stops, with the position it stopped at.
     @ObservationIgnored var onVideoPlaybackStopped: (@MainActor (RecordedProgram, Double) -> Void)?
 
-    /// Position to seek to once the recorded program's item is ready.
-    @ObservationIgnored private var pendingStartPosition: Double = 0
+    /// The long-lived player host: the drawable libVLC renders into plus the
+    /// caption and danmaku overlays. Every player screen shows this exact view
+    /// controller, so the video output is never recreated while the app moves
+    /// between screens.
+    let hostViewController: PlayerHostViewController
 
-    /// Shared player view controller. Created once and reused by every player
-    /// screen so that PiP survives navigation inside the app.
-    let playerViewController = AVPlayerViewController()
-
-    /// "idle", "buffering", "playing" or "error".
+    /// "idle", "buffering", "playing", "paused" or "error".
     private(set) var state: String = "idle"
     /// Failure reason, surfaced to UI tests through the accessibility value.
     private(set) var errorDetail: String?
     /// Current playback position in whole seconds.
     private(set) var positionSeconds = 0
+    /// Length of the current media in seconds (0 for live and while unknown).
+    private(set) var durationSeconds: Double = 0
     private(set) var isPictureInPictureActive = false
     /// False on iPhone simulators, which do not implement PiP.
     let isPictureInPictureSupported = AVPictureInPictureController.isPictureInPictureSupported()
     /// Number of PiP sessions started since launch (UI tests assert on it).
     private(set) var pictureInPictureStartCount = 0
-    /// Whether an AVPlayer is attached to playerViewController.
+    /// Whether libVLC has a media attached to the player.
     private(set) var isPlayerAttached = false
     /// Live pipeline failure message (nil while the stream is healthy).
     private(set) var liveErrorMessage: String?
@@ -104,7 +111,7 @@ final class PlaybackController {
     private(set) var liveAudioSelection: AudioSelection = .primary
 
     /// Profile (quality, data saver, 24fps, low latency) of the current
-    /// playback. Changing it through `switchQuality` restarts the stream.
+    /// playback. Changing it through switchQuality restarts the stream.
     private(set) var profile = StreamingProfile.default
     private(set) var isMuted = false
     /// True while the player is actually advancing. The comment overlay freezes
@@ -122,15 +129,55 @@ final class PlaybackController {
     /// and saving. Reads the frame from the shared player.
     let capture = CaptureController()
 
-    @ObservationIgnored private var delegateProxy = PlayerViewControllerDelegate()
-    @ObservationIgnored private var player: AVPlayer?
+    /// Whether the current item offers seeking (recorded and saved video).
+    var canSeek: Bool { item?.isVideo == true }
+
+    /// True while playing a live channel.
+    var isLivePlayback: Bool {
+        if case .live? = item { return true }
+        return false
+    }
+
+    /// libVLC has handed its picture-in-picture window controller to the
+    /// drawable, so the PiP button can start it.
+    var isPictureInPictureAvailable: Bool {
+        hostViewController.isPictureInPictureWindowAvailable
+    }
+
+    // MARK: - Private state
+
+    /// Live network cache in milliseconds. The live playlist window is six
+    /// one-second segments and libVLC's hls-live-start default is three
+    /// segments, so the player sits about three seconds behind the encoder;
+    /// a one second cache keeps that latency without stalling on jitter.
+    private static let liveNetworkCaching = 1000
+    /// Recorded video goes through the loopback proxy; a deeper buffer makes
+    /// seeking smoother and costs nothing but memory.
+    private static let videoNetworkCaching = 3000
+    /// Saved videos come from disk through the loopback server.
+    private static let offlineNetworkCaching = 300
+
+    /// One libVLC instance for the whole app: an instance owns a full engine,
+    /// so creating one per player would leak it on every re-play.
+    private static let library: VLCLibrary = {
+        let library = VLCLibrary(options: [
+            "--no-video-title-show",
+            "--no-snapshot-preview",
+        ])
+        library.setHumanReadableName("KonomiTV", withHTTPUserAgent: "KonomiTV")
+        return library
+    }()
+
+    @ObservationIgnored private let player: VLCMediaPlayer
+    @ObservationIgnored private let delegateProxy = PlayerDelegateProxy()
+    @ObservationIgnored private let clock = PlaybackClock()
+    @ObservationIgnored private let nowPlaying = NowPlayingCenter()
+
     @ObservationIgnored private var liveSession: LiveStreamSession?
     @ObservationIgnored private let liveEvents = LiveEventsMonitor()
     @ObservationIgnored private var keepAliveTask: Task<Void, Never>?
     @ObservationIgnored private var client: APIClient?
 
-    @ObservationIgnored private weak var commentOverlayView: CommentOverlayUIView?
-    @ObservationIgnored private weak var captionOverlayView: CaptionOverlayUIView?
     /// Recorded-video HLS proxy (the video stream plus its caption extraction).
     @ObservationIgnored private var videoProxy: VideoHLSProxy?
 
@@ -139,12 +186,23 @@ final class PlaybackController {
     /// Saved video and its directory, kept so a restart can rebuild the server.
     @ObservationIgnored private var offlineContent: (video: OfflineVideo, directory: URL)?
 
-    @ObservationIgnored private var timeControlObservation: NSKeyValueObservation?
-    @ObservationIgnored private var itemStatusObservation: NSKeyValueObservation?
-    @ObservationIgnored private var periodicTimeObserver: Any?
-    @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
+    /// Position to seek to once the recorded program's media is open.
+    @ObservationIgnored private var pendingStartPosition: Double = 0
+    /// A snapshot request waiting for libVLC's snapshot-taken callback.
+    @ObservationIgnored private var snapshotWaiter: SnapshotWaiter?
+    /// True once the live clock asked for the anchor of a served segment.
+    @ObservationIgnored private var liveAnchorRequested = false
+    /// Playback position the next served segment belongs to. 0 after a load
+    /// (libVLC starts its timeline at the first segment it fetches); the
+    /// current position after a live-edge seek.
+    @ObservationIgnored private var liveAnchorPlaybackTime: Double = 0
 
-    /// Extra player layer used to start picture in picture from the E shortcut.
+    @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
+    @ObservationIgnored private var backgroundObserver: NSObjectProtocol?
+    @ObservationIgnored private var foregroundObserver: NSObjectProtocol?
+    /// Delayed "no PiP is coming, stop decoding video" check.
+    @ObservationIgnored private var backgroundTask: Task<Void, Never>?
+    @ObservationIgnored private var didDisableVideoTracks = false
 
     /// Item whose detail screen is currently on screen.
     @ObservationIgnored private var visibleItem: PlaybackItem?
@@ -153,22 +211,53 @@ final class PlaybackController {
     @ObservationIgnored private var isRestoringFromPictureInPicture = false
 
     init(options: LaunchOptions = LaunchOptions()) {
-        playerViewController.showsPlaybackControls = true
-        playerViewController.allowsPictureInPicturePlayback = true
-        playerViewController.canStartPictureInPictureAutomaticallyFromInline =
-            !options.disablesAutomaticPictureInPicture
-        playerViewController.updatesNowPlayingInfoCenter = true
-        playerViewController.entersFullScreenWhenPlaybackBegins = false
-        playerViewController.view.backgroundColor = .black
-        playerViewController.view.accessibilityIdentifier = "player.view"
+        let player = VLCMediaPlayer(library: Self.library)
+        self.player = player
+        self.hostViewController = PlayerHostViewController(
+            captions: captions,
+            comments: comments
+        )
 
         delegateProxy.owner = self
-        playerViewController.delegate = delegateProxy
+        player.delegate = delegateProxy
+        // libVLC renders into the drawable through its own sample buffer
+        // layer; the overlays live above it in the host view.
+        player.drawable = hostViewController.videoView
+        player.minimalTimePeriod = 250_000
+        player.timeChangeUpdateInterval = 0.25
+
+        // libVLC's picture-in-picture module reads its snapshot from any
+        // thread; these closures hop back to the main actor.
+        let media = hostViewController.videoView.pipMedia
+        media.setAllowsAutomaticPictureInPicture(!options.disablesAutomaticPictureInPicture)
+        media.onPlay = { [weak self] in
+            Task { @MainActor in self?.play() }
+        }
+        media.onPause = { [weak self] in
+            Task { @MainActor in self?.pause() }
+        }
+        media.onSeek = { [weak self] offset in
+            Task { @MainActor in self?.seek(by: Double(offset) / 1000) }
+        }
+        media.onStateChange = { [weak self] started in
+            Task { @MainActor in
+                guard let self else { return }
+                if started {
+                    self.pictureInPictureDidStart()
+                } else {
+                    self.pictureInPictureDidStop()
+                }
+            }
+        }
+
+        nowPlaying.onPlay = { [weak self] in self?.play() }
+        nowPlaying.onPause = { [weak self] in self?.pause() }
+        nowPlaying.onTogglePlayPause = { [weak self] in self?.togglePlayPause() }
+        nowPlaying.onSkip = { [weak self] seconds in self?.seek(by: seconds) }
+        nowPlaying.onChangePosition = { [weak self] position in self?.seek(to: position) }
 
         capture.playback = self
-
-        attachOverlays()
-        observeAudioSessionInterruptions()
+        observeSystemNotifications()
     }
 
     // MARK: - Playback
@@ -185,7 +274,7 @@ final class PlaybackController {
         profile: StreamingProfile,
         startAt: Double = 0
     ) {
-        if let current = item, current == playbackItem, player != nil || liveSession != nil {
+        if let current = item, current == playbackItem, isPlayerAttached || liveSession != nil {
             return
         }
 
@@ -197,6 +286,7 @@ final class PlaybackController {
         state = "buffering"
         errorDetail = nil
         positionSeconds = 0
+        durationSeconds = 0
         liveErrorMessage = nil
         isMuted = false
 
@@ -207,12 +297,12 @@ final class PlaybackController {
     /// Plays a saved video entirely from local storage.
     ///
     /// No server session is created: the stored playlist and segments are
-    /// served by a loopback `LocalHLSServer`, so picture in picture, background
+    /// served by a loopback LocalHLSServer, so picture in picture, background
     /// playback and the ARIB caption overlay work the same way as online
     /// playback, without a network.
     func playOffline(_ video: OfflineVideo, directory: URL, startAt: Double = 0) {
         let playbackItem = PlaybackItem.offline(video.program)
-        if let current = item, current == playbackItem, player != nil, offlineServer != nil {
+        if let current = item, current == playbackItem, isPlayerAttached, offlineServer != nil {
             return
         }
 
@@ -224,6 +314,7 @@ final class PlaybackController {
         state = "buffering"
         errorDetail = nil
         positionSeconds = 0
+        durationSeconds = 0
         liveErrorMessage = nil
         isMuted = false
 
@@ -243,7 +334,7 @@ final class PlaybackController {
         }
     }
 
-    /// Stops playback and releases every observer, task and session.
+    /// Stops playback and releases every task and session.
     func stop() {
         // Store the final position of the recorded program that is stopping.
         switch item {
@@ -256,36 +347,19 @@ final class PlaybackController {
         pendingStartPosition = 0
         keepAliveTask?.cancel()
         keepAliveTask = nil
+        backgroundTask?.cancel()
+        backgroundTask = nil
 
-        detachPlayerObservers()
-        capture.detach()
-        player?.pause()
-        player = nil
-        playerViewController.player = nil
-        isPlayerAttached = false
-
-        liveSession?.onReady = nil
-        liveSession?.onFailed = nil
-        liveSession?.onAudioTrackChange = nil
-        liveSession?.onCaption = nil
-        liveSession?.stop()
-        liveSession = nil
-
-        videoProxy?.stop()
-        videoProxy = nil
-
-        offlineServer?.stop()
-        offlineServer = nil
-        offlineContent = nil
-
-        liveEvents.onUpdate = nil
-        liveEvents.stop()
+        stopPlayer()
+        detachPipeline()
+        nowPlaying.clear()
 
         item = nil
         client = nil
         state = "idle"
         errorDetail = nil
         positionSeconds = 0
+        durationSeconds = 0
         liveErrorMessage = nil
         liveStatus = ""
         liveDetail = ""
@@ -296,6 +370,8 @@ final class PlaybackController {
         isPlaying = false
         isPictureInPictureActive = false
         isRestoringFromPictureInPicture = false
+        didDisableVideoTracks = false
+        liveAnchorRequested = false
         comments.isPlaying = false
         comments.isPictureInPictureActive = false
         comments.reset()
@@ -304,33 +380,39 @@ final class PlaybackController {
         captions.end()
     }
 
-    // MARK: - Overlays
+    // MARK: - Player lifecycle
 
-    /// Adds the caption and danmaku renderers to the player's content overlay
-    /// view, which is drawn above the video inline and in the fullscreen
-    /// presentation alike. Captions go first so comments stay on top.
-    private func attachOverlays() {
-        playerViewController.loadViewIfNeeded()
-        guard let contentOverlay = playerViewController.contentOverlayView else { return }
+    /// Stops the current media without touching item or the pipeline.
+    private func stopPlayer() {
+        guard isPlayerAttached || player.media != nil else { return }
+        isPlayerAttached = false
+        snapshotWaiter?.resume(false)
+        snapshotWaiter = nil
+        player.stop()
+        player.media = nil
+        clock.reset()
+        updatePictureInPictureSnapshot()
+        hostViewController.invalidatePictureInPictureState()
+    }
 
-        if captionOverlayView == nil {
-            let overlay = CaptionOverlayUIView(
-                controller: captions,
-                playerViewController: playerViewController
-            )
-            overlay.frame = contentOverlay.bounds
-            overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            contentOverlay.insertSubview(overlay, at: 0)
-            captionOverlayView = overlay
-        }
+    /// Tears down the live / proxy / offline pipeline of the current item.
+    private func detachPipeline() {
+        liveSession?.onReady = nil
+        liveSession?.onFailed = nil
+        liveSession?.onAudioTrackChange = nil
+        liveSession?.onCaption = nil
+        liveSession?.onSegmentServed = nil
+        liveSession?.stop()
+        liveSession = nil
 
-        if commentOverlayView == nil {
-            let overlay = CommentOverlayUIView(model: comments)
-            overlay.frame = contentOverlay.bounds
-            overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            contentOverlay.addSubview(overlay)
-            commentOverlayView = overlay
-        }
+        videoProxy?.stop()
+        videoProxy = nil
+
+        offlineServer?.stop()
+        offlineServer = nil
+
+        liveEvents.onUpdate = nil
+        liveEvents.stop()
     }
 
     private func updatePlaying(_ playing: Bool) {
@@ -340,57 +422,77 @@ final class PlaybackController {
         if comments.isPlaying != playing {
             comments.isPlaying = playing
         }
+        clock.update(position: clock.settledTime, isPlaying: playing)
     }
 
     // MARK: - Player controls
 
+    /// Plays or resumes (Space shortcut, Now Playing, picture in picture).
+    private func play() {
+        guard item != nil else { return }
+        player.play()
+        invalidatePictureInPictureState()
+    }
+
+    /// Pauses (Space shortcut, Now Playing, picture in picture).
+    private func pause() {
+        guard item != nil else { return }
+        player.pause()
+        invalidatePictureInPictureState()
+    }
+
     /// Toggles play / pause (Space shortcut).
     func togglePlayPause() {
-        guard let player else { return }
-        if player.timeControlStatus == .playing {
+        guard item != nil else { return }
+        if player.isPlaying {
             player.pause()
         } else {
             player.play()
         }
+        invalidatePictureInPictureState()
     }
 
     /// Toggles mute (Q shortcut). iOS has no per-app volume control, but
-    /// muting the AVPlayer is the equivalent of the web client's Q shortcut.
+    /// muting libVLC's audio output is the equivalent of the web client's Q
+    /// shortcut.
     func toggleMute() {
         isMuted.toggle()
-        player?.isMuted = isMuted
+        player.audio?.isMuted = isMuted
     }
 
     /// Seeks to an absolute position in seconds.
     func seek(to seconds: Double) {
-        guard let player else { return }
+        guard item != nil, player.isSeekable else { return }
         let target = max(seconds, 0)
-        player.seek(
-            to: CMTime(seconds: target, preferredTimescale: 600),
-            toleranceBefore: CMTime(seconds: 0.5, preferredTimescale: 600),
-            toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)
-        )
+        player.time = VLCTime(int: Int32(clamping: Int((target * 1000).rounded())))
+        clock.noteSeek(to: target)
         captions.seek(to: target)
+        positionSeconds = Int(target)
+        invalidatePictureInPictureState()
+        updateNowPlaying(force: true)
     }
 
     /// Seeks relative to the current position.
     func seek(by seconds: Double) {
-        seek(to: currentPosition + seconds)
+        seek(to: clock.currentTime + seconds)
     }
 
-    /// Jumps to the live edge (W shortcut).
+    /// Jumps to the live edge (W shortcut, ライブ button).
+    ///
+    /// A live HLS window is usually not seekable in libVLC, so this restarts
+    /// the stream: a fresh load starts at the live edge again.
     func seekToLiveEdge() {
-        guard case .live? = item, let player, let currentItem = player.currentItem else { return }
-        guard let range = currentItem.seekableTimeRanges.last?.timeRangeValue else { return }
-        let end = range.start.seconds + range.duration.seconds
-        guard end.isFinite else { return }
-        let target = max(end - 1, 0)
-        player.seek(
-            to: CMTime(seconds: target, preferredTimescale: 600),
-            toleranceBefore: .positiveInfinity,
-            toleranceAfter: .zero
-        )
-        captions.seek(to: target)
+        guard case .live? = item else { return }
+        if player.isSeekable, clock.length > 2 {
+            seek(to: max(clock.length - 1, 0))
+            // libVLC fetches the segment that is on screen now, so the live
+            // clock is re-anchored at the current position, not at 0.
+            liveAnchorPlaybackTime = clock.currentTime
+            liveAnchorRequested = false
+            clock.setLiveMapping(nil)
+        } else {
+            reload(startAt: 0)
+        }
     }
 
     /// Restarts the current item (R shortcut).
@@ -398,7 +500,7 @@ final class PlaybackController {
         guard let current = item else { return }
         switch current {
         case .video, .offline:
-            reload(startAt: currentPosition)
+            reload(startAt: clock.currentTime)
         case .live:
             reload(startAt: 0)
         }
@@ -413,10 +515,12 @@ final class PlaybackController {
         var updated = profile
         updated.quality = quality
         profile = updated
-        reload(startAt: currentPosition)
+        reload(startAt: clock.currentTime)
     }
 
     /// Switches 主音声 / 副音声 of the live stream without restarting it.
+    /// The loopback server filters the audio of the next segment; the caption
+    /// extraction and the stream itself keep running.
     func selectLiveAudio(_ selection: AudioSelection) {
         liveAudioSelection = selection
         liveSession?.selectAudio(selection)
@@ -444,43 +548,82 @@ final class PlaybackController {
 
     // MARK: - Capture inputs
 
-    /// The AVPlayer the capture pipeline reads frames from (nil when idle).
-    var capturePlayer: AVPlayer? { player }
-
     /// The client captures are uploaded with.
     var captureClient: APIClient? { client }
 
     /// The danmaku overlay view, whose layer tree is rendered into a comment
     /// capture.
-    var commentOverlay: CommentOverlayUIView? { commentOverlayView }
+    var commentOverlay: CommentOverlayUIView? { hostViewController.commentOverlay }
 
     /// Playback position in seconds, with sub-second precision for the EXIF
     /// metadata.
-    var capturePosition: Double { currentPosition }
+    var capturePosition: Double { clock.currentTime }
+
+    /// Decoded video size in pixels (the reference for the capture size),
+    /// corrected for anamorphic streams.
+    var captureVideoSize: CGSize { displayVideoSize(for: player.videoSize) }
+
+    /// VLCKit keeps the last snapshot it wrote as an image as well; used when
+    /// the snapshot file cannot be decoded (the capture still works then).
+    var captureLastSnapshot: UIImage? { player.lastSnapshot }
+
+    /// Writes the current video frame to url in the source resolution and
+    /// waits for libVLC's snapshot-taken callback.
+    ///
+    /// saveVideoSnapshotAt:withWidth:andHeight: is asynchronous; a 0 x 0 size
+    /// keeps the decoded resolution.
+    func saveSnapshot(to url: URL) async -> Bool {
+        guard isPlayerAttached, player.hasVideoOut else { return false }
+
+        if let snapshotWaiter {
+            snapshotWaiter.resume(false)
+        }
+        let waiter = SnapshotWaiter()
+        snapshotWaiter = waiter
+        player.saveVideoSnapshotAt(url.path, withWidth: 0, andHeight: 0)
+        let saved = await waiter.wait(timeout: .seconds(3))
+        if snapshotWaiter === waiter {
+            snapshotWaiter = nil
+        }
+        return saved
+    }
 
     private var isPlayerScreenVisible: Bool {
         guard let current = item else { return false }
         return visibleItem == current
     }
 
-    private var currentPosition: Double {
-        guard let player else { return Double(positionSeconds) }
-        let seconds = player.currentTime().seconds
-        return seconds.isFinite ? max(seconds, 0) : Double(positionSeconds)
-    }
-
     // MARK: - Picture in Picture
 
-    /// Called by the delegate proxy when PiP starts.
-    func pictureInPictureDidStart() {
+    /// Starts or stops picture in picture (the PiP button).
+    func togglePictureInPicture() {
+        guard isPictureInPictureSupported, item != nil, isPlayerAttached else { return }
+        if isPictureInPictureActive {
+            hostViewController.stopPictureInPicture()
+        } else {
+            hostViewController.startPictureInPicture()
+        }
+    }
+
+    /// Called from libVLC's PiP window controller when PiP starts.
+    private func pictureInPictureDidStart() {
         isPictureInPictureActive = true
         comments.isPictureInPictureActive = true
         captions.isPictureInPictureActive = true
         pictureInPictureStartCount += 1
+        // A background transition may have disabled the video output before PiP
+        // asked for it; give libVLC its video track back.
+        restoreVideoTracks()
+        updatePictureInPictureSnapshot()
     }
 
-    /// Called by the delegate proxy when PiP stops.
-    func pictureInPictureDidStop() {
+    /// Called from libVLC's PiP window controller when PiP stops.
+    ///
+    /// libVLC does not tell us whether the user restored the app or closed the
+    /// PiP window, so the app state decides: a foregrounded app was brought
+    /// back by the restore button, a backgrounded one just had its window
+    /// closed.
+    private func pictureInPictureDidStop() {
         isPictureInPictureActive = false
         comments.isPictureInPictureActive = false
         captions.isPictureInPictureActive = false
@@ -491,24 +634,39 @@ final class PlaybackController {
             return
         }
 
-        if !isPlayerScreenVisible {
+        guard !isPlayerScreenVisible else { return }
+
+        if UIApplication.shared.applicationState == .active {
+            restoreFromPictureInPicture()
+        } else {
             stop()
         }
     }
 
-    /// Called by the delegate proxy when the user taps the PiP restore button.
-    func restoreFromPictureInPicture() {
+    private func restoreFromPictureInPicture() {
         guard let current = item else { return }
         isRestoringFromPictureInPicture = true
         onRestore?(current)
     }
 
+    private func invalidatePictureInPictureState() {
+        updatePictureInPictureSnapshot()
+        hostViewController.invalidatePictureInPictureState()
+    }
+
+    /// Copies the live state into the lock protected snapshot AVKit reads.
+    private func updatePictureInPictureSnapshot() {
+        hostViewController.videoView.pipMedia.update(
+            time: clock.currentTime,
+            length: clock.length,
+            isPlaying: clock.isPlaying,
+            isSeekable: canSeek
+        )
+    }
+
     // MARK: - Item lifecycle
 
     private func startCurrentItem(startAt: Double) {
-        // AVPlayerViewController creates its content overlay view lazily; by
-        // the first play it exists, so this is a second chance to attach.
-        attachOverlays()
         guard let item else { return }
         switch item {
         case .video(let video):
@@ -537,28 +695,8 @@ final class PlaybackController {
         keepAliveTask?.cancel()
         keepAliveTask = nil
 
-        detachPlayerObservers()
-        capture.detach()
-        player?.pause()
-        player = nil
-        playerViewController.player = nil
-        isPlayerAttached = false
-
-        liveSession?.onReady = nil
-        liveSession?.onFailed = nil
-        liveSession?.onAudioTrackChange = nil
-        liveSession?.onCaption = nil
-        liveSession?.stop()
-        liveSession = nil
-
-        videoProxy?.stop()
-        videoProxy = nil
-
-        offlineServer?.stop()
-        offlineServer = nil
-
-        liveEvents.onUpdate = nil
-        liveEvents.stop()
+        stopPlayer()
+        detachPipeline()
 
         captions.end()
 
@@ -569,9 +707,11 @@ final class PlaybackController {
         hasSecondaryAudio = false
         state = "buffering"
         positionSeconds = Int(startAt)
+        durationSeconds = 0
         isPlaying = false
         comments.isPlaying = false
         comments.reset()
+        didDisableVideoTracks = false
 
         activateAudioSession()
 
@@ -597,7 +737,7 @@ final class PlaybackController {
         startAt: Double
     ) {
         let sessionID = String(UUID().uuidString.prefix(8)).lowercased()
-        // AVPlayer never talks to the server directly: the loopback proxy
+        // libVLC never talks to the server directly: the loopback proxy
         // forwards the playlists and segments (and extracts their captions).
         let masterURL = client.videoPlaylistURL(
             videoID: video.id,
@@ -627,43 +767,12 @@ final class PlaybackController {
                     proxy.stop()
                     return
                 }
-                self.attachVideoPlayer(
-                    url: url,
-                    item: .video(video),
-                    startAt: startAt
-                )
+                self.attachPlayer(url: url, item: .video(video), startAt: startAt)
             } catch {
                 guard !Task.isCancelled, self.videoProxy === proxy else { return }
                 self.errorDetail = ErrorText.message(for: error)
                 self.state = "error"
             }
-        }
-    }
-
-    private func attachVideoPlayer(
-        url: URL,
-        item expected: PlaybackItem,
-        startAt: Double
-    ) {
-        guard let current = item, current == expected, player == nil else { return }
-
-        activateAudioSession()
-
-        let playerItem = AVPlayerItem(url: url)
-        capture.attach(to: playerItem)
-        let newPlayer = AVPlayer(playerItem: playerItem)
-        configure(newPlayer, item: expected)
-        attach(newPlayer)
-        // Resuming from the watch history: seeking before the item is ready
-        // can be ignored, so refreshState() seeks once it is.
-        pendingStartPosition = startAt
-        newPlayer.play()
-
-        captions.beginVideo { [weak newPlayer] in
-            guard let seconds = newPlayer?.currentTime().seconds, seconds.isFinite else {
-                return nil
-            }
-            return max(seconds, 0)
         }
     }
 
@@ -696,11 +805,7 @@ final class PlaybackController {
                     server.stop()
                     return
                 }
-                self.attachVideoPlayer(
-                    url: url,
-                    item: .offline(video.program),
-                    startAt: startAt
-                )
+                self.attachPlayer(url: url, item: .offline(video.program), startAt: startAt)
             } catch {
                 guard !Task.isCancelled, self.offlineServer === server else { return }
                 self.errorDetail = ErrorText.message(for: error)
@@ -738,30 +843,33 @@ final class PlaybackController {
         session.onReady = { [weak self, weak session] url in
             guard let self, let session, self.liveSession === session else { return }
             self.hasSecondaryAudio = session.hasSecondaryAudio
-            self.attachLivePlayer(url: url, channel: channel)
+            self.attachPlayer(url: url, item: .live(channel), startAt: 0)
         }
         session.onFailed = { [weak self, weak session] message in
             guard let self, let session, self.liveSession === session else { return }
             self.liveErrorMessage = message
             self.state = "error"
             self.errorDetail = message
+            self.updatePlaying(false)
         }
         session.onAudioTrackChange = { [weak self, weak session] hasSecondary in
             guard let self, let session, self.liveSession === session else { return }
             self.hasSecondaryAudio = hasSecondary
         }
+        // The caption PTS is mapped onto the player's timeline with the live
+        // clock, which the loopback server anchors to the segment libVLC
+        // actually fetched first.
         session.onCaption = { [weak self, weak session] pes in
             guard let self, let session, self.liveSession === session else { return }
-            guard let anchor = session.dateTimeAnchor else { return }
-            let playbackTime: Double
-            if let pts = pes.pts {
-                playbackTime = anchor.seconds(forPTS: pts)
-            } else if let now = self.captions.currentPlaybackTime() {
-                playbackTime = now
-            } else {
-                return
-            }
+            guard let playbackTime = self.liveCaptionTime(for: pes) else { return }
             self.captions.feed(pes, at: playbackTime)
+        }
+        // The first segment the loopback server serves after a load is the
+        // segment libVLC starts from: its PROGRAM-DATE-TIME and first video PTS
+        // anchor the live clock.
+        session.onSegmentServed = { [weak self, weak session] sequence in
+            guard let self, let session, self.liveSession === session else { return }
+            self.segmentServed(sequence)
         }
 
         liveSession = session
@@ -805,207 +913,335 @@ final class PlaybackController {
         }
     }
 
-    private func attachLivePlayer(url: URL, channel: LiveChannel) {
-        guard let current = item, current == .live(channel), player == nil else { return }
+    /// Anchors the live clock to the first segment the loopback server served
+    /// after this load.
+    private func segmentServed(_ sequence: Int) {
+        guard case .live? = item else { return }
+        guard !liveAnchorRequested, clock.liveMapping == nil else { return }
+        liveAnchorRequested = true
+        guard let session = liveSession else { return }
 
-        activateAudioSession()
-
-        let item = AVPlayerItem(url: url)
-        capture.attach(to: item)
-        if profile.lowLatency {
-            // Keep playback close to the live edge and let AVPlayer speed up
-            // slightly when it falls behind.
-            item.configuredTimeOffsetFromLive = CMTime(seconds: 3, preferredTimescale: 600)
-            item.automaticallyPreservesTimeOffsetFromLive = true
-        }
-
-        let newPlayer = AVPlayer(playerItem: item)
-        configure(newPlayer, item: .live(channel))
-        attach(newPlayer)
-        newPlayer.play()
-
-        // PROGRAM-DATE-TIME makes `currentDate()` the live wall clock; the
-        // anchor turns it back into seconds on the caption timeline.
-        captions.beginLive { [weak self, weak newPlayer] in
-            guard let self,
-                  let anchor = self.liveSession?.dateTimeAnchor else {
-                return nil
+        Task { [weak self, weak session] in
+            guard let self, let session, self.liveSession === session else { return }
+            guard let anchor = await session.segmentAnchor(sequence: sequence) else {
+                self.liveAnchorRequested = false
+                return
             }
-            if let date = newPlayer?.currentItem?.currentDate() {
-                return date.timeIntervalSince(anchor.anchorDate)
-            }
-            // Before AVPlayer has mapped the playlist's PROGRAM-DATE-TIME (or
-            // on a server that omits it) the wall clock is the same broadcast
-            // clock the captions were stamped with.
-            return Date().timeIntervalSince(anchor.anchorDate)
+            self.applyLiveAnchor(anchor)
         }
     }
 
-    // MARK: - Player configuration
+    /// Playback position of a live caption packet.
+    ///
+    /// A packet whose PTS lands far away from the playhead means the stream
+    /// restarted its clock (an encoder restart, or the discontinuity the mock
+    /// live stream produces when it loops): the live clock is re-anchored at
+    /// the current position so captions keep lining up.
+    private func liveCaptionTime(for pes: CaptionPES) -> Double? {
+        let now = clock.settledTime
+        let fallback: Double? = clock.isPlaying || now > 0 ? clock.currentTime : nil
+        guard let pts = pes.pts, let mapping = clock.liveMapping else {
+            return fallback
+        }
+        let mapped = mapping.playbackTime(forPTS: pts)
+        guard clock.isPlaying, mapped < now - 5 || mapped > now + 30 else {
+            return mapped
+        }
+        clock.setLiveMapping(
+            LivePlaybackClock(
+                playbackTime: now,
+                date: mapping.date(forPlaybackTime: now),
+                pts: pts
+            )
+        )
+        return now
+    }
 
-    private func configure(_ newPlayer: AVPlayer, item playbackItem: PlaybackItem) {
-        // Background audio keeps playing when the app is not frontmost.
-        newPlayer.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
-        newPlayer.allowsExternalPlayback = true
-        newPlayer.automaticallyWaitsToMinimizeStalling = true
-        newPlayer.isMuted = isMuted
+    private func applyLiveAnchor(_ anchor: SegmentAnchor) {
+        let mapping = LivePlaybackClock(
+            playbackTime: liveAnchorPlaybackTime,
+            date: anchor.date,
+            pts: anchor.firstPTS
+        )
+        clock.setLiveMapping(mapping)
+        // Caption packets that arrived before the anchor wait for the next one;
+        // the renderer timeline restarts from the anchored position.
+        captions.seek(to: clock.currentTime)
+    }
 
-        // Speeds for recorded programs; an empty list hides the menu for live.
-        playerViewController.speeds = playbackItem.isVideo
-            ? [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0].map { rate in
-                AVPlaybackSpeed(rate: Float(rate), localizedName: "\(rate.formatted())x")
-            }
-            : []
+    // MARK: - Media
 
-        let title = AVMutableMetadataItem()
-        title.identifier = .commonIdentifierTitle
-        title.value = playbackItem.title as NSString
-        title.extendedLanguageTag = "und"
+    /// Attaches a URL (live playlist, proxy playlist or offline playlist) to
+    /// the long-lived player.
+    private func attachPlayer(url: URL, item expected: PlaybackItem, startAt: Double) {
+        guard let current = item, current == expected else { return }
+        guard let media = makeMedia(url: url, item: expected) else {
+            errorDetail = "再生に失敗しました。"
+            state = "error"
+            return
+        }
 
-        let artist = AVMutableMetadataItem()
-        artist.identifier = .commonIdentifierArtist
-        artist.value = playbackItem.subtitle as NSString
-        artist.extendedLanguageTag = "und"
+        activateAudioSession()
 
-        newPlayer.currentItem?.externalMetadata = [title, artist]
+        isPlayerAttached = true
+        pendingStartPosition = startAt
+        clock.begin(startAt: startAt, isSeekable: expected.isVideo)
+        liveAnchorRequested = false
+        liveAnchorPlaybackTime = 0
+        clock.setLiveMapping(nil)
+        updatePlaying(false)
+        updatePictureInPictureSnapshot()
+        hostViewController.invalidatePictureInPictureState()
+
+        player.media = media
+        player.play()
+
+        captions.beginVideoOrLive(isLive: !expected.isVideo) { [weak self] in
+            self?.clock.currentTime
+        }
+
+        updateVideoSize()
+        updateNowPlaying(force: true)
+    }
+
+    /// Media options of one load.
+    ///
+    /// Subtitles stay off: the app extracts the ARIB caption PES packets itself
+    /// (the proxies strip them from the segments VLC plays) and renders them
+    /// with libaribcaption, so letting libVLC draw its own would double them.
+    private func makeMedia(url: URL, item playbackItem: PlaybackItem) -> VLCMedia? {
+        guard let media = VLCMedia(url: url) else { return nil }
+        media.addOption(":no-spu")
+        media.addOption(":no-sub-autodetect-file")
+        // VideoToolbox hardware decoding; the app never needs software output.
+        media.addOption(":avcodec-hw=any")
+        switch playbackItem {
+        case .live:
+            media.addOption(":network-caching=\(Self.liveNetworkCaching)")
+        case .video:
+            media.addOption(":network-caching=\(Self.videoNetworkCaching)")
+        case .offline:
+            media.addOption(":network-caching=\(Self.offlineNetworkCaching)")
+        }
+        return media
     }
 
     private func activateAudioSession() {
         try? AVAudioSession.sharedInstance().setActive(true)
     }
 
-    // MARK: - Player observation
+    private func currentLength() -> Double {
+        guard item?.isVideo == true else { return 0 }
+        let millis = player.media?.length.value?.doubleValue ?? 0
+        guard millis.isFinite, millis > 0 else { return 0 }
+        return millis / 1000
+    }
 
-    private func attach(_ newPlayer: AVPlayer) {
-        detachPlayerObservers()
+    // MARK: - libVLC callbacks (main actor)
 
-        player = newPlayer
-        playerViewController.player = newPlayer
-        isPlayerAttached = true
-        newPlayer.isMuted = isMuted
+    /// libVLC changed its playback state.
+    func playerStateChanged(_ newState: VLCMediaPlayerState) {
+        guard item != nil else { return }
 
-        timeControlObservation = newPlayer.observe(
-            \.timeControlStatus,
-            options: [.initial, .new]
-        ) { [weak self] _, _ in
-            Task { @MainActor in
-                self?.refreshState()
-            }
+        switch newState {
+        case .error:
+            failWithCurrentError()
+            return
+        case .opening:
+            state = "buffering"
+        case .playing:
+            errorDetail = nil
+            state = "playing"
+        case .paused:
+            state = "paused"
+        case .stopped, .stopping, .nothingSpecial:
+            state = clock.settledTime > 0 ? "paused" : "buffering"
         }
 
-        if let currentItem = newPlayer.currentItem {
-            itemStatusObservation = currentItem.observe(
-                \.status,
-                options: [.initial, .new]
-            ) { [weak self] _, _ in
+        let playing = newState == .playing
+        updatePlaying(playing)
+        clock.update(position: clock.settledTime, length: currentLength(), isPlaying: playing)
+        durationSeconds = clock.length
+        applyPendingStartPositionIfNeeded()
+        updateVideoSize()
+        invalidatePictureInPictureState()
+        updateNowPlaying(force: true)
+    }
+
+    /// libVLC's buffering progress. VLCMediaPlayerState has no buffering case,
+    /// so this is the only signal for a stalled live stream.
+    func playerBufferingChanged(_ progress: Float) {
+        guard item != nil else { return }
+        if progress < 1, state != "paused", state != "error" {
+            state = "buffering"
+            updatePlaying(false)
+        } else if progress >= 1, state == "buffering", player.state == .playing {
+            state = "playing"
+        }
+    }
+
+    /// libVLC reported the media length in milliseconds.
+    func playerLengthChanged(milliseconds: Int64) {
+        guard item != nil, milliseconds > 0 else { return }
+        clock.update(
+            position: clock.settledTime,
+            length: Double(milliseconds) / 1000
+        )
+        durationSeconds = clock.length
+        invalidatePictureInPictureState()
+    }
+
+    /// libVLC reported a new position in milliseconds.
+    func playerTimeChanged(milliseconds: Double) {
+        guard item != nil, player.media != nil else { return }
+        let seconds = milliseconds / 1000
+        let playing = player.state == .playing
+        clock.update(position: seconds, length: currentLength(), isPlaying: playing)
+        updatePlaying(playing)
+        durationSeconds = clock.length
+        positionSeconds = max(Int(seconds), 0)
+
+        switch item {
+        case .video(let video)?, .offline(let video)?:
+            onVideoProgress?(video, max(seconds, 0))
+        default:
+            break
+        }
+
+        updateVideoSize()
+        updatePictureInPictureSnapshot()
+        updateNowPlaying(force: false)
+    }
+
+    /// libVLC wrote the snapshot requested by saveSnapshot(to:).
+    func playerSnapshotTaken() {
+        snapshotWaiter?.resume(true)
+    }
+
+    private func failWithCurrentError() {
+        let message = VLCLibrary.currentErrorMessage ?? "再生に失敗しました。"
+        errorDetail = message
+        state = "error"
+        updatePlaying(false)
+        if case .live? = item {
+            liveErrorMessage = message
+        }
+        updateNowPlaying(force: true)
+    }
+
+    private func applyPendingStartPositionIfNeeded() {
+        guard pendingStartPosition > 0 else { return }
+        guard player.state == .playing || player.state == .paused else { return }
+        let target = pendingStartPosition
+        pendingStartPosition = 0
+        player.time = VLCTime(int: Int32(clamping: Int((target * 1000).rounded())))
+        clock.noteSeek(to: target)
+        captions.seek(to: target)
+        invalidatePictureInPictureState()
+    }
+
+    private func updateVideoSize() {
+        let size = displayVideoSize(for: player.videoSize)
+        guard size.width >= 1, size.height >= 1 else { return }
+        if size != hostViewController.videoSize {
+            hostViewController.videoSize = size
+        }
+    }
+
+    /// libVLC reports the coded video size. Anamorphic broadcasts (1440x1080
+    /// with a 4:3 sample aspect ratio) are shown at 16:9, so the letterboxed
+    /// rect of the overlays and the capture size need the sample aspect ratio
+    /// of the video track, not the coded pixel count.
+    private func displayVideoSize(for size: CGSize) -> CGSize {
+        guard size.width >= 1, size.height >= 1,
+              size.width.isFinite, size.height.isFinite else {
+            return .zero
+        }
+        guard let video = player.videoTracks.first?.video,
+              video.sourceAspectRatio > 0,
+              video.sourceAspectRatioDenominator > 0 else {
+            return size
+        }
+        let sar = Double(video.sourceAspectRatio) / Double(video.sourceAspectRatioDenominator)
+        guard sar.isFinite, sar > 0, abs(sar - 1) > 0.01 else { return size }
+        return CGSize(width: (size.width * sar).rounded(), height: size.height)
+    }
+
+    // MARK: - Now Playing
+
+    private func updateNowPlaying(force: Bool) {
+        guard let current = item else {
+            nowPlaying.clear()
+            return
+        }
+        nowPlaying.update(
+            title: current.title,
+            subtitle: current.subtitle,
+            position: clock.currentTime,
+            length: clock.length,
+            isPlaying: clock.isPlaying,
+            isLive: !current.isVideo,
+            canSeek: canSeek,
+            artworkURL: artworkURL(for: current),
+            force: force
+        )
+    }
+
+    /// Channel logo (live) or video thumbnail (recorded) for the lock screen.
+    private func artworkURL(for playbackItem: PlaybackItem) -> URL? {
+        guard let client else { return nil }
+        switch playbackItem {
+        case .live(let channel):
+            return client.logoURL(channelID: channel.displayChannelID)
+        case .video(let video):
+            return client.thumbnailURL(videoID: video.id)
+        case .offline:
+            // Saved videos have no server to ask for their thumbnail.
+            return nil
+        }
+    }
+
+    // MARK: - System notifications
+
+    private func observeSystemNotifications() {
+        let center = NotificationCenter.default
+
+        if interruptionObserver == nil {
+            interruptionObserver = center.addObserver(
+                forName: AVAudioSession.interruptionNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                // Only Sendable values cross into the main-actor hop.
+                let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+                let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
                 Task { @MainActor in
-                    self?.refreshState()
+                    self?.handleInterruption(typeRawValue: rawType, optionsRawValue: rawOptions)
                 }
             }
         }
 
-        periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
-            queue: .main
-        ) { [weak self] time in
-            let seconds = time.seconds
-            Task { @MainActor in
-                self?.applyPosition(seconds)
-                // The position crossing zero is what turns "buffering" into
-                // "playing", so refresh on every tick as well.
-                self?.refreshState()
+        if backgroundObserver == nil {
+            backgroundObserver = center.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.applicationDidEnterBackground()
+                }
             }
         }
 
-        refreshState()
-    }
-
-    /// Invalidates every observation. Called from the main actor because
-    /// deinit cannot touch main-actor state.
-    private func detachPlayerObservers() {
-        timeControlObservation?.invalidate()
-        timeControlObservation = nil
-        itemStatusObservation?.invalidate()
-        itemStatusObservation = nil
-
-        if let periodicTimeObserver, let player {
-            player.removeTimeObserver(periodicTimeObserver)
-        }
-        periodicTimeObserver = nil
-    }
-
-    private func applyPosition(_ seconds: Double) {
-        guard seconds.isFinite else { return }
-        let position = Int(seconds)
-        positionSeconds = position > 0 ? position : 0
-
-        switch item {
-        case .video(let video)?, .offline(let video)?:
-            onVideoProgress?(video, seconds > 0 ? seconds : 0)
-        default:
-            break
-        }
-    }
-
-    private func refreshState() {
-        if pendingStartPosition > 0, let player, player.currentItem?.status == .readyToPlay {
-            let position = pendingStartPosition
-            pendingStartPosition = 0
-            player.seek(
-                to: CMTime(seconds: position, preferredTimescale: 600),
-                toleranceBefore: CMTime(seconds: 1, preferredTimescale: 600),
-                toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600)
-            )
-        }
-
-        // Late callbacks may arrive after stop(); keep the last state.
-        guard let player else {
-            updatePlaying(false)
-            return
-        }
-
-        if let currentItem = player.currentItem, currentItem.status == .failed {
-            updatePlaying(false)
-            state = "error"
-            errorDetail = currentItem.error.map { error in
-                let nsError = error as NSError
-                return "\(nsError.domain) \(nsError.code): \(nsError.localizedDescription)"
-            } ?? "再生に失敗しました。"
-            return
-        }
-
-        errorDetail = nil
-
-        let seconds = player.currentTime().seconds
-        let position = seconds.isFinite ? seconds : 0
-
-        updatePlaying(player.timeControlStatus == .playing)
-
-        switch player.timeControlStatus {
-        case .playing, .paused:
-            state = position > 0.001 ? "playing" : "buffering"
-        case .waitingToPlayAtSpecifiedRate:
-            state = "buffering"
-        @unknown default:
-            state = "buffering"
-        }
-    }
-
-    // MARK: - Audio interruptions
-
-    private func observeAudioSessionInterruptions() {
-        guard interruptionObserver == nil else { return }
-
-        interruptionObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            // Only Sendable values cross into the main-actor hop.
-            let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-            let rawOptions = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
-            Task { @MainActor in
-                self?.handleInterruption(typeRawValue: rawType, optionsRawValue: rawOptions)
+        if foregroundObserver == nil {
+            foregroundObserver = center.addObserver(
+                forName: UIApplication.willEnterForegroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.applicationWillEnterForeground()
+                }
             }
         }
     }
@@ -1019,37 +1255,112 @@ final class PlaybackController {
 
         let options = AVAudioSession.InterruptionOptions(rawValue: optionsRawValue ?? 0)
         guard options.contains(.shouldResume) else { return }
-        player?.play()
+        play()
+    }
+
+    /// Background audio keeps playing (the app declares the audio background
+    /// mode and has an active playback session). Without picture in picture the
+    /// video output is not visible anyway, so its tracks are dropped after a
+    /// short grace period to save power - but only once it is clear that PiP
+    /// did not start.
+    private func applicationDidEnterBackground() {
+        guard item != nil, isPlayerAttached else { return }
+        backgroundTask?.cancel()
+        backgroundTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, let self else { return }
+            guard !self.isPictureInPictureActive, !self.didDisableVideoTracks else { return }
+            guard self.player.hasVideoOut else { return }
+            self.player.deselectAllVideoTracks()
+            self.didDisableVideoTracks = true
+        }
+    }
+
+    private func applicationWillEnterForeground() {
+        backgroundTask?.cancel()
+        backgroundTask = nil
+        restoreVideoTracks()
+    }
+
+    private func restoreVideoTracks() {
+        guard didDisableVideoTracks else { return }
+        didDisableVideoTracks = false
+        guard player.videoTracks.count > 0 else { return }
+        player.selectTrack(at: 0, type: .video)
+        updateVideoSize()
+        invalidatePictureInPictureState()
     }
 }
 
-/// Forwards AVPlayerViewController PiP callbacks to the controller.
+// MARK: - libVLC delegate bridge
+
+/// Forwards libVLC's player callbacks to the controller.
 ///
-/// AVKit calls these on the main thread. The `@preconcurrency` conformance
-/// lets the main-actor isolated methods witness the protocol requirements
-/// (with a runtime isolation check) without sending the non-Sendable
-/// completion handler across isolation domains.
-@MainActor
-final class PlayerViewControllerDelegate: NSObject, @preconcurrency AVPlayerViewControllerDelegate {
+/// libVLC invokes these from its own threads (the delegate is dispatched from
+/// libVLC's event loop), so every method stays nonisolated and hops to the main
+/// actor with plain values. No main-actor state is touched synchronously.
+final class PlayerDelegateProxy: NSObject, VLCMediaPlayerDelegate {
     weak var owner: PlaybackController?
 
-    func playerViewControllerDidStartPictureInPicture(
-        _ playerViewController: AVPlayerViewController
-    ) {
-        owner?.pictureInPictureDidStart()
+    func mediaPlayerStateChanged(_ newState: VLCMediaPlayerState) {
+        Task { @MainActor [weak owner] in
+            owner?.playerStateChanged(newState)
+        }
     }
 
-    func playerViewControllerDidStopPictureInPicture(
-        _ playerViewController: AVPlayerViewController
-    ) {
-        owner?.pictureInPictureDidStop()
+    func mediaPlayerBufferingChanged(_ progress: Float) {
+        Task { @MainActor [weak owner] in
+            owner?.playerBufferingChanged(progress)
+        }
     }
 
-    func playerViewController(
-        _ playerViewController: AVPlayerViewController,
-        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
-    ) {
-        owner?.restoreFromPictureInPicture()
-        completionHandler(true)
+    func mediaPlayerLengthChanged(_ length: Int64) {
+        Task { @MainActor [weak owner] in
+            owner?.playerLengthChanged(milliseconds: length)
+        }
+    }
+
+    func mediaPlayerTimeChanged(_ aNotification: Notification) {
+        // The time is read here, on libVLC's thread: only a Double crosses.
+        let player = aNotification.object as? VLCMediaPlayer
+        let milliseconds = player?.time.value?.doubleValue ?? 0
+        Task { @MainActor [weak owner] in
+            owner?.playerTimeChanged(milliseconds: milliseconds)
+        }
+    }
+
+    func mediaPlayerSnapshot(_ aNotification: Notification) {
+        Task { @MainActor [weak owner] in
+            owner?.playerSnapshotTaken()
+        }
+    }
+}
+
+// MARK: - Snapshot waiting
+
+/// Bridges libVLC's asynchronous snapshot callback into async code.
+final class SnapshotWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func wait(timeout: Duration) async -> Bool {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            self.continuation = continuation
+            lock.unlock()
+
+            Task { [weak self] in
+                try? await Task.sleep(for: timeout)
+                self?.resume(false)
+            }
+        }
+    }
+
+    func resume(_ saved: Bool) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: saved)
     }
 }

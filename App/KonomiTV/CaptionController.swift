@@ -329,16 +329,22 @@ final class CaptionController {
 
     // MARK: - Lifecycle
 
-    /// Starts live caption handling. `timeProvider` returns the seconds since
-    /// the live stream's PROGRAM-DATE-TIME anchor.
+    /// Starts live caption handling. `timeProvider` returns the player's
+    /// position in seconds, the axis the live clock maps caption PTS onto.
     func beginLive(_ timeProvider: @escaping @MainActor () -> Double?) {
         begin(mode: .live, timeProvider: timeProvider)
     }
 
-    /// Starts recorded-video caption handling. `timeProvider` returns
-    /// `AVPlayer.currentTime()` in seconds.
+    /// Starts recorded-video caption handling. `timeProvider` returns the
+    /// player's current position in seconds (see `PlaybackClock`).
     func beginVideo(_ timeProvider: @escaping @MainActor () -> Double?) {
         begin(mode: .video, timeProvider: timeProvider)
+    }
+
+    /// Starts caption handling for a new media. Live and recorded playback
+    /// differ only in the settings that apply (文字スーパー is a TV setting).
+    func beginVideoOrLive(isLive: Bool, timeProvider: @escaping @MainActor () -> Double?) {
+        begin(mode: isLive ? .live : .video, timeProvider: timeProvider)
     }
 
     /// Stops playback and clears every buffered caption.
@@ -501,7 +507,7 @@ final class CaptionController {
         pendingPES.removeAll { $0.time < staleBefore }
         pendingCaptions.removeAll { $0.time < staleBefore }
 
-        // AVPlayer prefetches segments and the proxy finishes their requests in
+        // libVLC prefetches segments and the proxy finishes their requests in
         // any order, so decode strictly in timeline order to keep the ARIB
         // decoder state consistent.
         pendingPES.sort { $0.time < $1.time }

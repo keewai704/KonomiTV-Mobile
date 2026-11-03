@@ -99,9 +99,9 @@ struct KonomiTVApp: App {
     }
 
     /// Playback category so video keeps playing with the mute switch on and
-    /// can use AirPlay / picture in picture. The session is activated by
-    /// AVPlayer when playback starts, so launching the app does not stop audio
-    /// from other apps.
+    /// can use AirPlay / picture in picture. PlaybackController activates it
+    /// when playback starts, so launching the app does not stop audio from
+    /// other apps.
     private static func configureAudioSession() {
         let session = AVAudioSession.sharedInstance()
         do {
