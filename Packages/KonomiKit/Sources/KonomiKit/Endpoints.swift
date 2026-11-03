@@ -183,6 +183,140 @@ enum Endpoints {
         url(baseURL: baseURL, path: ["niconico", "logout"])
     }
 
+    // MARK: - Captures
+
+    /// `GET /api/captures` with the filter menu, keyset paging and an optional
+    /// single day.
+    static func captures(
+        baseURL: URL,
+        filter: CaptureFilters,
+        order: CaptureSortOrder,
+        cursor: String?,
+        limit: Int,
+        date: String?,
+        dayStartHour: Int?
+    ) -> URL {
+        var query = filter.queryItems()
+        query.append(URLQueryItem(name: "order", value: order.rawValue))
+        query.append(URLQueryItem(name: "limit", value: String(min(max(limit, 1), 200))))
+        if let cursor, !cursor.isEmpty {
+            query.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        if let date, !date.isEmpty {
+            query.append(URLQueryItem(name: "date", value: date))
+        }
+        if let dayStartHour {
+            query.append(
+                URLQueryItem(name: "day_start_hour", value: String(min(max(dayStartHour, 0), 23)))
+            )
+        }
+        return url(baseURL: baseURL, path: ["captures"], query: query)
+    }
+
+    /// `GET /api/captures/sections` (daily counts for the timeline).
+    static func captureSections(
+        baseURL: URL,
+        filter: CaptureFilters,
+        axis: CaptureTimelineAxis,
+        dayStartHour: Int
+    ) -> URL {
+        var query = filter.queryItems()
+        query.append(URLQueryItem(name: "axis", value: axis.rawValue))
+        query.append(
+            URLQueryItem(
+                name: "day_start_hour",
+                value: String(min(max(dayStartHour, 0), 23))
+            )
+        )
+        return url(baseURL: baseURL, path: ["captures", "sections"], query: query)
+    }
+
+    /// `GET /api/captures/channels`.
+    static func captureChannels(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["captures", "channels"])
+    }
+
+    /// `GET /api/captures/programs` (albums, one per broadcast episode).
+    static func capturePrograms(
+        baseURL: URL,
+        cursor: String?,
+        limit: Int,
+        query: String?,
+        hasRecordedProgram: Bool?,
+        order: CaptureProgramSortOrder
+    ) -> URL {
+        var items: [URLQueryItem] = [
+            URLQueryItem(name: "order", value: order.rawValue),
+            URLQueryItem(name: "limit", value: String(min(max(limit, 1), 200))),
+        ]
+        if let cursor, !cursor.isEmpty {
+            items.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        if let query, !query.isEmpty {
+            items.append(URLQueryItem(name: "query", value: query))
+        }
+        if let hasRecordedProgram {
+            items.append(
+                URLQueryItem(
+                    name: "has_recorded_program",
+                    value: hasRecordedProgram ? "true" : "false"
+                )
+            )
+        }
+        return url(baseURL: baseURL, path: ["captures", "programs"], query: items)
+    }
+
+    /// `GET /api/captures/programs/{capture_program_id}`.
+    static func captureProgram(baseURL: URL, id: Int) -> URL {
+        url(baseURL: baseURL, path: ["captures", "programs", String(id)])
+    }
+
+    /// `GET/POST /api/captures/tags`.
+    static func captureTags(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["captures", "tags"])
+    }
+
+    /// `PUT/DELETE /api/captures/tags/{tag_id}`.
+    static func captureTag(baseURL: URL, id: Int) -> URL {
+        url(baseURL: baseURL, path: ["captures", "tags", String(id)])
+    }
+
+    /// `POST/DELETE /api/captures/tags/{tag_id}/items`.
+    static func captureTagItems(baseURL: URL, tagID: Int) -> URL {
+        url(baseURL: baseURL, path: ["captures", "tags", String(tagID), "items"])
+    }
+
+    /// `POST/DELETE /api/captures/favorites`.
+    static func captureFavorites(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["captures", "favorites"])
+    }
+
+    /// `GET/DELETE /api/captures` (upload is a POST to the same path).
+    static func capturesCollection(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["captures"])
+    }
+
+    /// `GET /api/captures/{capture_id}`.
+    static func capture(baseURL: URL, id: Int) -> URL {
+        url(baseURL: baseURL, path: ["captures", String(id)])
+    }
+
+    /// `GET /api/captures/{capture_id}/image?hash=...`.
+    ///
+    /// The server requires the content hash and caches the image for a year, so
+    /// the hash is what makes a changed image get a new URL.
+    static func captureImage(baseURL: URL, id: Int, hash: String? = nil) -> URL {
+        var query: [URLQueryItem] = []
+        if let hash, !hash.isEmpty {
+            query.append(URLQueryItem(name: "hash", value: hash))
+        }
+        return url(
+            baseURL: baseURL,
+            path: ["captures", String(id), "image"],
+            query: query
+        )
+    }
+
     // MARK: - Images
 
     static func logo(baseURL: URL, channelID: String) -> URL {

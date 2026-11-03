@@ -541,7 +541,7 @@ public struct APIClient: Sendable {
 
     // MARK: - Requests
 
-    private func makeRequest(
+    func makeRequest(
         path: [String],
         query: [URLQueryItem] = [],
         method: String = "GET",
@@ -567,7 +567,7 @@ public struct APIClient: Sendable {
     }
 
     @discardableResult
-    private func sendRaw(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    func sendRaw(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let result: (Data, HTTPURLResponse)
         do {
             result = try await transport.send(request)
@@ -594,7 +594,7 @@ public struct APIClient: Sendable {
         return (data, response)
     }
 
-    private func perform<T: Decodable>(_ request: URLRequest, as type: T.Type) async throws -> T {
+    func perform<T: Decodable>(_ request: URLRequest, as type: T.Type) async throws -> T {
         let (data, _) = try await sendRaw(request)
         do {
             return try JSONCoding.makeDecoder().decode(type, from: data)

@@ -21,6 +21,7 @@ from datetime import datetime
 from urllib.parse import quote, urljoin
 
 import caption_injector
+import captures_mock
 import mock_server
 
 
@@ -1838,6 +1839,468 @@ class JikkyoMockTestCase(unittest.TestCase):
         self.assertEqual(status, 401)
         status, _, me = self.get_json("/api/users/me", headers=admin_headers)
         self.assertIsNone(me["niconico_user_id"])
+
+
+    # -- キャプチャ ---------------------------------------------------------
+
+    def capture_auth(self) -> dict:
+        return {"Authorization": "Bearer " + mock_server.MOCK_ACCESS_TOKEN}
+
+    def multipart_capture_body(
+        self,
+        filename: str,
+        data: bytes,
+        boundary: str = "MOCKBOUNDARY",
+        file_modified_at: int | None = None,
+    ) -> tuple[bytes, str]:
+        parts = [
+            b"--" + boundary.encode() + b"\r\n",
+            (
+                'Content-Disposition: form-data; name="image"; filename="'
+                + filename
+                + '"\r\n'
+            ).encode(),
+            b"Content-Type: image/png\r\n",
+            b"\r\n",
+            data,
+            b"\r\n",
+        ]
+        if file_modified_at is not None:
+            parts.extend(
+                [
+                    b"--" + boundary.encode() + b"\r\n",
+                    b'Content-Disposition: form-data; name="file_modified_at"\r\n',
+                    b"\r\n",
+                    str(file_modified_at).encode(),
+                    b"\r\n",
+                ]
+            )
+        parts.append(b"--" + boundary.encode() + b"--\r\n")
+        return b"".join(parts), "multipart/form-data; boundary=" + boundary
+
+    def test_captures_list_and_keyset_pagination(self) -> None:
+        self.reset()
+        status, _, payload = self.get_json("/api/captures?order=CapturedAtDesc&limit=3")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["captures"]), 3)
+        self.assertIsNotNone(payload["next_cursor"])
+        self.assertIsInstance(payload["programs"], list)
+        first_ids = [capture["id"] for capture in payload["captures"]]
+        for field in (
+            "id", "file_hash", "file_size", "captured_at", "broadcast_at",
+            "image_width", "image_height", "metadata_status",
+            "playback_position", "caption_text", "is_caption_composited",
+            "is_comment_composited", "capture_program_id", "is_favorite",
+            "tag_ids",
+        ):
+            self.assertIn(field, payload["captures"][0])
+        # 匿名ではお気に入りとタグの状態は返らない
+        self.assertIsNone(payload["captures"][0]["is_favorite"])
+        self.assertIsNone(payload["captures"][0]["tag_ids"])
+
+        status, _, page2 = self.get_json(
+            "/api/captures?order=CapturedAtDesc&limit=3&cursor="
+            + quote(payload["next_cursor"], safe="")
+        )
+        self.assertEqual(status, 200)
+        second_ids = [capture["id"] for capture in page2["captures"]]
+        self.assertFalse(set(first_ids) & set(second_ids))
+
+    def test_captures_filters_and_anonymous_auth_rules(self) -> None:
+        self.reset()
+        status, _, payload = self.get_json("/api/captures?has_caption_text=true&order=CapturedAtAsc")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["captures"])
+        self.assertTrue(all(c["caption_text"] for c in payload["captures"]))
+
+        status, _, payload = self.get_json("/api/captures?is_caption_composited=false")
+        self.assertEqual(status, 200)
+        self.assertTrue(all(c["is_caption_composited"] is False for c in payload["captures"]))
+
+        status, _, payload = self.get_json("/api/captures?query=" + quote("ニュース"))
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["captures"])
+
+        status, _, payload = self.get_json("/api/captures?query_targets=CaptionText&query=" + quote("政府"))
+        self.assertEqual(status, 200)
+        self.assertEqual([c["id"] for c in payload["captures"]], [2])
+
+        status, _, _ = self.get_json("/api/captures?is_favorite=true")
+        self.assertEqual(status, 401)
+        status, _, _ = self.get_json("/api/captures?tag_ids=1")
+        self.assertEqual(status, 401)
+
+        status, _, _ = self.get_json("/api/captures?network_id=32736")
+        self.assertEqual(status, 422)
+
+        status, _, payload = self.get_json(
+            "/api/captures?network_id=32736&service_id=1024&event_id=10001"
+            "&start_time=" + quote("2026-11-03T20:00:00+09:00", safe="")
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["captures"])
+        self.assertTrue(all(c["capture_program_id"] == 1 for c in payload["captures"]))
+
+        status, _, payload = self.get_json("/api/captures?channel_ids=bs101")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["captures"])
+        self.assertTrue(all(c["capture_program_id"] == 3 for c in payload["captures"]))
+
+        status, _, payload = self.get_json("/api/captures?date=2026-11-02")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["captures"])
+        self.assertTrue(all(c["captured_at"].startswith("2026-11-02") for c in payload["captures"]))
+        status, _, payload = self.get_json("/api/captures?order=BroadcastAtDesc")
+        self.assertEqual(status, 200)
+        self.assertTrue(all(c["broadcast_at"] is not None for c in payload["captures"]))
+
+    def test_captures_sections(self) -> None:
+        self.reset()
+        status, _, payload = self.get_json("/api/captures/sections?axis=CapturedAt")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], sum(s["count"] for s in payload["sections"]))
+        self.assertEqual(
+            [s["date"] for s in payload["sections"]],
+            sorted((s["date"] for s in payload["sections"]), reverse=True),
+        )
+        self.assertIn("2026-11-03", [s["date"] for s in payload["sections"]])
+
+        status, _, payload = self.get_json("/api/captures/sections?axis=BroadcastAt")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(payload["total"], 1)
+
+    def test_captures_channels(self) -> None:
+        self.reset()
+        status, _, payload = self.get_json("/api/captures/channels")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(payload, list)
+        ids = {channel["display_channel_id"] for channel in payload}
+        self.assertIn("gr011", ids)
+        self.assertIn("bs101", ids)
+        for channel in payload:
+            self.assertEqual(set(channel), {"id", "display_channel_id", "name", "type"})
+
+    def test_captures_program_albums(self) -> None:
+        self.reset()
+        status, _, payload = self.get_json("/api/captures/programs?limit=2")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["programs"]), 2)
+        self.assertIsNotNone(payload["next_cursor"])
+        album = payload["programs"][0]
+        for field in ("capture_count", "cover_capture", "title", "channel", "recorded_program_ids"):
+            self.assertIn(field, album)
+        self.assertGreaterEqual(album["capture_count"], 1)
+
+        status, _, payload = self.get_json("/api/captures/programs?query=" + quote("ニュース7"))
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["programs"])
+        self.assertTrue(all("ニュース7" in album["title"] for album in payload["programs"]))
+
+        status, _, payload = self.get_json("/api/captures/programs?has_recorded_program=true")
+        self.assertEqual(status, 200)
+        for album in payload["programs"]:
+            self.assertTrue(album["recorded_program_ids"])
+
+        status, _, payload = self.get_json("/api/captures/programs/1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["id"], 1)
+        self.assertGreaterEqual(payload["capture_count"], 1)
+        status, _, _ = self.get_json("/api/captures/programs/9999")
+        self.assertEqual(status, 404)
+
+    def test_capture_detail_and_image(self) -> None:
+        self.reset()
+        status, _, payload = self.get_json("/api/captures/1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["id"], 1)
+        self.assertIsNotNone(payload["program"])
+        self.assertEqual(payload["files"][0]["status"], "Available")
+
+        image_path = (
+            "/api/captures/1/image?hash=" + payload["file_hash"]
+        )
+        status, headers, body = self.request("GET", image_path)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Content-Type"), "image/png")
+        self.assertTrue(body.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(headers.get("ETag"), '"' + payload["file_hash"] + '"')
+
+        status, _, _ = self.request("GET", "/api/captures/1/image?hash=" + "0" * 64)
+        self.assertEqual(status, 404)
+        status, _, _ = self.get_json("/api/captures/9999")
+        self.assertEqual(status, 404)
+
+    def test_capture_tags_crud_and_auth(self) -> None:
+        self.reset()
+        status, _, _ = self.get_json("/api/captures/tags")
+        self.assertEqual(status, 401)
+
+        status, _, tags = self.get_json("/api/captures/tags", headers=self.capture_auth())
+        self.assertEqual(status, 200)
+        self.assertEqual([tag["name"] for tag in tags], sorted(tag["name"] for tag in tags))
+        self.assertGreaterEqual(tags[0]["capture_count"], 1)
+
+        status, _, body = self.request(
+            "POST",
+            "/api/captures/tags",
+            body=json.dumps({"name": " 新タグ "}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 201)
+        created = json.loads(body)
+        self.assertEqual(created["name"], "新タグ")
+        self.assertEqual(created["capture_count"], 0)
+
+        status, _, body = self.request(
+            "POST",
+            "/api/captures/tags",
+            body=json.dumps({"name": "新タグ"}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 422)
+
+        status, _, body = self.request(
+            "PUT",
+            "/api/captures/tags/" + str(created["id"]),
+            body=json.dumps({"name": "改名タグ"}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["name"], "改名タグ")
+
+        status, _, _ = self.request(
+            "DELETE",
+            "/api/captures/tags/" + str(created["id"]),
+            headers=self.capture_auth(),
+        )
+        self.assertEqual(status, 204)
+        status, _, _ = self.request(
+            "PUT",
+            "/api/captures/tags/" + str(created["id"]),
+            body=json.dumps({"name": "x"}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 404)
+
+    def test_capture_favorites_and_tag_items(self) -> None:
+        self.reset()
+        status, _, _ = self.request(
+            "POST",
+            "/api/captures/favorites",
+            body=json.dumps({"capture_ids": [2]}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 401)
+
+        status, _, payload = self.get_json(
+            "/api/captures/2",
+            headers=self.capture_auth(),
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["is_favorite"])
+
+        status, _, _ = self.request(
+            "POST",
+            "/api/captures/favorites",
+            body=json.dumps({"capture_ids": [2, 3]}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 204)
+        status, _, payload = self.get_json("/api/captures/2", headers=self.capture_auth())
+        self.assertTrue(payload["is_favorite"])
+        status, _, listing = self.get_json(
+            "/api/captures?is_favorite=true", headers=self.capture_auth()
+        )
+        self.assertEqual(status, 200)
+        self.assertIn(2, [c["id"] for c in listing["captures"]])
+        self.assertTrue(all(c["is_favorite"] for c in listing["captures"]))
+
+        status, _, _ = self.request(
+            "DELETE",
+            "/api/captures/favorites",
+            body=json.dumps({"capture_ids": [2, 3]}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 204)
+        status, _, payload = self.get_json("/api/captures/2", headers=self.capture_auth())
+        self.assertFalse(payload["is_favorite"])
+
+        # タグ付け (タグ 2 は 1, 5, 9 に付いている)
+        status, _, payload = self.get_json("/api/captures/2", headers=self.capture_auth())
+        self.assertNotIn(2, payload["tag_ids"])
+        status, _, _ = self.request(
+            "POST",
+            "/api/captures/tags/2/items",
+            body=json.dumps({"capture_ids": [2]}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 204)
+        status, _, payload = self.get_json("/api/captures/2", headers=self.capture_auth())
+        self.assertIn(2, payload["tag_ids"])
+        status, _, tag_list = self.get_json("/api/captures/tags", headers=self.capture_auth())
+        tag2 = next(tag for tag in tag_list if tag["id"] == 2)
+        self.assertGreaterEqual(tag2["capture_count"], 1)
+
+        status, _, _ = self.request(
+            "DELETE",
+            "/api/captures/tags/2/items",
+            body=json.dumps({"capture_ids": [2]}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 204)
+        status, _, payload = self.get_json("/api/captures/2", headers=self.capture_auth())
+        self.assertNotIn(2, payload["tag_ids"])
+
+        # 存在しないキャプチャ ID は変更前に 404
+        status, _, _ = self.request(
+            "POST",
+            "/api/captures/favorites",
+            body=json.dumps({"capture_ids": [9999]}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 404)
+
+    def test_capture_delete_requires_admin(self) -> None:
+        self.reset()
+        status, _, _ = self.request(
+            "DELETE",
+            "/api/captures",
+            body=json.dumps({"capture_ids": [1]}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 401)
+
+        status, _, body = self.request(
+            "DELETE",
+            "/api/captures",
+            body=json.dumps({"capture_ids": [1, 9999]}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertEqual(result["deleted_capture_ids"], [1])
+        self.assertEqual(result["failed_capture_ids"], [9999])
+        status, _, _ = self.get_json("/api/captures/1")
+        self.assertEqual(status, 404)
+
+    def test_capture_upload_round_trip(self) -> None:
+        self.reset()
+        image = captures_mock.build_capture_png(77)
+        body, content_type = self.multipart_capture_body(
+            "Capture_20261103-220000.png",
+            image,
+            file_modified_at=1793710800000,
+        )
+        status, _, response_body = self.request(
+            "POST",
+            "/api/captures",
+            body=body,
+            headers={"Content-Type": content_type},
+        )
+        self.assertEqual(status, 201)
+        uploaded = json.loads(response_body)
+        self.assertIsNone(uploaded["broadcast_at"])
+        self.assertEqual(uploaded["metadata_status"], "NoMetadata")
+        self.assertEqual(uploaded["image_width"], 160)
+        self.assertEqual(uploaded["image_height"], 90)
+        self.assertEqual(uploaded["file_size"], len(image))
+
+        # 一覧に現れる
+        status, _, listing = self.get_json("/api/captures?order=CapturedAtDesc&limit=200")
+        self.assertEqual(status, 200)
+        self.assertIn(uploaded["id"], [c["id"] for c in listing["captures"]])
+
+        # 画像も取得できる
+        status, headers, served = self.request(
+            "GET", f"/api/captures/{uploaded['id']}/image?hash={uploaded['file_hash']}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(served, image)
+        self.assertEqual(headers.get("Content-Type"), "image/png")
+
+        stats = self.stats()
+        self.assertGreaterEqual(stats["capture_upload_count"], 1)
+        last = stats["last_capture_upload"]
+        self.assertEqual(last["filename"], "Capture_20261103-220000.png")
+        self.assertEqual(last["size"], len(image))
+        self.assertIn("image", last["fields"])
+        self.assertEqual(last["fields"]["image"][0]["filename"], "Capture_20261103-220000.png")
+        self.assertIn("file_modified_at", last["fields"])
+
+        # 同じ内容は保存せず、既存のキャプチャを返す
+        status, _, response_body = self.request(
+            "POST",
+            "/api/captures",
+            body=body,
+            headers={"Content-Type": content_type},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(json.loads(response_body)["id"], uploaded["id"])
+
+    def test_capture_upload_validation(self) -> None:
+        self.reset()
+        image = captures_mock.build_capture_png(5)
+        body, content_type = self.multipart_capture_body("invalid.txt", image)
+        status, _, _ = self.request(
+            "POST", "/api/captures", body=body,
+            headers={"Content-Type": content_type},
+        )
+        self.assertEqual(status, 422)
+
+        body, content_type = self.multipart_capture_body("Capture.png", b"not an image")
+        status, _, _ = self.request(
+            "POST", "/api/captures", body=body,
+            headers={"Content-Type": content_type},
+        )
+        self.assertEqual(status, 422)
+
+        body, content_type = self.multipart_capture_body("../Capture.png", image)
+        status, _, _ = self.request(
+            "POST", "/api/captures", body=body,
+            headers={"Content-Type": content_type},
+        )
+        self.assertEqual(status, 422)
+
+    def test_captures_library_toggle_matches_v0141(self) -> None:
+        self.reset()
+        try:
+            status, _, config = self.request(
+                "POST",
+                "/__mock/config",
+                body=json.dumps({"captures_library": False}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(config)["captures_library"], False)
+
+            for path in (
+                "/api/captures",
+                "/api/captures/sections",
+                "/api/captures/channels",
+                "/api/captures/programs",
+                "/api/captures/tags",
+                "/api/captures/1",
+                "/api/captures/1/image?hash=" + "0" * 64,
+            ):
+                status, _, _ = self.request("GET", path)
+                self.assertEqual(status, 404, path)
+
+            image = captures_mock.build_capture_png(9)
+            body, content_type = self.multipart_capture_body("Capture.png", image)
+            status, _, response_body = self.request(
+                "POST", "/api/captures", body=body,
+                headers={"Content-Type": content_type},
+            )
+            self.assertEqual(status, 204)
+            self.assertEqual(response_body, b"")
+            stats = self.stats()
+            self.assertFalse(stats["captures_library"])
+            self.assertGreaterEqual(stats["capture_upload_count"], 1)
+        finally:
+            self.reset()
+        status, _, _ = self.get_json("/api/captures")
+        self.assertEqual(status, 200)
+        self.assertTrue(self.stats()["captures_library"])
 
 
 if __name__ == "__main__":

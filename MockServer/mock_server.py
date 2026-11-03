@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
 import caption_injector
+import captures_mock
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FIXTURE_DIR = os.path.join(BASE_DIR, "fixtures")
@@ -293,6 +294,11 @@ class MockServerState:
         self.last_video_media_playlist_type: str | None = None
         # クライアント設定はプロセスが生きている間だけ保持する (実サーバーでは DB に保存される)
         self.client_settings: dict = copy.deepcopy(client_settings or {})
+        # キャプチャライブラリ (v0.15+) を持つサーバーかどうか
+        # POST /__mock/config {"captures_library": false} で v0.14.1 相当になる
+        self.captures_library = True
+        self.capture_upload_count = 0
+        self.last_capture_upload: dict | None = None
 
     def record_keepalive(self, video_id: str) -> None:
         with self.lock:
@@ -391,6 +397,22 @@ class MockServerState:
         with self.lock:
             self.niconico_unlink_count += 1
 
+    def record_capture_upload(
+        self,
+        filename: str,
+        fields: dict,
+        size: int,
+        content_type: str,
+    ) -> None:
+        with self.lock:
+            self.capture_upload_count += 1
+            self.last_capture_upload = {
+                "filename": filename,
+                "fields": fields,
+                "size": size,
+                "content_type": content_type,
+            }
+
     def snapshot(self) -> dict:
         with self.lock:
             return {
@@ -413,6 +435,9 @@ class MockServerState:
                 "niconico_authorize_count": self.niconico_authorize_count,
                 "niconico_link_count": self.niconico_link_count,
                 "niconico_unlink_count": self.niconico_unlink_count,
+                "captures_library": self.captures_library,
+                "capture_upload_count": self.capture_upload_count,
+                "last_capture_upload": copy.deepcopy(self.last_capture_upload),
             }
 
 
@@ -484,6 +509,7 @@ def load_fixtures() -> dict:
         "media_playlist": media_playlist,
         "sample_ts": sample_ts,
         "download_bytes": download_bytes,
+        **captures_mock.build_fixtures(videos, channels),
     }
 
 
@@ -1135,6 +1161,12 @@ class MockHandler(BaseHTTPRequestHandler):
             return None
         return fixtures["user"]
 
+    def _optional_user(self, fixtures: dict) -> dict | None:
+        """Optional login check: the user, or None when there is no valid token."""
+        if self._bearer_token() != MOCK_ACCESS_TOKEN:
+            return None
+        return fixtures["user"]
+
     def _require_admin(self, fixtures: dict) -> dict | None:
         """Admin check: returns the user, or sends 401/403 and returns None."""
         user = self._require_user(fixtures)
@@ -1264,6 +1296,10 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_client_settings_get(fixtures, state)
             return
 
+        if parts and parts[0] == "captures":
+            captures_mock.handle(self, "GET", parts, query, fixtures, state)
+            return
+
         if parts[0] == "streams" and len(parts) >= 2:
             if parts[1] == "video":
                 self._handle_video_stream(parts, query, state, fixtures)
@@ -1288,6 +1324,10 @@ class MockHandler(BaseHTTPRequestHandler):
 
         if parts == ["settings", "client"]:
             self._handle_client_settings_put(fixtures, state)
+            return
+
+        if parts and parts[0] == "captures":
+            captures_mock.handle(self, "PUT", parts, query, fixtures, state)
             return
 
         if (len(parts) == 5 and parts[0] == "streams" and parts[1] == "video"
@@ -1319,6 +1359,16 @@ class MockHandler(BaseHTTPRequestHandler):
         # UI テスト用: 初期状態 (フィクスチャとカウンター) に戻す
         if split.path == "/__mock/reset":
             self._handle_mock_reset()
+            return
+
+        # UI テスト用: サーバーの機能を切り替える
+        if split.path == "/__mock/config":
+            self._handle_mock_config()
+            return
+
+        if parts and parts[0] == "captures":
+            state = self.server.state  # type: ignore[attr-defined]
+            captures_mock.handle(self, "POST", parts, self._query(), fixtures, state)
             return
 
         if parts == ["users", "token"]:
@@ -1384,6 +1434,10 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_niconico_logout(fixtures, state)
             return
 
+        if parts and parts[0] == "captures":
+            captures_mock.handle(self, "DELETE", parts, self._query(), fixtures, state)
+            return
+
         # /api/videos/{video_id}: 管理者のみ。削除した録画番組はプロセスの生存期間中は戻らない。
         if len(parts) == 2 and parts[0] == "videos":
             user = self._require_admin(fixtures)
@@ -1409,6 +1463,24 @@ class MockHandler(BaseHTTPRequestHandler):
         self._not_found()
 
     # -- テスト用エンドポイント --------------------------------------------
+
+    def _handle_mock_config(self) -> None:
+        """Change mock server behaviour (currently the captures library).
+
+        POST /__mock/config {"captures_library": false} makes the server behave
+        like KonomiTV v0.14.1: every captures endpoint except the upload
+        answers 404. POST /__mock/reset restores the default (true).
+        """
+        state = self.server.state  # type: ignore[attr-defined]
+        body = self._read_json_body()
+        if "captures_library" in body:
+            state.captures_library = bool(body["captures_library"])
+        self._send_json(
+            {
+                "status": "ok",
+                "captures_library": state.captures_library,
+            }
+        )
 
     def _handle_mock_reset(self) -> None:
         """Restore the fixtures and the counters to their initial state.

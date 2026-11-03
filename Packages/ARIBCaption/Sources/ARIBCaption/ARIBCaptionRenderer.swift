@@ -78,15 +78,17 @@ public final class ARIBCaptionRenderer {
         aribcc_renderer_set_replace_drcs(renderer, replacesDRCS)
         _ = aribcc_renderer_set_frame_size(
             renderer,
-            Int(frameSize.width.rounded()),
-            Int(frameSize.height.rounded())
+            Int32(frameSize.width.rounded()),
+            Int32(frameSize.height.rounded())
         )
         _ = aribcc_renderer_set_margins(renderer, 0, 0, 0, 0)
 
         if let fontFamilies, !fontFamilies.isEmpty {
-            var cStrings: [UnsafeMutablePointer<CChar>?] = fontFamilies.map { strdup($0) }
+            let cStrings: [UnsafeMutablePointer<CChar>?] = fontFamilies.map { strdup($0) }
             defer { cStrings.forEach { free($0) } }
-            cStrings.withUnsafeBufferPointer { buffer in
+            // The C API takes `const char * const *`.
+            let constStrings: [UnsafePointer<CChar>?] = cStrings.map { $0.map { UnsafePointer($0) } }
+            constStrings.withUnsafeBufferPointer { buffer in
                 let pointers = buffer.baseAddress
                 _ = aribcc_renderer_set_default_font_family(
                     renderer,
