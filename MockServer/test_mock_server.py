@@ -17,7 +17,7 @@ import struct
 import threading
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote, urljoin
 
 import caption_injector
@@ -2978,6 +2978,409 @@ class TwitterMockTestCase(unittest.TestCase):
         self.assertEqual(user["bluesky_accounts"], [])
         self.assertEqual(user["account_links"], [])
         self.assertEqual(self.stats()["twitter_posted_tweets"], [])
+
+class ReservationMockTestCase(unittest.TestCase):
+    """EDCB recording reservations, keyword conditions and presets."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = mock_server.create_server("127.0.0.1", 0)
+        cls.host, cls.port = cls.server.server_address[:2]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    # -- helpers -----------------------------------------------------------
+
+    def request(self, method: str, path: str, body: bytes | None = None,
+                headers: dict | None = None):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            hdrs = {"Accept": "*/*"}
+            if headers:
+                hdrs.update(headers)
+            conn.request(method, path, body=body, headers=hdrs)
+            response = conn.getresponse()
+            data = response.read()
+            return response.status, dict(response.getheaders()), data
+        finally:
+            conn.close()
+
+    def get_json(self, path: str):
+        status, _, data = self.request("GET", path)
+        self.assertEqual(status, 200)
+        return json.loads(data.decode("utf-8"))
+
+    def send_json(self, method: str, path: str, payload):
+        status, _, data = self.request(
+            method, path,
+            body=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        decoded = json.loads(data.decode("utf-8")) if data else None
+        return status, decoded
+
+    def reset(self) -> None:
+        status, _, _ = self.request("POST", "/__mock/reset")
+        self.assertEqual(status, 200)
+
+    def stats(self) -> dict:
+        return self.get_json("/__mock/stats")
+
+    def timetable_programs(self) -> list[dict]:
+        now = mock_server.now_jst()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = mock_server.isoformat(day_start)
+        end = mock_server.isoformat(day_start + timedelta(days=1))
+        payload = self.get_json(
+            "/api/programs/timetable?start_time=" + quote(start)
+            + "&end_time=" + quote(end)
+        )
+        return [program for entry in payload["channels"] for program in entry["programs"]]
+
+    # -- tests -------------------------------------------------------------
+
+    def test_reservations_fixture_shape(self) -> None:
+        self.reset()
+        payload = self.get_json("/api/recording/reservations")
+        self.assertGreaterEqual(payload["total"], 4)
+        self.assertEqual(payload["total"], len(payload["reservations"]))
+
+        for field in (
+            "id", "channel", "program", "is_recording_in_progress",
+            "recording_availability", "comment", "scheduled_recording_file_name",
+            "estimated_recording_file_size", "record_settings",
+        ):
+            self.assertIn(field, payload["reservations"][0])
+
+        settings = payload["reservations"][0]["record_settings"]
+        for key in (
+            "is_enabled", "priority", "recording_folders", "recording_start_margin",
+            "recording_end_margin", "recording_mode", "caption_recording_mode",
+            "data_broadcasting_recording_mode", "post_recording_mode",
+            "post_recording_bat_file_path", "is_event_relay_follow_enabled",
+            "is_exact_recording_enabled", "is_oneseg_separate_output_enabled",
+            "is_sequential_recording_in_single_file_enabled", "forced_tuner_id",
+        ):
+            self.assertIn(key, settings)
+
+        # Sorted by program start time, like the server's ReservationsAPI.
+        starts = [item["program"]["start_time"] for item in payload["reservations"]]
+        self.assertEqual(starts, sorted(starts))
+
+        # The fixture covers the groups the app shows: recording now, (partly)
+        # unavailable tuners and a disabled reservation.
+        self.assertTrue(any(item["is_recording_in_progress"] for item in payload["reservations"]))
+        self.assertTrue(any(
+            item["recording_availability"] == "Partial"
+            for item in payload["reservations"]
+        ))
+        self.assertTrue(any(
+            item["record_settings"]["is_enabled"] is False
+            for item in payload["reservations"]
+        ))
+
+        for item in payload["reservations"]:
+            self.assertTrue(item["program"]["id"])
+            self.assertTrue(item["channel"]["id"])
+
+    def test_reservation_detail(self) -> None:
+        self.reset()
+        payload = self.get_json("/api/recording/reservations")
+        wanted = payload["reservations"][0]
+        detail = self.get_json("/api/recording/reservations/" + str(wanted["id"]))
+        self.assertEqual(detail["id"], wanted["id"])
+        self.assertEqual(detail["program"]["id"], wanted["program"]["id"])
+
+        status, detail = self.send_json(
+            "GET", "/api/recording/reservations/9999", {}
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(detail["detail"], "Specified reservation_id was not found")
+
+    def test_timetable_programs_expose_their_reservation(self) -> None:
+        self.reset()
+        reservations = self.get_json("/api/recording/reservations")["reservations"]
+        reserved_ids = {item["program"]["id"]: item for item in reservations}
+
+        marked = {
+            program["id"]: program["reservation"]
+            for program in self.timetable_programs()
+            if program.get("reservation") is not None
+        }
+        self.assertTrue(marked, "予約済みの番組に reservation が付かない")
+        for program_id, summary in marked.items():
+            self.assertIn(program_id, reserved_ids)
+            self.assertEqual(summary["id"], reserved_ids[program_id]["id"])
+            self.assertIn(summary["status"], ("Reserved", "Recording", "Disabled"))
+            self.assertIn(
+                summary["recording_availability"], ("Full", "Partial", "Unavailable")
+            )
+
+        disabled = [
+            summary for summary in marked.values() if summary["status"] == "Disabled"
+        ]
+        self.assertTrue(disabled, "無効な予約が Disabled にならない")
+
+        # A program without a reservation keeps the key with null.
+        unmarked = [
+            program for program in self.timetable_programs()
+            if program["id"] not in reserved_ids
+        ]
+        self.assertTrue(unmarked)
+        self.assertIsNone(unmarked[0]["reservation"])
+
+    def test_add_change_and_delete_reservation(self) -> None:
+        self.reset()
+        reserved = {item["program"]["id"] for item in
+                    self.get_json("/api/recording/reservations")["reservations"]}
+        target = next(
+            program for program in self.timetable_programs()
+            if program["id"] not in reserved
+        )
+
+        settings = {
+            "is_enabled": True,
+            "priority": 5,
+            "recording_folders": [],
+            "recording_start_margin": None,
+            "recording_end_margin": None,
+            "recording_mode": "SpecifiedService",
+            "caption_recording_mode": "Default",
+            "data_broadcasting_recording_mode": "Default",
+            "post_recording_mode": "Default",
+            "post_recording_bat_file_path": None,
+            "is_event_relay_follow_enabled": True,
+            "is_exact_recording_enabled": False,
+            "is_oneseg_separate_output_enabled": False,
+            "is_sequential_recording_in_single_file_enabled": False,
+            "forced_tuner_id": None,
+        }
+
+        status, body = self.send_json(
+            "POST", "/api/recording/reservations",
+            {"program_id": target["id"], "record_settings": settings, "program": None},
+        )
+        self.assertEqual(status, 201)
+        self.assertIn("id", body)
+
+        reservations = self.get_json("/api/recording/reservations")["reservations"]
+        added = next(item for item in reservations if item["program"]["id"] == target["id"])
+        self.assertEqual(added["record_settings"]["priority"], 5)
+        self.assertFalse(added["is_recording_in_progress"])
+
+        stats = self.stats()
+        self.assertEqual(stats["reservation_add_count"], 1)
+        self.assertEqual(stats["reservation_added_program_ids"], [target["id"]])
+
+        # The same program cannot be reserved twice.
+        status, body = self.send_json(
+            "POST", "/api/recording/reservations",
+            {"program_id": target["id"], "record_settings": settings},
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(body["detail"], "The same program_id is already reserved")
+
+        # Change the settings (what the detail screen saves).
+        new_settings = dict(settings)
+        new_settings["is_enabled"] = False
+        status, updated = self.send_json(
+            "PUT", "/api/recording/reservations/" + str(added["id"]),
+            {"record_settings": new_settings},
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(updated["record_settings"]["is_enabled"])
+
+        stats = self.stats()
+        self.assertEqual(stats["reservation_update_count"], 1)
+        self.assertEqual(stats["reservation_updated_ids"], [added["id"]])
+        self.assertFalse(stats["last_reservation_settings"]["is_enabled"])
+
+        # The timetable now reports the reservation as disabled.
+        summary = next(
+            program["reservation"] for program in self.timetable_programs()
+            if program["id"] == target["id"]
+        )
+        self.assertEqual(summary["status"], "Disabled")
+
+        status, _, data = self.request(
+            "DELETE", "/api/recording/reservations/" + str(added["id"])
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(data, b"")
+        stats = self.stats()
+        self.assertEqual(stats["reservation_delete_count"], 1)
+        self.assertEqual(stats["reservation_deleted_ids"], [added["id"]])
+
+        remaining = {
+            item["program"]["id"]
+            for item in self.get_json("/api/recording/reservations")["reservations"]
+        }
+        self.assertNotIn(target["id"], remaining)
+
+        status, _ = self.send_json(
+            "DELETE", "/api/recording/reservations/" + str(added["id"]), {}
+        )
+        self.assertEqual(status, 422)
+
+    def test_add_reservation_accepts_program_payload(self) -> None:
+        self.reset()
+        payload = {
+            "program_id": "NID32736-SID1024-EID65535",
+            "record_settings": {"is_enabled": True, "priority": 3},
+            "program": {
+                "id": "NID32736-SID1024-EID65535",
+                "channel_id": "NID32736-SID1024",
+                "network_id": 32736,
+                "service_id": 1024,
+                "event_id": 65535,
+                "title": "放送中の番組",
+                "start_time": mock_server.isoformat(mock_server.now_jst()),
+                "duration": 1800,
+            },
+        }
+        status, body = self.send_json("POST", "/api/recording/reservations", payload)
+        self.assertEqual(status, 201, body)
+        reservations = self.get_json("/api/recording/reservations")["reservations"]
+        added = next(
+            item for item in reservations if item["program"]["id"] == payload["program_id"]
+        )
+        self.assertEqual(added["program"]["title"], "放送中の番組")
+
+    def test_add_reservation_rejects_unknown_program(self) -> None:
+        self.reset()
+        status, body = self.send_json(
+            "POST", "/api/recording/reservations",
+            {"program_id": "NID1-SID1-EID1", "record_settings": {"priority": 3}},
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(body["detail"], "Specified program was not found")
+
+    def test_recording_presets(self) -> None:
+        self.reset()
+        payload = self.get_json("/api/recording/presets")
+        self.assertIn("global_defaults", payload)
+        self.assertGreaterEqual(len(payload["presets"]), 2)
+        self.assertEqual(payload["presets"][0]["id"], 0)
+        self.assertEqual(
+            set(payload["global_defaults"]),
+            {
+                "recording_start_margin", "recording_end_margin",
+                "caption_recording_mode", "data_broadcasting_recording_mode",
+                "post_recording_mode",
+            },
+        )
+        for preset in payload["presets"]:
+            self.assertIn("name", preset)
+            self.assertIn("record_settings", preset)
+        self.assertGreaterEqual(self.stats()["reservation_presets_fetch_count"], 1)
+
+    def test_reservation_conditions_crud(self) -> None:
+        self.reset()
+        payload = self.get_json("/api/recording/conditions")
+        self.assertGreaterEqual(payload["total"], 1)
+        self.assertEqual(payload["total"], len(payload["reservation_conditions"]))
+        condition = payload["reservation_conditions"][0]
+        self.assertIn("reservation_count", condition)
+        self.assertIn("keyword", condition["program_search_condition"])
+
+        detail = self.get_json("/api/recording/conditions/" + str(condition["id"]))
+        self.assertEqual(detail["id"], condition["id"])
+
+        search = {
+            "is_enabled": True,
+            "keyword": "ドラマ",
+            "exclude_keyword": "",
+            "note": "",
+            "is_title_only": False,
+            "is_case_sensitive": False,
+            "is_fuzzy_search_enabled": False,
+            "is_regex_search_enabled": False,
+            "service_ranges": None,
+            "genre_ranges": None,
+            "is_exclude_genre_ranges": False,
+            "date_ranges": None,
+            "is_exclude_date_ranges": False,
+            "duration_range_min": None,
+            "duration_range_max": None,
+            "broadcast_type": "All",
+            "duplicate_title_check_scope": "None",
+            "duplicate_title_check_period_days": 6,
+        }
+        settings = {"is_enabled": True, "priority": 2}
+        status, body = self.send_json(
+            "POST", "/api/recording/conditions",
+            {"program_search_condition": search, "record_settings": settings},
+        )
+        self.assertEqual(status, 201)
+        created_id = body["id"]
+
+        created = self.get_json("/api/recording/conditions/" + str(created_id))
+        self.assertEqual(created["program_search_condition"]["keyword"], "ドラマ")
+        self.assertEqual(created["reservation_count"], 0)
+
+        stats = self.stats()
+        self.assertEqual(stats["reservation_condition_add_count"], 1)
+        self.assertEqual(
+            stats["last_reservation_condition"]["program_search_condition"]["keyword"],
+            "ドラマ",
+        )
+
+        updated_search = dict(search)
+        updated_search["keyword"] = "アニメ"
+        status, updated = self.send_json(
+            "PUT", "/api/recording/conditions/" + str(created_id),
+            {"program_search_condition": updated_search, "record_settings": settings},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["program_search_condition"]["keyword"], "アニメ")
+        self.assertEqual(self.stats()["reservation_condition_update_count"], 1)
+
+        status, _, _ = self.request(
+            "DELETE", "/api/recording/conditions/" + str(created_id)
+        )
+        self.assertEqual(status, 204)
+        stats = self.stats()
+        self.assertEqual(stats["reservation_condition_delete_count"], 1)
+        self.assertEqual(stats["reservation_condition_deleted_ids"], [created_id])
+
+        status, body = self.send_json(
+            "GET", "/api/recording/conditions/" + str(created_id), {}
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(
+            body["detail"], "Specified reservation_condition_id was not found"
+        )
+
+    def test_reset_restores_reservation_fixtures(self) -> None:
+        average = self.get_json("/api/recording/reservations")["total"]
+        status, body = self.send_json(
+            "POST", "/api/recording/reservations",
+            {
+                "program_id": "NID32736-SID1024-EID65535",
+                "record_settings": {"is_enabled": True, "priority": 3},
+                "program": {
+                    "id": "NID32736-SID1024-EID65535",
+                    "channel_id": "NID32736-SID1024",
+                    "network_id": 32736,
+                    "service_id": 1024,
+                    "event_id": 65535,
+                    "title": "放送中の番組",
+                    "start_time": mock_server.isoformat(mock_server.now_jst()),
+                    "duration": 1800,
+                },
+            },
+        )
+        self.assertEqual(status, 201, body)
+        self.reset()
+        self.assertEqual(self.get_json("/api/recording/reservations")["total"], average)
+        self.assertEqual(self.stats()["reservation_add_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ enum TestSection: String, CaseIterable {
     case mylist
     case history
     case captures
+    case reservations
     case settings
 
     var title: String {
@@ -29,6 +30,7 @@ enum TestSection: String, CaseIterable {
         case .mylist: return "マイリスト"
         case .history: return "視聴履歴"
         case .captures: return "キャプチャ"
+        case .reservations: return "録画予約"
         case .settings: return "設定"
         }
     }
@@ -38,7 +40,7 @@ enum TestSection: String, CaseIterable {
         switch self {
         case .live: return "live"
         case .videos: return "videos"
-        case .timetable, .mylist, .history, .captures, .settings: return "mypage"
+        case .timetable, .mylist, .history, .captures, .reservations, .settings: return "mypage"
         }
     }
 
@@ -49,6 +51,7 @@ enum TestSection: String, CaseIterable {
         case .mylist: return "mypage.mylist"
         case .history: return "mypage.history"
         case .captures: return "mypage.captures"
+        case .reservations: return "mypage.reservations"
         case .settings: return "mypage.settings"
         case .live, .videos: return nil
         }

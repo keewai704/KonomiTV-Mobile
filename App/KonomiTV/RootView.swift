@@ -190,6 +190,7 @@ struct RootView: View {
         case .mylist: return $model.mylistPath
         case .history: return $model.historyPath
         case .captures: return $model.capturesPath
+        case .reservations: return $model.reservationsPath
         case .settings: return $model.settingsPath
         }
     }
@@ -209,6 +210,8 @@ struct RootView: View {
             WatchedHistoryScreen(model: model)
         case .captures:
             CapturesLibraryScreen(model: model)
+        case .reservations:
+            ReservationsHomeScreen(model: model)
         case .settings:
             SettingsView(model: model)
         }
@@ -233,6 +236,12 @@ struct RootView: View {
             CapturesLibraryScreen(model: model)
         case .captureProgram(let id):
             CaptureProgramScreen(model: model, programID: id)
+        case .reservations:
+            ReservationsHomeScreen(model: model)
+        case .reservation(let id):
+            ReservationDetailScreen(model: model, reservationID: id)
+        case .reservationConditions:
+            ReservationConditionsScreen(model: model)
         case .settings:
             SettingsView(model: model)
         case .pinnedChannels:

@@ -317,6 +317,33 @@ enum Endpoints {
         )
     }
 
+    // MARK: - Recording reservations
+
+    /// `GET/POST /api/recording/reservations`.
+    static func recordingReservations(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["recording", "reservations"])
+    }
+
+    /// `GET/PUT/DELETE /api/recording/reservations/{reservation_id}`.
+    static func recordingReservation(baseURL: URL, id: Int) -> URL {
+        url(baseURL: baseURL, path: ["recording", "reservations", String(id)])
+    }
+
+    /// `GET/POST /api/recording/conditions`.
+    static func recordingConditions(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["recording", "conditions"])
+    }
+
+    /// `GET/PUT/DELETE /api/recording/conditions/{reservation_condition_id}`.
+    static func recordingCondition(baseURL: URL, id: Int) -> URL {
+        url(baseURL: baseURL, path: ["recording", "conditions", String(id)])
+    }
+
+    /// `GET /api/recording/presets` (EDCB backend only).
+    static func recordingPresets(baseURL: URL) -> URL {
+        url(baseURL: baseURL, path: ["recording", "presets"])
+    }
+
     // MARK: - Images
 
     static func logo(baseURL: URL, channelID: String) -> URL {

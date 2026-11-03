@@ -11,6 +11,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Sendable {
     case history
     /// キャプチャ (0.15+ only; hidden when the server has no captures library).
     case captures
+    /// 録画予約 (EDCB backend only).
+    case reservations
     case settings
 
     var id: String { rawValue }
@@ -23,6 +25,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .mylist: return "マイリスト"
         case .history: return "視聴履歴"
         case .captures: return "キャプチャ"
+        case .reservations: return "録画予約"
         case .settings: return "設定"
         }
     }
@@ -35,6 +38,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .mylist: return "bookmark"
         case .history: return "clock.arrow.circlepath"
         case .captures: return "photo.on.rectangle"
+        case .reservations: return "record.circle"
         case .settings: return "gearshape"
         }
     }
@@ -73,6 +77,7 @@ enum MypageRow: String, CaseIterable, Identifiable, Hashable, Sendable {
     case mylist
     case history
     case captures
+    case reservations
     case settings
 
     var id: String { rawValue }
@@ -83,6 +88,7 @@ enum MypageRow: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .mylist: return .mylist
         case .history: return .history
         case .captures: return .captures
+        case .reservations: return .reservations
         case .settings: return .settings
         }
     }
@@ -93,6 +99,7 @@ enum MypageRow: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .mylist: return .mylist
         case .history: return .history
         case .captures: return .captures
+        case .reservations: return .reservations
         case .settings: return .settings
         }
     }
@@ -116,6 +123,9 @@ enum SectionRoute: Hashable, Sendable {
     case history
     case captures
     case captureProgram(Int)
+    case reservations
+    case reservation(Int)
+    case reservationConditions
     case settings
     case pinnedChannels
 }
@@ -207,6 +217,7 @@ final class AppModel {
     var mylistPath: [SectionRoute] = []
     var historyPath: [SectionRoute] = []
     var capturesPath: [SectionRoute] = []
+    var reservationsPath: [SectionRoute] = []
     var timetablePath: [SectionRoute] = []
     var settingsPath: [SectionRoute] = []
     /// Path of the compact マイページ hub.
@@ -354,6 +365,46 @@ final class AppModel {
         }
     }
 
+    /// Whether the recording reservation features work on this server.
+    ///
+    /// The three recording routers (reservations, conditions, presets) answer
+    /// 422 "This API is only available when the backend is EDCB" on a
+    /// Mirakurun backend, so the app follows the web client's
+    /// `isEDCBBackend` check.
+    var isEDCBBackend: Bool { version?.backend == "EDCB" }
+
+    /// Recording setting presets of the server (EDCB only). Cached after the
+    /// first request, so opening the timetable does not fetch them again.
+    private(set) var recordingPresets: RecordSettingsPresets?
+
+    /// The record settings a new reservation starts with (the server's
+    /// `id == 0` preset, or the web client's fallback).
+    private(set) var defaultRecordSettings: RecordSettings?
+
+    /// Loads the recording presets once and returns the default record
+    /// settings for a new reservation.
+    @discardableResult
+    func loadDefaultRecordSettings(force: Bool = false) async -> RecordSettings {
+        if force {
+            recordingPresets = nil
+        }
+        if recordingPresets == nil, isEDCBBackend, let client {
+            recordingPresets = try? await client.recordingPresets()
+        }
+        if let preset = recordingPresets?.defaultPreset {
+            defaultRecordSettings = preset.recordSettings
+        } else if defaultRecordSettings == nil {
+            defaultRecordSettings = RecordSettings.fallback
+        }
+        return defaultRecordSettings ?? RecordSettings.fallback
+    }
+
+    /// Forgets the cached presets, e.g. after connecting to another server.
+    func resetRecordingPresets() {
+        recordingPresets = nil
+        defaultRecordSettings = nil
+    }
+
     /// Probes whether the server has the captures library. One anonymous
     /// request that answers 404 on v0.14.1.
     func refreshCapturesLibraryAvailability() async {
@@ -384,6 +435,7 @@ final class AppModel {
         serverURL = url
         version = info
         defaults.set(url.absoluteString, forKey: PreferenceKeys.serverURL)
+        resetRecordingPresets()
         await refreshCapturesLibraryAvailability()
     }
 
@@ -398,6 +450,7 @@ final class AppModel {
         serverURL = nil
         version = nil
         capturesLibraryAvailable = false
+        resetRecordingPresets()
         resetNavigation()
     }
 
@@ -409,6 +462,7 @@ final class AppModel {
         mylistPath = []
         historyPath = []
         capturesPath = []
+        reservationsPath = []
         timetablePath = []
         settingsPath = []
         mypagePath = []

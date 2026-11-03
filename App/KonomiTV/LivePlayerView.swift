@@ -22,6 +22,12 @@ struct LivePlayerView: View {
     @State private var showsRemocon = false
     @State private var commentSession: LiveCommentSession?
     @State private var twitterSession: TwitterSession?
+    /// Recording reservations of the programs of the program panel.
+    @State private var presentReservation: Reservation?
+    @State private var followingReservation: Reservation?
+    @State private var isUpdatingReservation = false
+    @State private var reservationError: String?
+    @State private var showsCancelReservationConfirmation = false
     /// Incremented by the M shortcut so the posting form focuses its field.
     @State private var commentFocusRequest = 0
 
@@ -54,6 +60,10 @@ struct LivePlayerView: View {
             startPlayback()
             startComments()
             startTwitter()
+            await loadReservations()
+        }
+        .onChange(of: channel.programPresent?.id) { _, _ in
+            Task { await loadReservations() }
         }
         .task { await loadChannels() }
         .onAppear {
@@ -346,6 +356,8 @@ struct LivePlayerView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+
+                presentProgramReservation(program)
             } else {
                 Text("番組情報がありません")
                     .font(.subheadline)
@@ -363,8 +375,156 @@ struct LivePlayerView: View {
                     Text(Formatters.timeRange(start: following.startTime, end: following.endTime))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    followingProgramReservation(following)
                 }
             }
+
+            if let reservationError {
+                Text(reservationError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .confirmationDialog(
+            "録画予約をキャンセルしますか？",
+            isPresented: $showsCancelReservationConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("予約をキャンセル", role: .destructive) {
+                Task { await cancelReservation() }
+            }
+            .accessibilityIdentifier("panel.program.reservation.cancel.confirm")
+            Button("戻る", role: .cancel) {}
+        }
+    }
+
+    // MARK: - Recording reservations
+
+    /// Record button of the program that is on air, like the web client's
+    /// program panel.
+    @ViewBuilder
+    private func presentProgramReservation(_ program: Program) -> some View {
+        if model.isEDCBBackend {
+            if let reservation = presentReservation {
+                HStack(spacing: 8) {
+                    Label(
+                        ReservationStatus.label(reservation),
+                        systemImage: ReservationStatus.systemImage(reservation)
+                    )
+                    .font(.caption)
+                    .foregroundStyle(ReservationStatus.color(reservation))
+
+                    Spacer(minLength: 0)
+
+                    Button(role: .destructive) {
+                        showsCancelReservationConfirmation = true
+                    } label: {
+                        Label("予約を削除", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isUpdatingReservation)
+                    .accessibilityIdentifier("panel.program.reservation.cancel")
+                }
+            } else {
+                Button {
+                    Task { await reserve(program) }
+                } label: {
+                    Label("録画予約", systemImage: "record.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isUpdatingReservation)
+                .accessibilityIdentifier("panel.program.reserve")
+            }
+        }
+    }
+
+    /// Reserve / cancel the following program.
+    @ViewBuilder
+    private func followingProgramReservation(_ program: Program) -> some View {
+        if model.isEDCBBackend {
+            if let reservation = followingReservation {
+                HStack(spacing: 8) {
+                    Label(
+                        ReservationStatus.label(reservation),
+                        systemImage: ReservationStatus.systemImage(reservation)
+                    )
+                    .font(.caption)
+                    .foregroundStyle(ReservationStatus.color(reservation))
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        Task { await cancelReservation(id: reservation.id) }
+                    } label: {
+                        Label("予約を削除", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isUpdatingReservation)
+                    .accessibilityIdentifier("panel.program.following.reservation.cancel")
+                }
+            } else {
+                Button {
+                    Task { await reserve(program) }
+                } label: {
+                    Label("録画予約", systemImage: "record.circle")
+                }
+                .buttonStyle(.bordered)
+                .disabled(isUpdatingReservation)
+                .accessibilityIdentifier("panel.program.following.reserve")
+            }
+        }
+    }
+
+    /// Reloads the reservations of the present and following programs.
+    private func loadReservations() async {
+        guard model.isEDCBBackend, let client = model.client else {
+            presentReservation = nil
+            followingReservation = nil
+            return
+        }
+        guard let list = try? await client.reservations() else { return }
+        presentReservation = list.reservations.first {
+            $0.program.id == channel.programPresent?.id
+        }
+        followingReservation = list.reservations.first {
+            $0.program.id == channel.programFollowing?.id
+        }
+    }
+
+    private func reserve(_ program: Program) async {
+        guard let client = model.client else { return }
+        isUpdatingReservation = true
+        reservationError = nil
+        defer { isUpdatingReservation = false }
+
+        do {
+            let settings = await model.loadDefaultRecordSettings()
+            try await client.addReservation(
+                programID: program.id,
+                recordSettings: settings,
+                program: ReservationAddProgram(program: program)
+            )
+            await loadReservations()
+        } catch {
+            reservationError = ErrorText.message(for: error)
+        }
+    }
+
+    private func cancelReservation(id: Int? = nil) async {
+        guard let client = model.client else { return }
+        let target = id ?? presentReservation?.id
+        guard let target else { return }
+
+        isUpdatingReservation = true
+        reservationError = nil
+        defer { isUpdatingReservation = false }
+
+        do {
+            try await client.deleteReservation(id: target)
+            await loadReservations()
+        } catch {
+            reservationError = ErrorText.message(for: error)
         }
     }
 

@@ -118,6 +118,9 @@ struct TimeTableScreen: View {
     @State private var selectedProgram: TimeTableProgram?
     @State private var scrollState = TimeTableScrollState()
     @State private var now = Date()
+    /// Set when the program sheet changed a recording reservation, so the grid
+    /// (and its reservation markers) is reloaded once the sheet closes.
+    @State private var reservationDidChange = false
 
     private let calendar = Calendar.current
 
@@ -199,13 +202,22 @@ struct TimeTableScreen: View {
             .task(id: reloadKey) {
                 await load()
             }
-            .sheet(item: $selectedProgram) { item in
+            .sheet(item: $selectedProgram, onDismiss: reloadAfterReservationChange) { item in
                 TimeTableProgramDetail(
                     model: model,
                     item: item,
-                    channel: channel(for: item)
+                    channel: channel(for: item),
+                    didChangeReservation: $reservationDidChange
                 )
             }
+    }
+
+    /// Reloads the timetable when the program sheet reserved or cancelled a
+    /// reservation, so the program cells show the new marker.
+    private func reloadAfterReservationChange() {
+        guard reservationDidChange else { return }
+        reservationDidChange = false
+        Task { await load() }
     }
 
     private var reloadKey: String {
@@ -471,10 +483,70 @@ struct TimeTableScreen: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .opacity(isDimmed ? 0.6 : 1)
+            .overlay(alignment: .topTrailing) {
+                if let reservation = item.reservation {
+                    reservationMarker(reservation, program: program)
+                }
+            }
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("timetable.program.\(program.id)")
         .accessibilityLabel(program.title)
+    }
+
+    /// The web client's reservation marker of a timetable cell: an icon in the
+    /// corner, coloured by the reservation status.
+    private func reservationMarker(
+        _ reservation: TimeTableProgramReservation,
+        program: Program
+    ) -> some View {
+        Image(systemName: Self.markerSystemImage(reservation))
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(Self.markerColor(reservation))
+            .padding(2)
+            .background(Color(uiColor: .systemBackground).opacity(0.75), in: Circle())
+            .padding(2)
+            .accessibilityIdentifier("timetable.reserved.\(program.id)")
+            .accessibilityLabel(Self.markerLabel(reservation))
+    }
+
+    static func markerSystemImage(_ reservation: TimeTableProgramReservation) -> String {
+        switch reservation.status {
+        case .recording: return "record.circle.fill"
+        case .disabled: return "pause.circle.fill"
+        case .reserved:
+            switch reservation.recordingAvailability {
+            case .full: return "checkmark.circle.fill"
+            case .partial: return "exclamationmark.triangle.fill"
+            case .unavailable: return "xmark.circle.fill"
+            }
+        }
+    }
+
+    static func markerColor(_ reservation: TimeTableProgramReservation) -> Color {
+        switch reservation.status {
+        case .recording: return .red
+        case .disabled: return .secondary
+        case .reserved:
+            switch reservation.recordingAvailability {
+            case .full: return .accentColor
+            case .partial: return .orange
+            case .unavailable: return .red
+            }
+        }
+    }
+
+    static func markerLabel(_ reservation: TimeTableProgramReservation) -> String {
+        switch reservation.status {
+        case .recording: return "録画中"
+        case .disabled: return "録画予約 (無効)"
+        case .reserved:
+            switch reservation.recordingAvailability {
+            case .full: return "録画予約済み"
+            case .partial: return "録画予約済み (一部のみ録画)"
+            case .unavailable: return "録画予約済み (チューナー不足)"
+            }
+        }
     }
 
     @ViewBuilder
@@ -648,8 +720,17 @@ private struct TimeTableProgramDetail: View {
     let model: AppModel
     let item: TimeTableProgram
     let channel: Channel?
+    /// Set when this sheet reserved, changed or cancelled a reservation, so the
+    /// timetable reloads its cells (and markers) after the sheet closes.
+    @Binding var didChangeReservation: Bool
 
     @Environment(\.dismiss) private var dismiss
+
+    @State private var reservation: Reservation?
+    @State private var isLoadingReservation = false
+    @State private var isWorking = false
+    @State private var errorMessage: String?
+    @State private var showsCancelConfirmation = false
 
     private var program: Program { item.program }
 
@@ -664,6 +745,12 @@ private struct TimeTableProgramDetail: View {
             .sorted { $0.key < $1.key }
             .map { (key: $0.key, value: $0.value) }
     }
+
+    private var presets: [RecordSettingsPreset] {
+        model.recordingPresets?.presets ?? []
+    }
+
+    private var isPastProgram: Bool { program.endTime <= Date() }
 
     var body: some View {
         NavigationStack {
@@ -702,6 +789,8 @@ private struct TimeTableProgramDetail: View {
                         .accessibilityIdentifier("timetable.detail.watch")
                     }
 
+                    reservationActions
+
                     if !program.description.isEmpty {
                         Text(program.description)
                             .font(.body)
@@ -711,6 +800,12 @@ private struct TimeTableProgramDetail: View {
                     ForEach(detailRows, id: \.key) { row in
                         LabeledContent(row.key, value: row.value)
                             .font(.footnote)
+                    }
+
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -725,6 +820,174 @@ private struct TimeTableProgramDetail: View {
                     }
                 }
             }
+            .task {
+                await model.loadDefaultRecordSettings()
+                await loadReservation()
+            }
+            .confirmationDialog(
+                "録画予約をキャンセルしますか？",
+                isPresented: $showsCancelConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("予約をキャンセル", role: .destructive) {
+                    Task { await cancelReservation() }
+                }
+                .accessibilityIdentifier("timetable.program.reservation.cancel.confirm")
+                Button("戻る", role: .cancel) {}
+            }
+        }
+    }
+
+    /// Reserve / change / cancel, like the web client's timetable cell actions.
+    @ViewBuilder
+    private var reservationActions: some View {
+        if !model.isEDCBBackend {
+            EmptyView()
+        } else if let reservation {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: ReservationStatus.systemImage(reservation))
+                        .foregroundStyle(ReservationStatus.color(reservation))
+                    Text(ReservationStatus.label(reservation))
+                        .font(.subheadline.weight(.semibold))
+                }
+
+                NavigationLink {
+                    ReservationDetailScreen(model: model, reservationID: reservation.id)
+                } label: {
+                    Label("予約の詳細", systemImage: "info.circle")
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("timetable.program.reservation.detail")
+
+                if !isPastProgram {
+                    Menu {
+                        ForEach(presets) { preset in
+                            Button {
+                                Task { await changeSettings(preset.recordSettings) }
+                            } label: {
+                                Text(preset.name)
+                            }
+                        }
+                        Divider()
+                        Button(reservation.recordSettings.isEnabled ? "予約を無効化" : "予約を有効化") {
+                            Task { await setEnabled(!reservation.recordSettings.isEnabled) }
+                        }
+                    } label: {
+                        Label("予約を変更", systemImage: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isWorking || presets.isEmpty)
+                    .accessibilityIdentifier("timetable.program.reservation.change")
+
+                    Button(role: .destructive) {
+                        showsCancelConfirmation = true
+                    } label: {
+                        Label("予約をキャンセル", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isWorking)
+                    .accessibilityIdentifier("timetable.program.reservation.cancel")
+                }
+            }
+        } else if !isPastProgram, !isLoadingReservation {
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    Task { await reserve(nil) }
+                } label: {
+                    Label("録画予約", systemImage: "record.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isWorking)
+                .accessibilityIdentifier("timetable.program.reserve")
+
+                if presets.count > 1 {
+                    Menu {
+                        ForEach(presets) { preset in
+                            Button {
+                                Task { await reserve(preset.recordSettings) }
+                            } label: {
+                                Text(preset.name)
+                            }
+                        }
+                    } label: {
+                        Label("プリセットを選んで予約", systemImage: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isWorking)
+                    .accessibilityIdentifier("timetable.program.reserve.preset")
+                }
+            }
+        }
+    }
+
+    // MARK: Actions
+
+    private func loadReservation() async {
+        guard let summary = item.reservation, let client = model.client else { return }
+        isLoadingReservation = true
+        defer { isLoadingReservation = false }
+        reservation = try? await client.reservation(id: summary.id)
+    }
+
+    private func reserve(_ preset: RecordSettings?) async {
+        guard let client = model.client else {
+            errorMessage = "サーバーが設定されていません。"
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+
+        let settings = preset ?? (await model.loadDefaultRecordSettings())
+        do {
+            try await client.addReservation(
+                programID: program.id,
+                recordSettings: settings,
+                program: ReservationAddProgram(program: program)
+            )
+            didChangeReservation = true
+            dismiss()
+        } catch {
+            errorMessage = ErrorText.message(for: error)
+        }
+    }
+
+    /// Applies the given settings to the reservation. The enabled flag is kept
+    /// as given: a preset must not enable a disabled reservation by accident,
+    /// the menu has its own entry for that.
+    private func changeSettings(_ settings: RecordSettings) async {
+        guard let client = model.client, let reservation else { return }
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            self.reservation = try await client.updateReservation(
+                id: reservation.id,
+                recordSettings: settings
+            )
+            didChangeReservation = true
+        } catch {
+            errorMessage = ErrorText.message(for: error)
+        }
+    }
+
+    private func setEnabled(_ enabled: Bool) async {
+        guard var settings = reservation?.recordSettings else { return }
+        settings.isEnabled = enabled
+        await changeSettings(settings)
+    }
+
+    private func cancelReservation() async {
+        guard let client = model.client, let reservation else { return }
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            try await client.deleteReservation(id: reservation.id)
+            didChangeReservation = true
+            dismiss()
+        } catch {
+            errorMessage = ErrorText.message(for: error)
         }
     }
 }

@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import caption_injector
 import captures_mock
+import reservations_mock
 import twitter_mock
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -325,6 +326,20 @@ class MockServerState:
         self.bluesky_reaction_events: list[dict] = []
         self.account_link_create_count = 0
         self.account_link_delete_count = 0
+        # 録画予約・キーワード自動予約条件・録画設定プリセットのカウンタ
+        self.reservation_add_count = 0
+        self.reservation_added_program_ids: list[str] = []
+        self.reservation_update_count = 0
+        self.reservation_updated_ids: list[int] = []
+        self.last_reservation_settings: dict | None = None
+        self.reservation_delete_count = 0
+        self.reservation_deleted_ids: list[int] = []
+        self.reservation_condition_add_count = 0
+        self.reservation_condition_update_count = 0
+        self.reservation_condition_delete_count = 0
+        self.reservation_condition_deleted_ids: list[int] = []
+        self.last_reservation_condition: dict | None = None
+        self.reservation_presets_fetch_count = 0
 
     def record_keepalive(self, video_id: str) -> None:
         with self.lock:
@@ -452,6 +467,44 @@ class MockServerState:
             self.capture_favorite_add_count += added
             self.capture_favorite_remove_count += removed
 
+    # -- 録画予約 ----------------------------------------------------------
+
+    def record_reservation_add(self, program_id: str, settings: dict) -> None:
+        with self.lock:
+            self.reservation_add_count += 1
+            self.reservation_added_program_ids.append(program_id)
+            self.last_reservation_settings = copy.deepcopy(settings)
+
+    def record_reservation_update(self, reservation_id: int, settings: dict) -> None:
+        with self.lock:
+            self.reservation_update_count += 1
+            self.reservation_updated_ids.append(int(reservation_id))
+            self.last_reservation_settings = copy.deepcopy(settings)
+
+    def record_reservation_delete(self, reservation_id: int) -> None:
+        with self.lock:
+            self.reservation_delete_count += 1
+            self.reservation_deleted_ids.append(int(reservation_id))
+
+    def record_reservation_condition_add(self, condition: dict) -> None:
+        with self.lock:
+            self.reservation_condition_add_count += 1
+            self.last_reservation_condition = copy.deepcopy(condition)
+
+    def record_reservation_condition_update(self, condition: dict) -> None:
+        with self.lock:
+            self.reservation_condition_update_count += 1
+            self.last_reservation_condition = copy.deepcopy(condition)
+
+    def record_reservation_condition_delete(self, condition_id: int) -> None:
+        with self.lock:
+            self.reservation_condition_delete_count += 1
+            self.reservation_condition_deleted_ids.append(int(condition_id))
+
+    def record_reservation_presets_fetch(self) -> None:
+        with self.lock:
+            self.reservation_presets_fetch_count += 1
+
     def snapshot(self) -> dict:
         with self.lock:
             return {
@@ -499,6 +552,19 @@ class MockServerState:
                 "bluesky_reaction_events": copy.deepcopy(self.bluesky_reaction_events),
                 "account_link_create_count": self.account_link_create_count,
                 "account_link_delete_count": self.account_link_delete_count,
+                "reservation_add_count": self.reservation_add_count,
+                "reservation_added_program_ids": list(self.reservation_added_program_ids),
+                "reservation_update_count": self.reservation_update_count,
+                "reservation_updated_ids": list(self.reservation_updated_ids),
+                "last_reservation_settings": copy.deepcopy(self.last_reservation_settings),
+                "reservation_delete_count": self.reservation_delete_count,
+                "reservation_deleted_ids": list(self.reservation_deleted_ids),
+                "reservation_condition_add_count": self.reservation_condition_add_count,
+                "reservation_condition_update_count": self.reservation_condition_update_count,
+                "reservation_condition_delete_count": self.reservation_condition_delete_count,
+                "reservation_condition_deleted_ids": list(self.reservation_condition_deleted_ids),
+                "last_reservation_condition": copy.deepcopy(self.last_reservation_condition),
+                "reservation_presets_fetch_count": self.reservation_presets_fetch_count,
             }
 
 
@@ -559,6 +625,17 @@ def load_fixtures() -> dict:
     # 録画ファイルダウンロード API が返すダミーファイル (実ファイルの先頭を少しだけ)
     download_bytes = sample_ts[:TS_PACKET_SIZE * 10] if sample_ts else b"KonomiTV mock recorded file\n"
 
+    # 録画予約のフィクスチャが参照する番組 (今日と明日の番組表と同じ ID になる)
+    reservation_programs: dict[str, tuple[dict, dict]] = {}
+    reservation_day_start = now_jst().replace(hour=0, minute=0, second=0, microsecond=0)
+    for channel_index, channel in enumerate(all_channels({"channels": channels})):
+        for day in (0, 1):
+            for program in build_day_programs(
+                channel, reservation_day_start + timedelta(days=day), channel_index
+            ):
+                # 番組 ID は日付に依存しないため、今日の番組を優先して残す
+                reservation_programs.setdefault(program["id"], (channel, program))
+
     return {
         "version": version,
         "channels": channels,
@@ -572,6 +649,7 @@ def load_fixtures() -> dict:
         "download_bytes": download_bytes,
         **captures_mock.build_fixtures(videos, channels),
         **twitter_mock.build_fixtures(),
+        **reservations_mock.build_fixtures(reservation_programs),
     }
 
 
@@ -784,7 +862,10 @@ def build_timetable(fixtures: dict, start_time: datetime, end_time: datetime) ->
             # 番組表 API と同じく、指定期間に少しでも重なる番組を返す
             if program_end <= start_time or program_start >= end_time:
                 continue
-            program["reservation"] = None
+            # 予約済みの番組には予約情報を付ける (TimeTableProgramReservation)
+            program["reservation"] = reservations_mock.reservation_summary(
+                fixtures, program["id"]
+            )
             programs.append(program)
         result.append({
             "channel": copy.deepcopy(channel),
@@ -1374,6 +1455,11 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_client_settings_get(fixtures, state)
             return
 
+        # 録画予約・キーワード自動予約条件・録画設定プリセット (EDCB バックエンド専用 API)
+        if parts and parts[0] == "recording":
+            reservations_mock.handle(self, "GET", parts, query, fixtures, state)
+            return
+
         if parts and parts[0] == "captures":
             captures_mock.handle(self, "GET", parts, query, fixtures, state)
             return
@@ -1407,6 +1493,10 @@ class MockHandler(BaseHTTPRequestHandler):
         if parts and parts[0] in ("twitter", "bluesky"):
             if twitter_mock.handle(self, "PUT", parts, query, fixtures, state):
                 return
+
+        if parts and parts[0] == "recording":
+            reservations_mock.handle(self, "PUT", parts, query, fixtures, state)
+            return
 
         if parts and parts[0] == "captures":
             captures_mock.handle(self, "PUT", parts, query, fixtures, state)
@@ -1457,6 +1547,11 @@ class MockHandler(BaseHTTPRequestHandler):
             state = self.server.state  # type: ignore[attr-defined]
             if twitter_mock.handle(self, "POST", parts, self._query(), fixtures, state):
                 return
+
+        if parts and parts[0] == "recording":
+            state = self.server.state  # type: ignore[attr-defined]
+            reservations_mock.handle(self, "POST", parts, self._query(), fixtures, state)
+            return
 
         if parts and parts[0] == "captures":
             state = self.server.state  # type: ignore[attr-defined]
@@ -1533,6 +1628,10 @@ class MockHandler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:3] == ["users", "me", "account-links"]:
             if twitter_mock.handle(self, "DELETE", parts, self._query(), fixtures, state):
                 return
+
+        if parts and parts[0] == "recording":
+            reservations_mock.handle(self, "DELETE", parts, self._query(), fixtures, state)
+            return
 
         if parts and parts[0] == "captures":
             captures_mock.handle(self, "DELETE", parts, self._query(), fixtures, state)
