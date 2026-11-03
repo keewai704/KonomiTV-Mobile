@@ -2,7 +2,8 @@ import SwiftUI
 import KonomiKit
 
 /// Chooses between the first run setup flow and the main interface, and
-/// between a tab bar (compact widths) and a sidebar (regular widths).
+/// between a tab bar plus マイページ hub (compact widths) and a sidebar
+/// (regular widths).
 struct RootView: View {
     @Bindable var model: AppModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -69,24 +70,44 @@ struct RootView: View {
     // MARK: - Compact (iPhone, narrow windows)
 
     private var compactInterface: some View {
-        TabView(selection: $model.section) {
+        TabView(selection: compactTabSelection) {
             sectionStack(.live)
                 .tabItem { tabLabel(for: .live) }
-                .tag(AppSection.live)
+                .tag(CompactTab.live)
 
             sectionStack(.videos)
                 .tabItem { tabLabel(for: .videos) }
-                .tag(AppSection.videos)
+                .tag(CompactTab.videos)
 
-            sectionStack(.settings)
-                .tabItem { tabLabel(for: .settings) }
-                .tag(AppSection.settings)
+            mypageStack
+                .tabItem { tabLabel(for: .mypage) }
+                .tag(CompactTab.mypage)
         }
     }
 
-    private func tabLabel(for section: AppSection) -> some View {
-        Label(section.title, systemImage: section.systemImage)
-            .accessibilityIdentifier("tab.\(section.rawValue)")
+    /// Keeps the sidebar selection in sync with the tab bar, so switching
+    /// between compact and regular widths (rotation, Split View) stays on the
+    /// same section.
+    private var compactTabSelection: Binding<CompactTab> {
+        Binding(
+            get: { model.compactTab },
+            set: { newValue in
+                model.compactTab = newValue
+                switch newValue {
+                case .live:
+                    model.section = .live
+                case .videos:
+                    model.section = .videos
+                case .mypage:
+                    break
+                }
+            }
+        )
+    }
+
+    private func tabLabel(for tab: CompactTab) -> some View {
+        Label(tab.title, systemImage: tab.systemImage)
+            .accessibilityIdentifier("tab.\(tab.rawValue)")
     }
 
     // MARK: - Regular (iPad, Split View, Stage Manager)
@@ -129,28 +150,74 @@ struct RootView: View {
 
     /// Each section owns its navigation path on `AppModel`, so picture in
     /// picture restore can push the screen that owns the playback.
-    @ViewBuilder
     private func sectionStack(_ section: AppSection) -> some View {
+        NavigationStack(path: path(for: section)) {
+            root(for: section)
+                .navigationDestination(for: SectionRoute.self) { route in
+                    destination(for: route)
+                }
+        }
+    }
+
+    /// The compact マイページ tab: a hub that pushes the sections the tab bar
+    /// has no room for.
+    private var mypageStack: some View {
+        NavigationStack(path: $model.mypagePath) {
+            MyPageView()
+                .navigationDestination(for: SectionRoute.self) { route in
+                    destination(for: route)
+                }
+        }
+    }
+
+    private func path(for section: AppSection) -> Binding<[SectionRoute]> {
+        switch section {
+        case .live: return $model.livePath
+        case .timetable: return $model.timetablePath
+        case .videos: return $model.videosPath
+        case .mylist: return $model.mylistPath
+        case .history: return $model.historyPath
+        case .settings: return $model.settingsPath
+        }
+    }
+
+    @ViewBuilder
+    private func root(for section: AppSection) -> some View {
         switch section {
         case .live:
-            NavigationStack(path: $model.livePath) {
-                LiveChannelsView(model: model)
-                    .navigationDestination(for: LiveChannel.self) { channel in
-                        LivePlayerView(model: model, channel: channel)
-                    }
-            }
+            LiveChannelsView(model: model)
+        case .timetable:
+            TimeTableScreen(model: model)
         case .videos:
-            NavigationStack(path: $model.videosPath) {
-                VideosView(model: model)
-                    .navigationDestination(for: RecordedProgram.self) { video in
-                        VideoDetailView(model: model, video: video)
-                    }
-            }
+            VideosHomeView(model: model)
+        case .mylist:
+            MyListScreen(model: model)
+        case .history:
+            WatchedHistoryScreen(model: model)
         case .settings:
-            NavigationStack {
-                SettingsView(model: model)
-            }
+            SettingsView(model: model)
+        }
+    }
+
+    @ViewBuilder
+    private func destination(for route: SectionRoute) -> some View {
+        switch route {
+        case .live(let channel):
+            LivePlayerView(model: model, channel: channel)
+        case .video(let video):
+            VideoDetailView(model: model, video: video)
+        case .videoList:
+            VideoListView(model: model)
+        case .timetable:
+            TimeTableScreen(model: model)
+        case .mylist:
+            MyListScreen(model: model)
+        case .history:
+            WatchedHistoryScreen(model: model)
+        case .settings:
+            SettingsView(model: model)
+        case .pinnedChannels:
+            PinnedChannelsView(model: model)
         }
     }
 }
-

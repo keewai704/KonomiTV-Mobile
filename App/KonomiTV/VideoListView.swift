@@ -1,14 +1,34 @@
 import SwiftUI
-import UIKit
 import KonomiKit
 
-/// ビデオ: recorded program grid with paging and debounced search.
-struct VideosView: View {
+/// ビデオ: the full recorded program grid with sort order, paging and search.
+struct VideoListView: View {
     let model: AppModel
+
+    /// Sort order menu of the grid (新しい順 / 古い順).
+    enum SortOrder: String, CaseIterable, Hashable, Sendable {
+        case newest
+        case oldest
+
+        var title: String {
+            switch self {
+            case .newest: return "新しい順"
+            case .oldest: return "古い順"
+            }
+        }
+
+        var order: VideoListOrder {
+            switch self {
+            case .newest: return .desc
+            case .oldest: return .asc
+            }
+        }
+    }
 
     @State private var items: [RecordedProgram] = []
     @State private var total = 0
     @State private var page = 0
+    @State private var order: SortOrder = .newest
     @State private var isLoading = false
     @State private var isLoadingMore = false
     @State private var errorMessage: String?
@@ -17,18 +37,45 @@ struct VideosView: View {
 
     var body: some View {
         content
-            .navigationTitle("ビデオ")
+            .navigationTitle("録画番組")
             .searchable(
                 text: $query,
                 placement: .navigationBarDrawer(displayMode: .always),
                 prompt: "ビデオを検索"
             )
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    sortMenu
+                }
+            }
             .task(id: query) {
                 await handleQueryChange()
+            }
+            .onChange(of: order) { _, _ in
+                Task { await reload() }
             }
     }
 
     // MARK: - Views
+
+    private var sortMenu: some View {
+        Menu {
+            ForEach(SortOrder.allCases, id: \.self) { candidate in
+                Button {
+                    order = candidate
+                } label: {
+                    if candidate == order {
+                        Label(candidate.title, systemImage: "checkmark")
+                    } else {
+                        Text(candidate.title)
+                    }
+                }
+            }
+        } label: {
+            Label(order.title, systemImage: "arrow.up.arrow.down")
+        }
+        .accessibilityIdentifier("videos.sort")
+    }
 
     @ViewBuilder
     private var content: some View {
@@ -62,7 +109,7 @@ struct VideosView: View {
                 spacing: 16
             ) {
                 ForEach(items) { video in
-                    NavigationLink(value: video) {
+                    NavigationLink(value: SectionRoute.video(video)) {
                         VideoCard(
                             video: video,
                             thumbnailURL: model.client?.thumbnailURL(videoID: video.id)
@@ -105,9 +152,9 @@ struct VideosView: View {
 
     private func fetch(page: Int, client: APIClient) async throws -> RecordedPrograms {
         if appliedQuery.isEmpty {
-            return try await client.videos(page: page)
+            return try await client.videos(page: page, order: order.order)
         }
-        return try await client.searchVideos(query: appliedQuery, page: page)
+        return try await client.searchVideos(query: appliedQuery, page: page, order: order.order)
     }
 
     private func reload() async {
@@ -123,7 +170,7 @@ struct VideosView: View {
         do {
             let result = try await fetch(page: 1, client: client)
             guard !Task.isCancelled else { return }
-            items = result.recordedPrograms
+            items = result.recordedPrograms.filter { !model.isVideoDeleted(id: $0.id) }
             total = result.total
             page = 1
         } catch {
@@ -147,7 +194,9 @@ struct VideosView: View {
                 // Drop a page that belongs to a search the user has replaced.
                 guard !Task.isCancelled, requestedQuery == appliedQuery else { return }
                 let known = Set(items.map(\.id))
-                items.append(contentsOf: result.recordedPrograms.filter { !known.contains($0.id) })
+                items.append(
+                    contentsOf: result.recordedPrograms.filter { !known.contains($0.id) }
+                )
                 total = result.total
                 page = nextPage
             } catch {
@@ -155,62 +204,5 @@ struct VideosView: View {
                 // pull to refresh to retry.
             }
         }
-    }
-}
-
-/// One recorded program card: thumbnail, title, date and duration.
-struct VideoCard: View {
-    let video: RecordedProgram
-    let thumbnailURL: URL?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            thumbnail
-
-            Text(video.title)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: 6) {
-                Text(Formatters.dateTime(video.startTime))
-                Text("・")
-                Text(Formatters.duration(video.duration))
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-
-            if let channel = video.channel {
-                Text(channel.name)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private var thumbnail: some View {
-        Color.secondary.opacity(0.12)
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            .overlay {
-                AsyncImage(url: thumbnailURL) { phase in
-                    if let image = phase.image {
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } else if phase.error != nil {
-                        Image(systemName: "film")
-                            .font(.title2)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }

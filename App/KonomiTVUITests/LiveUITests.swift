@@ -4,7 +4,7 @@ import XCTest
 final class LiveUITests: KonomiTVUITestCase {
     func testLiveListShowsChannelsAndPickerSwitchesToBS() {
         let app = startApp()
-        navigate(to: .live, in: app)
+        openSection(.live, in: app)
 
         let picker = uiElement(app, "live.typePicker")
         XCTAssertTrue(picker.waitForExistence(timeout: TestTimeout.ui), "チャンネル種別ピッカーが表示されない")
@@ -24,7 +24,7 @@ final class LiveUITests: KonomiTVUITestCase {
 
     func testLivePlaybackReachesPlayingState() {
         let app = startApp()
-        navigate(to: .live, in: app)
+        openSection(.live, in: app)
 
         let channel = uiElement(app, "live.channel.gr011")
         XCTAssertTrue(channel.waitForExistence(timeout: TestTimeout.ui), "地上波チャンネルが表示されない")

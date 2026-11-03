@@ -903,5 +903,59 @@ class MockServerMutationTestCase(unittest.TestCase):
         self.assertIn(35, after["deleted_video_ids"])
 
 
+    # -- テスト用: リセット -------------------------------------------------
+
+    def test_mock_reset_restores_initial_state(self) -> None:
+        # 設定を更新し、録画番組を削除した状態を作る
+        status, _, data = self.request(
+            "GET", "/api/settings/client", headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 200)
+        settings = json.loads(data.decode("utf-8"))
+        settings["last_synced_at"] = 1800000000.0
+        settings["mylist"] = [{"type": "RecordedProgram", "id": 3, "created_at": 1800000000}]
+        status, _, _ = self.put_json(
+            "/api/settings/client", settings, headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 204)
+
+        status, _, _ = self.request(
+            "DELETE", "/api/videos/34", headers=ADMIN_HEADERS
+        )
+        self.assertEqual(status, 204)
+        status, _, _ = self.get_json("/api/videos/34")
+        self.assertEqual(status, 404)
+
+        before = self.stats()
+        self.assertGreaterEqual(before["settings_put_count"], 1)
+        self.assertIn(34, before["deleted_video_ids"])
+
+        # リセットするとフィクスチャ・設定・カウンターが初期状態に戻る
+        status, _, body = self.request("POST", "/__mock/reset")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body.decode("utf-8")), {"status": "ok"})
+
+        after = self.stats()
+        self.assertEqual(after["settings_put_count"], 0)
+        self.assertEqual(after["video_delete_count"], 0)
+        self.assertEqual(after["deleted_video_ids"], [])
+        self.assertEqual(after["keepalive"], {})
+        self.assertEqual(after["live_total"], 0)
+
+        status, _, payload = self.get_json("/api/settings/client", headers=ADMIN_HEADERS)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["last_synced_at"], 0)
+        self.assertEqual(payload["mylist"], [])
+
+        status, _, program = self.get_json("/api/videos/34")
+        self.assertEqual(status, 200)
+        self.assertEqual(program["id"], 34)
+
+        # リセット後も通常の API は動き続ける
+        status, _, payload = self.get_json("/api/videos?order=desc&page=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["total"], 35)
+
+
 if __name__ == "__main__":
     unittest.main()

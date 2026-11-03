@@ -1,13 +1,13 @@
 import XCTest
 
-/// ビデオ: grid paging, search, detail and playback.
+/// ビデオ: home sections, the recorded program grid (paging and search) and
+/// playback.
 final class VideosUITests: KonomiTVUITestCase {
     func testVideosGridLoadsSecondPageWhenScrolled() {
         let app = startApp()
-        navigate(to: .videos, in: app)
+        openVideoGrid(in: app)
 
         let grid = uiElement(app, "videos.grid")
-        XCTAssertTrue(grid.waitForExistence(timeout: TestTimeout.ui), "ビデオ一覧が表示されない")
         let firstItem = uiElement(app, "videos.item.1")
         XCTAssertTrue(firstItem.waitForExistence(timeout: TestTimeout.ui), "先頭のビデオが表示されない")
 
@@ -21,10 +21,7 @@ final class VideosUITests: KonomiTVUITestCase {
 
     func testSearchNarrowsResults() {
         let app = startApp()
-        navigate(to: .videos, in: app)
-
-        let grid = uiElement(app, "videos.grid")
-        XCTAssertTrue(grid.waitForExistence(timeout: TestTimeout.ui), "ビデオ一覧が表示されない")
+        openVideoGrid(in: app)
 
         let match = uiElement(app, "videos.item.1") // ニュース7
         let nonMatch = uiElement(app, "videos.item.2") // ニュースウオッチ9
@@ -48,9 +45,9 @@ final class VideosUITests: KonomiTVUITestCase {
 
     func testVideoDetailShowsTitleAndPlaybackStarts() {
         let app = startApp()
-        navigate(to: .videos, in: app)
+        openSection(.videos, in: app)
 
-        let item = uiElement(app, "videos.item.1")
+        let item = uiElement(app, "videos.recent.1")
         XCTAssertTrue(item.waitForExistence(timeout: TestTimeout.ui), "先頭のビデオが表示されない")
         item.tap()
 
@@ -66,6 +63,20 @@ final class VideosUITests: KonomiTVUITestCase {
         XCTAssertTrue(
             waitForLabel(state, equals: "playing", timeout: TestTimeout.playback),
             "ビデオ再生が playing にならない (現在: \(state.label) / \(state.value as? String ?? ""))"
+        )
+    }
+
+    /// Opens the videos home and pushes the full grid with もっと見る.
+    private func openVideoGrid(in app: XCUIApplication) {
+        openSection(.videos, in: app)
+
+        let more = uiElement(app, "videos.more.recent")
+        XCTAssertTrue(more.waitForExistence(timeout: TestTimeout.ui), "もっと見るが表示されない")
+        more.tap()
+
+        XCTAssertTrue(
+            uiElement(app, "videos.grid").waitForExistence(timeout: TestTimeout.ui),
+            "録画番組一覧が表示されない"
         )
     }
 }

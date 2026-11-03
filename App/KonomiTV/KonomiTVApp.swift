@@ -11,6 +11,9 @@ struct LaunchOptions: Sendable {
     /// UI tests that check background playback without picture in picture pass
     /// `-UITestingDisableAutoPiP`.
     let disablesAutomaticPictureInPicture: Bool
+    /// Shortens the watch history threshold (30 s) to a couple of seconds so a
+    /// UI test does not have to keep a video playing for half a minute.
+    let usesShortWatchedHistoryThreshold: Bool
 
     init(
         arguments: [String] = ProcessInfo.processInfo.arguments,
@@ -19,6 +22,7 @@ struct LaunchOptions: Sendable {
         self.isUITesting = arguments.contains("-UITesting")
         self.showsSetup = arguments.contains("-UITestingShowSetup")
         self.disablesAutomaticPictureInPicture = arguments.contains("-UITestingDisableAutoPiP")
+        self.usesShortWatchedHistoryThreshold = arguments.contains("-UITestingShortHistoryThreshold")
 
         if let raw = environment["KONOMITV_SERVER_URL"]?.trimmingCharacters(in: .whitespacesAndNewlines),
            !raw.isEmpty,
@@ -40,6 +44,8 @@ struct LaunchOptions: Sendable {
             defaults.removeObject(forKey: PreferenceKeys.serverURL)
             defaults.removeObject(forKey: PreferenceKeys.liveQuality)
             defaults.removeObject(forKey: PreferenceKeys.videoQuality)
+            defaults.removeObject(forKey: PreferenceKeys.clientSettings)
+            defaults.removeObject(forKey: PreferenceKeys.syncSettings)
             KeychainStore.delete(account: KeychainStore.tokenAccount)
         }
 

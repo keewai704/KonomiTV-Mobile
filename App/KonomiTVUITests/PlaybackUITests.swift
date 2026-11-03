@@ -81,7 +81,7 @@ final class PlaybackUITests: KonomiTVUITestCase {
 
         // PiP 中は画面を離れても再生が続くことを確認する。
         let beforeLeaving = position(in: app)
-        tapBack(in: app)
+        navigateBack(in: app)
         waitSeconds(3)
 
         guard label(of: "playback.pip", in: app) == "active" else {
@@ -111,7 +111,7 @@ final class PlaybackUITests: KonomiTVUITestCase {
         let app = startApp(disableAutoPiP: true)
         openVideo(in: app)
 
-        tapBack(in: app)
+        navigateBack(in: app)
 
         let state = uiElement(app, "playback.state")
         XCTAssertTrue(
@@ -123,9 +123,9 @@ final class PlaybackUITests: KonomiTVUITestCase {
     // MARK: - Helpers
 
     private func openVideo(in app: XCUIApplication) {
-        navigate(to: .videos, in: app)
+        openSection(.videos, in: app)
 
-        let item = uiElement(app, "videos.item.1")
+        let item = uiElement(app, "videos.recent.1")
         XCTAssertTrue(item.waitForExistence(timeout: TestTimeout.ui), "先頭のビデオが表示されない")
         item.tap()
 
@@ -133,7 +133,7 @@ final class PlaybackUITests: KonomiTVUITestCase {
     }
 
     private func openLive(in app: XCUIApplication) {
-        navigate(to: .live, in: app)
+        openSection(.live, in: app)
 
         let channel = uiElement(app, "live.channel.gr011")
         XCTAssertTrue(channel.waitForExistence(timeout: TestTimeout.ui), "地上波チャンネルが表示されない")
@@ -178,18 +178,4 @@ final class PlaybackUITests: KonomiTVUITestCase {
             (intLabel(of: "playback.position", in: app) ?? -1) >= minimum
         }
     }
-
-    /// Taps the navigation bar back button (compact and regular widths).
-    private func tapBack(in app: XCUIApplication) {
-        let identified = app.navigationBars.buttons.matching(identifier: "BackButton").firstMatch
-        if identified.waitForExistence(timeout: 3), identified.isHittable {
-            identified.tap()
-            return
-        }
-
-        let fallback = app.navigationBars.buttons.element(boundBy: 0)
-        XCTAssertTrue(fallback.waitForExistence(timeout: TestTimeout.ui), "戻るボタンが表示されない")
-        fallback.tap()
-    }
 }
-

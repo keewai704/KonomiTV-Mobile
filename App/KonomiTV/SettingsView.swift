@@ -1,7 +1,8 @@
 import SwiftUI
 import KonomiKit
 
-/// 設定: server, playback quality, optional login and server information.
+/// 設定: server, playback quality, account, client settings and server
+/// information.
 struct SettingsView: View {
     let model: AppModel
 
@@ -21,6 +22,9 @@ struct SettingsView: View {
             serverSection
             qualitySection
             accountSection
+            televisionSection
+            timetableSection
+            historySection
             informationSection
         }
         .navigationTitle("設定")
@@ -100,6 +104,10 @@ struct SettingsView: View {
                 if user.isAdmin {
                     LabeledContent("権限", value: "管理者")
                 }
+
+                Toggle("設定をデバイス間で同期する", isOn: syncSettingsBinding)
+                    .accessibilityIdentifier("settings.syncSettings")
+
                 Button("ログアウト", role: .destructive) {
                     logout()
                 }
@@ -134,6 +142,46 @@ struct SettingsView: View {
         }
     }
 
+    private var televisionSection: some View {
+        Section("テレビ") {
+            Toggle(
+                "チャンネル一覧を実況勢いが強い順に並び替える",
+                isOn: sortByJikkyoForceBinding
+            )
+            .accessibilityIdentifier("settings.sortByJikkyoForce")
+
+            NavigationLink(value: SectionRoute.pinnedChannels) {
+                LabeledContent("ピン留めチャンネル", value: pinnedChannelCountText)
+            }
+            .accessibilityIdentifier("settings.pinnedChannels")
+        }
+    }
+
+    private var timetableSection: some View {
+        Section("番組表") {
+            Toggle(
+                "ショッピング・通販番組を控えめに表示する",
+                isOn: dimShoppingProgramsBinding
+            )
+            .accessibilityIdentifier("settings.dimShoppingPrograms")
+
+            Toggle("時刻を 28 時間表記で表示する", isOn: use28HourClockBinding)
+                .accessibilityIdentifier("settings.use28HourClock")
+        }
+    }
+
+    private var historySection: some View {
+        Section("視聴履歴") {
+            Stepper(value: watchedHistoryMaxCountBinding, in: 1...100) {
+                LabeledContent(
+                    "保持件数",
+                    value: "\(model.settings.videoWatchedHistoryMaxCount)件"
+                )
+            }
+            .accessibilityIdentifier("settings.historyMaxCount")
+        }
+    }
+
     @ViewBuilder
     private var informationSection: some View {
         if let version = model.version {
@@ -144,6 +192,64 @@ struct SettingsView: View {
                 LabeledContent("エンコーダー", value: version.encoder)
             }
         }
+    }
+
+    // MARK: - Bindings
+
+    private var syncSettingsBinding: Binding<Bool> {
+        Binding(
+            get: { model.syncSettings },
+            set: { model.setSyncSettings($0) }
+        )
+    }
+
+    private var sortByJikkyoForceBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.tvChannelSortByJikkyoForce },
+            set: { newValue in
+                model.mutateSettings { settings in
+                    settings.tvChannelSortByJikkyoForce = newValue
+                }
+            }
+        )
+    }
+
+    private var dimShoppingProgramsBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.timetableDimShoppingPrograms },
+            set: { newValue in
+                model.mutateSettings { settings in
+                    settings.timetableDimShoppingPrograms = newValue
+                }
+            }
+        )
+    }
+
+    private var use28HourClockBinding: Binding<Bool> {
+        Binding(
+            get: { model.settings.use28HourClock },
+            set: { newValue in
+                model.mutateSettings { settings in
+                    settings.use28HourClock = newValue
+                }
+            }
+        )
+    }
+
+    private var watchedHistoryMaxCountBinding: Binding<Int> {
+        Binding(
+            get: { model.settings.videoWatchedHistoryMaxCount },
+            set: { newValue in
+                model.mutateSettings { settings in
+                    settings.videoWatchedHistoryMaxCount = min(max(newValue, 1), 100)
+                }
+            }
+        )
+    }
+
+    private var pinnedChannelCountText: String {
+        let count = model.settings.pinnedChannelIDs.count
+        return count == 0 ? "なし" : "\(count)件"
     }
 
     // MARK: - Actions
@@ -189,5 +295,58 @@ struct SettingsView: View {
         username = ""
         password = ""
         loginError = nil
+    }
+}
+
+/// ピン留めチャンネル: reorder and remove the pinned channels.
+struct PinnedChannelsView: View {
+    let model: AppModel
+
+    @State private var channels: LiveChannels?
+
+    var body: some View {
+        List {
+            ForEach(rows) { row in
+                Text(row.name)
+                    .accessibilityIdentifier("settings.pinnedChannel.\(row.id)")
+            }
+            .onMove { source, destination in
+                model.movePinnedChannels(fromOffsets: source, toOffset: destination)
+            }
+            .onDelete { offsets in
+                let ids = rows.map(\.id)
+                for index in offsets where ids.indices.contains(index) {
+                    model.removePinnedChannel(id: ids[index])
+                }
+            }
+
+            if rows.isEmpty {
+                Text("ピン留め中のチャンネルはありません")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("ピン留めチャンネル")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                EditButton()
+            }
+        }
+        .task {
+            guard let client = model.client else { return }
+            channels = try? await client.channels()
+        }
+    }
+
+    private struct Row: Identifiable {
+        let id: String
+        let name: String
+    }
+
+    private var rows: [Row] {
+        let all = channels?.allChannels ?? []
+        return model.settings.pinnedChannelIDs.map { id in
+            let channel = all.first { $0.id == id } ?? all.first { $0.displayChannelID == id }
+            return Row(id: id, name: channel?.name ?? id)
+        }
     }
 }

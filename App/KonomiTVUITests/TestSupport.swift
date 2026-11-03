@@ -10,21 +10,45 @@ enum TestTimeout {
     static let playback: TimeInterval = 45
 }
 
+/// A section of the app, reachable from the sidebar (regular width) or from the
+/// tab bar plus the マイページ hub (compact width).
 enum TestSection: String, CaseIterable {
     case live
+    case timetable
     case videos
+    case mylist
+    case history
     case settings
 
     var title: String {
         switch self {
         case .live: return "テレビ"
+        case .timetable: return "番組表"
         case .videos: return "ビデオ"
+        case .mylist: return "マイリスト"
+        case .history: return "視聴履歴"
         case .settings: return "設定"
         }
     }
 
-    var tabIndex: Int {
-        Self.allCases.firstIndex(of: self) ?? 0
+    /// Compact width tab that contains the section.
+    var compactTab: String {
+        switch self {
+        case .live: return "live"
+        case .videos: return "videos"
+        case .timetable, .mylist, .history, .settings: return "mypage"
+        }
+    }
+
+    /// マイページ row of the section, when it is not a tab of its own.
+    var mypageRowIdentifier: String? {
+        switch self {
+        case .timetable: return "mypage.timetable"
+        case .mylist: return "mypage.mylist"
+        case .history: return "mypage.history"
+        case .settings: return "mypage.settings"
+        case .live, .videos: return nil
+        }
     }
 }
 
@@ -32,11 +56,66 @@ enum TestEnvironment {
     static let defaultServerURL = "http://127.0.0.1:7010"
 
     /// The mock server URL provided by the test runner (CI sets
-    /// `TEST_RUNNER_KONOMITV_SERVER_URL`), falling back to the local default.
+    /// `TEST_RUNNER_KONOMITV_SERVER_URL`; the `TEST_RUNNER_` prefix is stripped
+    /// for the app under test), falling back to the local default.
     static var serverURL: String {
-        let raw = ProcessInfo.processInfo.environment["KONOMITV_SERVER_URL"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let environment = ProcessInfo.processInfo.environment
+        let raw = (environment["KONOMITV_SERVER_URL"]
+            ?? environment["TEST_RUNNER_KONOMITV_SERVER_URL"]
+            ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return raw.isEmpty ? defaultServerURL : raw
+    }
+}
+
+// MARK: - Mock server
+
+/// Blocking access to the mock server's test endpoints.
+enum MockServerControl {
+    static var baseURL: URL {
+        URL(string: TestEnvironment.serverURL)
+            ?? URL(string: TestEnvironment.defaultServerURL)!
+    }
+
+    /// `POST /__mock/reset`: restores the fixtures, the client settings and the
+    /// counters, so every test starts from the same state.
+    @discardableResult
+    static func reset() -> Int {
+        var request = URLRequest(url: baseURL.appendingPathComponent("__mock/reset"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        return perform(request).status
+    }
+
+    /// `GET /__mock/stats`.
+    static func stats() -> [String: Any] {
+        var request = URLRequest(url: baseURL.appendingPathComponent("__mock/stats"))
+        request.timeoutInterval = 10
+        return perform(request).json ?? [:]
+    }
+
+    static func intValue(_ key: String) -> Int {
+        guard let value = stats()[key] else { return 0 }
+        if let number = value as? NSNumber { return number.intValue }
+        if let intValue = value as? Int { return intValue }
+        return 0
+    }
+
+    private static func perform(_ request: URLRequest) -> (status: Int, json: [String: Any]?) {
+        let semaphore = DispatchSemaphore(value: 0)
+        var status = -1
+        var json: [String: Any]?
+
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            if let data, let object = try? JSONSerialization.jsonObject(with: data) {
+                json = object as? [String: Any]
+            }
+            semaphore.signal()
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 15)
+        return (status, json)
     }
 }
 
@@ -48,7 +127,11 @@ enum TestEnvironment {
 /// `KONOMITV_SERVER_URL` launch environment value configures the saved server
 /// unless `-UITestingShowSetup` forces the first-run screen.
 @MainActor
-func launchApp(showSetup: Bool = false, disableAutoPiP: Bool = false) -> XCUIApplication {
+func launchApp(
+    showSetup: Bool = false,
+    disableAutoPiP: Bool = false,
+    shortHistoryThreshold: Bool = false
+) -> XCUIApplication {
     let app = XCUIApplication()
     app.launchArguments = ["-UITesting"]
     if showSetup {
@@ -59,13 +142,17 @@ func launchApp(showSetup: Bool = false, disableAutoPiP: Bool = false) -> XCUIApp
         // own, without picture in picture taking over the player.
         app.launchArguments.append("-UITestingDisableAutoPiP")
     }
+    if shortHistoryThreshold {
+        // Adds the watch history after 2 s instead of 30 s of playback.
+        app.launchArguments.append("-UITestingShortHistoryThreshold")
+    }
     app.launchEnvironment["KONOMITV_SERVER_URL"] = TestEnvironment.serverURL
     app.launch()
     return app
 }
 
-/// Base class for all UI tests: fails fast, and attaches a screenshot to the
-/// test result whenever a test fails.
+/// Base class for all UI tests: resets the mock server and fails fast, and
+/// attaches a screenshot to the test result whenever a test fails.
 @MainActor
 class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
     private(set) var app: XCUIApplication?
@@ -73,6 +160,9 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
     override func setUp() async throws {
         try await super.setUp()
         continueAfterFailure = false
+        // Every test starts from the mock server's initial state (settings,
+        // deleted recordings and counters).
+        XCTAssertEqual(MockServerControl.reset(), 200, "モックサーバーをリセットできない")
     }
 
     override func tearDown() async throws {
@@ -83,13 +173,38 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
 
     /// Launches the app and remembers it so `tearDown` can capture failures.
     @discardableResult
-    func startApp(showSetup: Bool = false, disableAutoPiP: Bool = false) -> XCUIApplication {
+    func startApp(
+        showSetup: Bool = false,
+        disableAutoPiP: Bool = false,
+        shortHistoryThreshold: Bool = false
+    ) -> XCUIApplication {
         // Also set here so fast-fail behavior does not depend on the
         // test runner invoking the async setUp override.
         continueAfterFailure = false
-        let application = launchApp(showSetup: showSetup, disableAutoPiP: disableAutoPiP)
+        let application = launchApp(
+            showSetup: showSetup,
+            disableAutoPiP: disableAutoPiP,
+            shortHistoryThreshold: shortHistoryThreshold
+        )
         app = application
         return application
+    }
+
+    /// Logs in with the mock account (test / test).
+    func login(in app: XCUIApplication) {
+        let username = uiElement(app, "settings.username")
+        XCTAssertTrue(username.waitForExistence(timeout: TestTimeout.ui), "ユーザー名欄が表示されない")
+        replaceText(in: username, with: "test", in: app)
+
+        let password = uiElement(app, "settings.password")
+        replaceText(in: password, with: "test", in: app)
+
+        tapWhenHittable(uiElement(app, "settings.loginButton"), in: app)
+
+        XCTAssertTrue(
+            uiElement(app, "settings.userName").waitForExistence(timeout: TestTimeout.ui),
+            "ログイン後にユーザー名が表示されない"
+        )
     }
 
     private func attachFailureScreenshot() {
@@ -222,39 +337,64 @@ func mainNavigationExists(in app: XCUIApplication, timeout: TimeInterval = TestT
 
 // MARK: - Navigation and interaction
 
-/// Selects a top-level section, using the tab bar on compact widths and the
-/// sidebar on regular widths. Falls back to positional tab taps when the
-/// per-tab accessibility identifiers are not exposed by the tab bar.
+/// Opens a section on both layouts: the sidebar row on regular widths, the tab
+/// (plus a マイページ row for the sections without a tab) on compact widths.
 @MainActor
-func navigate(to section: TestSection, in app: XCUIApplication, timeout: TimeInterval = TestTimeout.ui) {
-    let tabBar = app.tabBars.firstMatch
-    let tabItem = uiElement(app, "tab.\(section.rawValue)")
-    let sidebarRow = uiElement(app, "sidebar.\(section.rawValue)")
-
-    let ready = waitUntil(timeout: timeout) {
-        if tabBar.exists {
-            return tabItem.exists || tabBar.buttons.count > section.tabIndex
-        }
-        return sidebarRow.exists
+func openSection(
+    _ section: TestSection,
+    in app: XCUIApplication,
+    timeout: TimeInterval = TestTimeout.ui
+) {
+    let navigationReady = waitUntil(timeout: timeout) {
+        uiElement(app, "sidebar").exists
+            || app.tabBars.firstMatch.exists
+            || uiElement(app, "tab.live").exists
     }
-    XCTAssertTrue(ready, "セクション「\(section.title)」へのナビゲーションが見つからない")
+    XCTAssertTrue(navigationReady, "ナビゲーションが表示されない")
 
-    if tabBar.exists, tabItem.exists {
-        tabItem.tap()
+    if isRegularLayout(app, timeout: timeout) {
+        let row = uiElement(app, "sidebar.\(section.rawValue)")
+        XCTAssertTrue(
+            row.waitForExistence(timeout: timeout),
+            "サイドバーの「\(section.title)」が見つからない"
+        )
+        row.tap()
         return
     }
-    if sidebarRow.exists {
-        sidebarRow.tap()
+
+    let tab = uiElement(app, "tab.\(section.compactTab)")
+    XCTAssertTrue(
+        tab.waitForExistence(timeout: timeout),
+        "タブ「\(section.compactTab)」が見つからない"
+    )
+    tab.tap()
+
+    guard let rowIdentifier = section.mypageRowIdentifier else { return }
+
+    let row = uiElement(app, rowIdentifier)
+    if !row.waitForExistence(timeout: 3) {
+        // 別の画面を開いたままのマイページは、タブを選び直すと先頭に戻る。
+        tab.tap()
+    }
+    XCTAssertTrue(
+        row.waitForExistence(timeout: timeout),
+        "マイページの「\(section.title)」が見つからない"
+    )
+    row.tap()
+}
+
+/// Taps the navigation bar back button (compact and regular widths).
+@MainActor
+func navigateBack(in app: XCUIApplication, timeout: TimeInterval = TestTimeout.ui) {
+    let identified = app.navigationBars.buttons.matching(identifier: "BackButton").firstMatch
+    if identified.waitForExistence(timeout: 3), identified.isHittable {
+        identified.tap()
         return
     }
-    if tabBar.exists {
-        let button = tabBar.buttons.element(boundBy: section.tabIndex)
-        if button.exists {
-            button.tap()
-            return
-        }
-    }
-    XCTFail("セクション「\(section.title)」を選択できない")
+
+    let fallback = app.navigationBars.buttons.element(boundBy: 0)
+    XCTAssertTrue(fallback.waitForExistence(timeout: timeout), "戻るボタンが表示されない")
+    fallback.tap()
 }
 
 /// Taps a segment of the live channel-type picker (e.g. "BS").

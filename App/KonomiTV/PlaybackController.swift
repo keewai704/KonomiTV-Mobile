@@ -53,6 +53,16 @@ final class PlaybackController {
     /// AppModel uses it to select the section and push the matching screen.
     @ObservationIgnored var onRestore: (@MainActor (PlaybackItem) -> Void)?
 
+    /// Called for every position tick of a recorded program, so AppModel can
+    /// keep the watch history up to date.
+    @ObservationIgnored var onVideoProgress: (@MainActor (RecordedProgram, Double) -> Void)?
+
+    /// Called when playback stops, with the position it stopped at.
+    @ObservationIgnored var onVideoPlaybackStopped: (@MainActor (RecordedProgram, Double) -> Void)?
+
+    /// Position to seek to once the recorded program's item is ready.
+    @ObservationIgnored private var pendingStartPosition: Double = 0
+
     /// Shared player view controller. Created once and reused by every player
     /// screen so that PiP survives navigation inside the app.
     let playerViewController = AVPlayerViewController()
@@ -113,7 +123,14 @@ final class PlaybackController {
     ///
     /// Reuses the running player when the same item is requested again, which
     /// is what makes returning to the screen during PiP seamless.
-    func play(_ playbackItem: PlaybackItem, client: APIClient, quality: StreamQuality) {
+    /// - Parameter startAt: position (seconds) playback should start at, used
+    ///   to resume a recorded program from the watch history.
+    func play(
+        _ playbackItem: PlaybackItem,
+        client: APIClient,
+        quality: StreamQuality,
+        startAt: Double = 0
+    ) {
         if let current = item, current == playbackItem, player != nil || liveSession != nil {
             return
         }
@@ -132,7 +149,7 @@ final class PlaybackController {
 
         switch playbackItem {
         case .video(let video):
-            startVideo(video, client: client, quality: quality)
+            startVideo(video, client: client, quality: quality, startAt: startAt)
         case .live(let channel):
             startLive(channel, client: client, quality: quality)
         }
@@ -165,6 +182,12 @@ final class PlaybackController {
 
     /// Stops playback and releases every observer, task and session.
     func stop() {
+        // Store the final position of the recorded program that is stopping.
+        if case .video(let video)? = item {
+            onVideoPlaybackStopped?(video, Double(positionSeconds))
+        }
+
+        pendingStartPosition = 0
         keepAliveTask?.cancel()
         keepAliveTask = nil
 
@@ -246,7 +269,12 @@ final class PlaybackController {
 
     // MARK: - Video
 
-    private func startVideo(_ video: RecordedProgram, client: APIClient, quality: StreamQuality) {
+    private func startVideo(
+        _ video: RecordedProgram,
+        client: APIClient,
+        quality: StreamQuality,
+        startAt: Double
+    ) {
         let sessionID = String(UUID().uuidString.prefix(8)).lowercased()
         let url = client.videoPlaylistURL(
             videoID: video.id,
@@ -258,6 +286,9 @@ final class PlaybackController {
         let newPlayer = AVPlayer(playerItem: playerItem)
         configure(newPlayer, item: .video(video))
         attach(newPlayer)
+        // Resuming from the watch history: seeking before the item is ready
+        // can be ignored, so refreshState() seeks once it is.
+        pendingStartPosition = startAt
         newPlayer.play()
 
         startKeepAlive(client: client, videoID: video.id, quality: quality, sessionID: sessionID)
@@ -403,9 +434,23 @@ final class PlaybackController {
         guard seconds.isFinite else { return }
         let position = Int(seconds)
         positionSeconds = position > 0 ? position : 0
+
+        if case .video(let video)? = item {
+            onVideoProgress?(video, seconds > 0 ? seconds : 0)
+        }
     }
 
     private func refreshState() {
+        if pendingStartPosition > 0, let player, player.currentItem?.status == .readyToPlay {
+            let position = pendingStartPosition
+            pendingStartPosition = 0
+            player.seek(
+                to: CMTime(seconds: position, preferredTimescale: 600),
+                toleranceBefore: CMTime(seconds: 1, preferredTimescale: 600),
+                toleranceAfter: CMTime(seconds: 1, preferredTimescale: 600)
+            )
+        }
+
         // Late callbacks may arrive after stop(); keep the last state.
         guard let player else { return }
 

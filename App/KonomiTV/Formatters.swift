@@ -38,6 +38,23 @@ enum Formatters {
         return "\(total)秒"
     }
 
+    /// `1000001000` → `953.67 MB`.
+    static func bytes(_ value: Int?) -> String {
+        guard let value, value > 0 else { return "不明" }
+
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var amount = Double(value)
+        var index = 0
+        while amount >= 1024, index < units.count - 1 {
+            amount /= 1024
+            index += 1
+        }
+        if index == 0 {
+            return "\(Int(amount)) \(units[index])"
+        }
+        return String(format: "%.2f %@", amount, units[index])
+    }
+
     /// `0.42` → `42%`.
     static func percent(_ progress: Double) -> String {
         let clamped = min(max(progress, 0), 1)

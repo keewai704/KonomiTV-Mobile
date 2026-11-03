@@ -691,6 +691,11 @@ class MockHandler(BaseHTTPRequestHandler):
             if split.path.startswith("/api") else []
         fixtures = self.server.fixtures  # type: ignore[attr-defined]
 
+        # UI テスト用: 初期状態 (フィクスチャとカウンター) に戻す
+        if split.path == "/__mock/reset":
+            self._handle_mock_reset()
+            return
+
         if parts == ["users", "token"]:
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length > 0 else b""
@@ -773,7 +778,24 @@ class MockHandler(BaseHTTPRequestHandler):
 
         self._not_found()
 
-    # -- 各エンドポイント --------------------------------------------------
+    # -- テスト用エンドポイント --------------------------------------------
+
+    def _handle_mock_reset(self) -> None:
+        """Restore the fixtures and the counters to their initial state.
+
+        Used by the UI tests (``POST /__mock/reset`` in ``setUp``) so tests
+        that delete recorded programs or change the client settings do not
+        leak into each other.
+        """
+        server = self.server
+        fixtures = load_fixtures()
+        server.fixtures = fixtures  # type: ignore[attr-defined]
+        server.state = MockServerState(  # type: ignore[attr-defined]
+            fixtures["client_settings_default"]
+        )
+        self._send_json({"status": "ok"})
+
+    # -- 各エンドポイント (API) ----------------------------------------------
 
     def _serve_channel_logo(self, channel_id: str, fixtures: dict) -> None:
         channels = fixtures["channels"]

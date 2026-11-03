@@ -1,8 +1,9 @@
 import UIKit
 import XCTest
 
-/// Adaptive navigation: sidebar for regular widths (iPad), tab bar for
-/// compact widths (iPhone), and rotation on iPhone keeps the selection.
+/// Adaptive navigation: sidebar for regular widths (iPad), tab bar plus the
+/// マイページ hub for compact widths (iPhone), and rotation on iPhone keeps the
+/// selection.
 final class LayoutUITests: KonomiTVUITestCase {
     func testAdaptiveNavigationMatchesWindowSize() {
         let app = startApp()
@@ -22,19 +23,30 @@ final class LayoutUITests: KonomiTVUITestCase {
             XCTAssertFalse(liveTab.exists, "レギュラー幅ではタブ項目を表示しない")
             XCTAssertFalse(tabBar.exists, "レギュラー幅ではタブバーを表示しない")
 
-            navigate(to: .videos, in: app)
+            openSection(.videos, in: app)
             XCTAssertTrue(
-                uiElement(app, "videos.grid").waitForExistence(timeout: TestTimeout.ui),
+                uiElement(app, "videos.home").waitForExistence(timeout: TestTimeout.ui),
                 "サイドバーからビデオ画面へ移動できない"
+            )
+            XCTAssertTrue(
+                uiElement(app, "sidebar.settings").exists,
+                "サイドバーに設定がない"
             )
             XCTAssertFalse(tabBar.exists, "レギュラー幅ではタブバーを表示しない")
         } else {
             XCTAssertTrue(tabBar.waitForExistence(timeout: TestTimeout.ui), "コンパクト幅ではタブバーを表示する")
+            XCTAssertTrue(uiElement(app, "tab.mypage").exists, "コンパクト幅ではマイページタブを表示する")
 
-            navigate(to: .videos, in: app)
+            openSection(.videos, in: app)
             XCTAssertTrue(
-                uiElement(app, "videos.grid").waitForExistence(timeout: TestTimeout.ui),
+                uiElement(app, "videos.home").waitForExistence(timeout: TestTimeout.ui),
                 "タブからビデオ画面へ移動できない"
+            )
+
+            openSection(.settings, in: app)
+            XCTAssertTrue(
+                uiElement(app, "settings.serverURL").waitForExistence(timeout: TestTimeout.ui),
+                "マイページから設定画面へ移動できない"
             )
         }
     }
@@ -44,15 +56,15 @@ final class LayoutUITests: KonomiTVUITestCase {
         let regularLayout = isRegularLayout(app)
         try XCTSkipIf(regularLayout, "レギュラー幅 (iPad) では回転テストをスキップする")
 
-        navigate(to: .videos, in: app)
+        openSection(.videos, in: app)
         XCTAssertTrue(
-            uiElement(app, "videos.grid").waitForExistence(timeout: TestTimeout.ui),
+            uiElement(app, "videos.home").waitForExistence(timeout: TestTimeout.ui),
             "ビデオ画面が表示されない"
         )
 
         rotate(.landscapeLeft, in: app)
         XCTAssertTrue(
-            uiElement(app, "videos.grid").waitForExistence(timeout: TestTimeout.ui),
+            uiElement(app, "videos.home").waitForExistence(timeout: TestTimeout.ui),
             "横向きにした後でビデオ画面が失われた"
         )
         XCTAssertTrue(
@@ -64,7 +76,7 @@ final class LayoutUITests: KonomiTVUITestCase {
 
         rotate(.portrait, in: app)
         XCTAssertTrue(
-            uiElement(app, "videos.grid").waitForExistence(timeout: TestTimeout.ui),
+            uiElement(app, "videos.home").waitForExistence(timeout: TestTimeout.ui),
             "縦向きに戻した後でビデオ画面が失われた"
         )
         XCTAssertTrue(
