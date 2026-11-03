@@ -465,37 +465,31 @@ final class PlaybackController {
 
 /// Forwards AVPlayerViewController PiP callbacks to the controller.
 ///
-/// The class is main-actor isolated; the protocol requirements are treated as
-/// nonisolated here (the SDK does not promise isolation), so each witness
-/// asserts the main actor and forwards. AVKit calls them on the main thread.
+/// AVKit calls these on the main thread. The `@preconcurrency` conformance
+/// lets the main-actor isolated methods witness the protocol requirements
+/// (with a runtime isolation check) without sending the non-Sendable
+/// completion handler across isolation domains.
 @MainActor
-final class PlayerViewControllerDelegate: NSObject, AVPlayerViewControllerDelegate {
+final class PlayerViewControllerDelegate: NSObject, @preconcurrency AVPlayerViewControllerDelegate {
     weak var owner: PlaybackController?
 
-    nonisolated func playerViewControllerDidStartPictureInPicture(
+    func playerViewControllerDidStartPictureInPicture(
         _ playerViewController: AVPlayerViewController
     ) {
-        MainActor.assumeIsolated {
-            owner?.pictureInPictureDidStart()
-        }
+        owner?.pictureInPictureDidStart()
     }
 
-    nonisolated func playerViewControllerDidStopPictureInPicture(
+    func playerViewControllerDidStopPictureInPicture(
         _ playerViewController: AVPlayerViewController
     ) {
-        MainActor.assumeIsolated {
-            owner?.pictureInPictureDidStop()
-        }
+        owner?.pictureInPictureDidStop()
     }
 
-    nonisolated func playerViewController(
+    func playerViewController(
         _ playerViewController: AVPlayerViewController,
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
-        MainActor.assumeIsolated {
-            owner?.restoreFromPictureInPicture()
-            completionHandler(true)
-        }
+        owner?.restoreFromPictureInPicture()
+        completionHandler(true)
     }
 }
-
