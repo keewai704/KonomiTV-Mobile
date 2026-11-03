@@ -573,20 +573,6 @@ final class AppModel {
         }
     }
 
-    /// Switches the live channel of the screen that is currently on top of the
-    /// live stack, so picture-in-picture restore and back navigation keep
-    /// pointing at the new channel.
-    func switchLiveChannel(_ channel: LiveChannel) {
-        if let index = livePath.lastIndex(where: { route in
-            if case .live = route { return true }
-            return false
-        }) {
-            livePath[index] = .live(channel)
-        } else {
-            livePath.append(.live(channel))
-        }
-    }
-
     /// Reorders the pinned channels, matching `List.onMove` semantics.
     func movePinnedChannels(fromOffsets source: IndexSet, toOffset destination: Int) {
         mutateSettings { settings in

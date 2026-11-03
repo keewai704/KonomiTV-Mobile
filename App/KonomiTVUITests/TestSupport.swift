@@ -84,7 +84,19 @@ enum MockServerControl {
         var request = URLRequest(url: baseURL.appendingPathComponent("__mock/reset"))
         request.httpMethod = "POST"
         request.timeoutInterval = 10
-        return perform(request).status
+        // The first request from a simulator that has just booted can fail
+        // before its network is up, so retry a few times.
+        var status = -1
+        for attempt in 0..<4 {
+            if attempt > 0 {
+                Thread.sleep(forTimeInterval: 2)
+            }
+            status = perform(request).status
+            if status == 200 {
+                break
+            }
+        }
+        return status
     }
 
     /// `GET /__mock/stats`.

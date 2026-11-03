@@ -8,8 +8,12 @@ import KonomiKit
 /// picture and background playback survive navigating away from this screen.
 struct LivePlayerView: View {
     let model: AppModel
-    let channel: LiveChannel
+    private let initialChannel: LiveChannel
 
+    /// Channel switched to on this screen (channel tab, remote, shortcuts).
+    /// Switching in place keeps the shared player view on screen; replacing the
+    /// navigation route would rebuild the screen around it.
+    @State private var selectedChannel: LiveChannel?
     @State private var channels: LiveChannels?
     @State private var channelsError: String?
     @State private var panelTab: LivePanelTab = .program
@@ -20,6 +24,13 @@ struct LivePlayerView: View {
         case program
         case channel
     }
+
+    init(model: AppModel, channel: LiveChannel) {
+        self.model = model
+        self.initialChannel = channel
+    }
+
+    private var channel: LiveChannel { selectedChannel ?? initialChannel }
 
     private var playbackItem: PlaybackItem { .live(channel) }
 
@@ -39,7 +50,7 @@ struct LivePlayerView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .background(playerShortcuts)
-        .task { startPlayback() }
+        .task(id: channel.displayChannelID) { startPlayback() }
         .task { await loadChannels() }
         .onAppear { playback.viewAppeared(for: playbackItem) }
         .onDisappear { playback.viewDisappeared(for: playbackItem) }
@@ -496,7 +507,8 @@ struct LivePlayerView: View {
 
     private func switchChannel(_ newChannel: LiveChannel) {
         guard newChannel.displayChannelID != channel.displayChannelID else { return }
-        model.switchLiveChannel(newChannel)
+        selectedChannel = newChannel
+        playback.viewAppeared(for: .live(newChannel))
     }
 }
 
