@@ -115,7 +115,9 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
 
 @MainActor
 func uiElement(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
-    app.descendants(matching: .any)[identifier]
+    // SwiftUI can expose one identifier on several nested elements (for
+    // example a sidebar List cell and its Label), so resolve the first match.
+    app.descendants(matching: .any).matching(identifier: identifier).firstMatch
 }
 
 /// Polls the condition while servicing the run loop. This avoids fixed sleeps
