@@ -512,9 +512,6 @@ func dismissKeyboard(in app: XCUIApplication) {
     app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).tap()
 }
 
-/// Taps an element once it is hittable. Scrolls the content or dismisses the
-/// keyboard while waiting, instead of sleeping for a fixed duration.
-@MainActor
 /// Taps an item of an open SwiftUI `Menu`. Right after the menu opens its
 /// items can still be animating and report an invalid activation point, so
 /// wait for them to settle and fall back to tapping the frame's center (a
@@ -532,6 +529,8 @@ func tapMenuItem(_ element: XCUIElement, timeout: TimeInterval = 3) {
     element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
 }
 
+/// Taps an element once it is hittable. Scrolls the content or dismisses the
+/// keyboard while waiting, instead of sleeping for a fixed duration.
 @MainActor
 func tapWhenHittable(
     _ element: XCUIElement,
