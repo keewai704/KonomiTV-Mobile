@@ -28,6 +28,17 @@ class CaptionInjectorTests(unittest.TestCase):
         for offset in range(0, len(self.injected), caption_injector.TS_PACKET_SIZE):
             self.assertEqual(self.injected[offset], 0x47, offset)
 
+    def test_every_pmt_advertises_the_caption_stream(self) -> None:
+        pmt_pid = caption_injector._pat_pmt_pid(self.injected)
+        pmts = [
+            caption_injector._section_from_payload(caption_injector._packet_payload(packet))
+            for packet in caption_injector._iter_packets(self.injected)
+            if caption_injector._packet_pid(packet) == pmt_pid and packet[1] & 0x40
+        ]
+        self.assertGreater(len(pmts), 1)
+        for section in pmts:
+            self.assertTrue(caption_injector._pmt_has_caption(section))
+
     def test_pmt_advertises_caption_pid_with_valid_crc(self) -> None:
         self.assertEqual(caption_injector.caption_pid_in_pmt(self.injected), 0x0130)
 

@@ -229,10 +229,13 @@ def _rewrite_pmt(data: bytes, pmt_pid: int, section: bytes) -> bytes:
     rewritten = _rewrite_pmt_section(section)
     if rewritten == section:
         return data
+    # Every PMT in the segment must advertise the caption stream: a later PMT
+    # without it (same version) tells the demuxer the stream vanished, and
+    # AVPlayer rejects the segment.
     out = bytearray()
     replaced = False
     for packet in _iter_packets(data):
-        if _packet_pid(packet) == pmt_pid and (packet[1] & 0x40) and not replaced:
+        if _packet_pid(packet) == pmt_pid and (packet[1] & 0x40):
             continuity = packet[3] & 0x0F
             payload = b"\x00" + rewritten
             if len(payload) > 184:
