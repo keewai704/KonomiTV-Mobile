@@ -188,7 +188,7 @@ final class LibraryUITests: KonomiTVUITestCase {
 
         let deleteItem = uiElement(app, "video.menu.delete")
         XCTAssertTrue(deleteItem.waitForExistence(timeout: TestTimeout.ui), "削除メニューが表示されない")
-        deleteItem.tap()
+        tapMenuItem(deleteItem)
 
         tapDeleteConfirmation(in: app)
 
