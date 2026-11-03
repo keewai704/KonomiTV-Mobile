@@ -298,6 +298,15 @@ public struct PMT: Sendable, Hashable {
     /// keeps every stream. Non-audio streams are always kept, and the section
     /// length and CRC-32/MPEG-2 are recomputed.
     public func section(keepingAudioPID audioPID: Int?) -> [UInt8] {
+        section(keeping: { stream in
+            guard stream.isAudio, let audioPID else { return true }
+            return stream.elementaryPID == audioPID
+        })
+    }
+
+    /// Rebuilds the PMT section with only the streams `isIncluded` accepts;
+    /// the section length and CRC-32/MPEG-2 are recomputed.
+    public func section(keeping isIncluded: (Stream) -> Bool) -> [UInt8] {
         var body: [UInt8] = [
             UInt8((programNumber >> 8) & 0xFF),
             UInt8(programNumber & 0xFF),
@@ -310,10 +319,7 @@ public struct PMT: Sendable, Hashable {
         ]
         body.append(contentsOf: programInfo)
 
-        for stream in streams {
-            if stream.isAudio, let audioPID, stream.elementaryPID != audioPID {
-                continue
-            }
+        for stream in streams where isIncluded(stream) {
             body.append(contentsOf: [
                 stream.streamType,
                 0xE0 | UInt8((stream.elementaryPID >> 8) & 0x1F),

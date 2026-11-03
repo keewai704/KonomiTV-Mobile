@@ -351,7 +351,9 @@ final class VideoHLSProxy: @unchecked Sendable {
                 status: 200,
                 reason: "OK",
                 contentType: "video/mp2t",
-                body: data
+                // The caption streams are read above; AVPlayer rejects
+                // segments that still carry them.
+                body: PlayerStreamFilter.audioVideoOnly(data)
             )
         } catch {
             return badGateway()

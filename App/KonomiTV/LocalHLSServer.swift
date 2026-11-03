@@ -322,7 +322,13 @@ final class LocalHLSServer: @unchecked Sendable {
                     status: 200,
                     reason: "OK",
                     contentType: "video/mp2t",
-                    body: segment.data
+                    // Captions were already extracted from the original
+                    // bytes; AVPlayer only gets the audio and video.
+                    body: PlayerStreamFilter.audioVideoOnly(
+                        segment.data,
+                        pmt: segment.pmt,
+                        pmtPID: segment.pmtPID
+                    )
                 )
             }
         }
@@ -377,7 +383,9 @@ final class LocalHLSServer: @unchecked Sendable {
                         status: 200,
                         reason: "OK",
                         contentType: source.segmentContentType,
-                        body: data
+                        body: source.segmentFileExtension == "ts"
+                            ? PlayerStreamFilter.audioVideoOnly(data)
+                            : data
                     )
                 }
             }
