@@ -65,7 +65,7 @@ final class VideosUITests: KonomiTVUITestCase {
         XCTAssertTrue(state.waitForExistence(timeout: TestTimeout.playback), "再生状態が取得できない")
         XCTAssertTrue(
             waitForLabel(state, equals: "playing", timeout: TestTimeout.playback),
-            "ビデオ再生が playing にならない (現在: \(state.label))"
+            "ビデオ再生が playing にならない (現在: \(state.label) / \(state.value as? String ?? ""))"
         )
     }
 }

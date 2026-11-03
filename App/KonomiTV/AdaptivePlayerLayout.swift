@@ -3,10 +3,14 @@ import SwiftUI
 /// Arranges a video player and its program information.
 ///
 /// Wide windows put the player on the left (about two thirds of the width)
-/// with the information beside it; narrow windows stack the player above the
-/// information. The available width is measured from the background, so the
-/// layout follows window resizing (Split View, Stage Manager, rotation) even
-/// when the size class does not change.
+/// with the information beside it; narrow windows keep the player on top and
+/// scroll the information below it. The available width is measured from the
+/// background, so the layout follows window resizing (Split View, Stage
+/// Manager, rotation) even when the size class does not change.
+///
+/// Both arrangements share one `AnyLayout`, so switching between them keeps
+/// the player's identity: the `AVPlayerViewController` is not recreated and
+/// playback continues while the window is resized.
 struct AdaptivePlayerLayout<Player: View, Info: View>: View {
     private let threshold: CGFloat
     private let player: Player
@@ -26,51 +30,28 @@ struct AdaptivePlayerLayout<Player: View, Info: View>: View {
 
     private var isWide: Bool { width >= threshold }
 
-    var body: some View {
-        Group {
-            if isWide {
-                wideLayout
-            } else {
-                narrowLayout
-            }
-        }
-        .background(widthReader)
+    private var layout: AnyLayout {
+        isWide
+            ? AnyLayout(HStackLayout(alignment: .top, spacing: 0))
+            : AnyLayout(VStackLayout(spacing: 0))
     }
 
-    private var wideLayout: some View {
-        HStack(alignment: .top, spacing: 0) {
-            VStack(spacing: 0) {
-                player
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .background(Color.black)
-                Spacer(minLength: 0)
-            }
-            .frame(width: max(width * 0.65, 320))
-
-            Divider()
+    var body: some View {
+        layout {
+            player
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .background(Color.black)
+                .frame(width: isWide ? max(width * 0.65, 320) : nil)
 
             ScrollView {
                 info
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(20)
+                    .padding(isWide ? 20 : 16)
             }
         }
-    }
-
-    private var narrowLayout: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                player
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-                    .background(Color.black)
-
-                info
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 24)
-            }
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(widthReader)
     }
 
     private var widthReader: some View {

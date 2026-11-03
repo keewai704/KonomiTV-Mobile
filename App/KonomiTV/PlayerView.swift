@@ -44,7 +44,7 @@ struct PlayerView: View {
                 .font(.system(size: 1))
                 .opacity(0.01)
                 .accessibilityLabel(observer.state)
-                .accessibilityValue(observer.state)
+                .accessibilityValue(observer.detail ?? observer.state)
                 .accessibilityIdentifier("player.state")
                 .allowsHitTesting(false)
         }
@@ -68,8 +68,10 @@ struct PlayerView: View {
 @Observable
 final class PlayerStateObserver {
     private(set) var state: String = "buffering"
+    /// Failure reason, surfaced to UI tests through the accessibility value.
+    private(set) var detail: String?
 
-    @ObservationIgnored private weak var player: AVPlayer?
+    @ObservationIgnored private var player: AVPlayer?
     @ObservationIgnored private var timeControlObservation: NSKeyValueObservation?
     @ObservationIgnored private var itemStatusObservation: NSKeyValueObservation?
     @ObservationIgnored private var periodicTimeObserver: Any?
@@ -125,13 +127,15 @@ final class PlayerStateObserver {
     }
 
     private func refresh() {
-        guard let player else {
-            state = "error"
-            return
-        }
+        // Late KVO callbacks may arrive after `stop()`; keep the last state.
+        guard let player else { return }
 
         if let item = player.currentItem, item.status == .failed {
             state = "error"
+            detail = item.error.map { error in
+                let nsError = error as NSError
+                return "\(nsError.domain) \(nsError.code): \(nsError.localizedDescription)"
+            } ?? "item failed"
             return
         }
 
