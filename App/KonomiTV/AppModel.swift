@@ -174,6 +174,15 @@ enum PreferenceKeys {
     /// names. Migrated once by `QualityPreferences.migrate`.
     static let legacyLiveQuality = "liveQuality"
     static let legacyVideoQuality = "videoQuality"
+
+    // Twitter / Bluesky panel state. These mirror the web client's local-only
+    // keys (selected_twitter_panel_account, twitter_panel_post_targets,
+    // twitter_reply_thread_states, bluesky_reply_thread_states): they point at
+    // database IDs, so they are never uploaded with the client settings.
+    static let twitterPanelAccount = "selected_twitter_panel_account"
+    static let twitterPanelPostTargets = "twitter_panel_post_targets"
+    static let twitterReplyThreadStates = "twitter_reply_thread_states"
+    static let blueskyReplyThreadStates = "bluesky_reply_thread_states"
 }
 
 /// Application wide state: configured server, session user, client settings and
@@ -207,6 +216,15 @@ final class AppModel {
     /// typed keys). Persisted locally; synced with the server when logged in and
     /// `syncSettings` is on.
     private(set) var settings = ClientSettings()
+
+    /// Account last chosen by the watch screen's Twitter tab (local only).
+    private(set) var selectedTwitterPanelAccount: TwitterPanelAccount?
+    /// Post target of each linked account, keyed by `Linked-<id>` (local only).
+    private(set) var twitterPanelPostTargets: [String: TwitterPanelPostTarget] = [:]
+    /// Twitter reply tree state per screen name (local only).
+    private(set) var twitterReplyThreadStates: [String: TwitterReplyThreadState] = [:]
+    /// Bluesky reply tree state per handle (local only).
+    private(set) var blueskyReplyThreadStates: [String: BlueskyReplyThreadState] = [:]
 
     /// Whether settings are synced with the server. Local only, like the web
     /// client's `sync_settings` key.
@@ -263,6 +281,30 @@ final class AppModel {
         }
         if defaults.object(forKey: PreferenceKeys.syncSettings) != nil {
             self.syncSettings = defaults.bool(forKey: PreferenceKeys.syncSettings)
+        }
+        if let raw = defaults.string(forKey: PreferenceKeys.twitterPanelAccount) {
+            self.selectedTwitterPanelAccount = try? JSONCoding.decode(
+                TwitterPanelAccount.self,
+                from: raw
+            )
+        }
+        if let raw = defaults.string(forKey: PreferenceKeys.twitterPanelPostTargets) {
+            self.twitterPanelPostTargets = (try? JSONCoding.decode(
+                [String: TwitterPanelPostTarget].self,
+                from: raw
+            )) ?? [:]
+        }
+        if let raw = defaults.string(forKey: PreferenceKeys.twitterReplyThreadStates) {
+            self.twitterReplyThreadStates = (try? JSONCoding.decode(
+                [String: TwitterReplyThreadState].self,
+                from: raw
+            )) ?? [:]
+        }
+        if let raw = defaults.string(forKey: PreferenceKeys.blueskyReplyThreadStates) {
+            self.blueskyReplyThreadStates = (try? JSONCoding.decode(
+                [String: BlueskyReplyThreadState].self,
+                from: raw
+            )) ?? [:]
         }
 
         playback.onRestore = { [weak self] item in
@@ -700,6 +742,65 @@ final class AppModel {
                 return left.offset < right.offset
             }
             .map(\.element)
+    }
+
+    // MARK: - Twitter / Bluesky panel state (local only)
+
+    func setSelectedTwitterPanelAccount(_ account: TwitterPanelAccount?) {
+        guard account != selectedTwitterPanelAccount else { return }
+        selectedTwitterPanelAccount = account
+        storeTwitterState(account, forKey: PreferenceKeys.twitterPanelAccount)
+    }
+
+    /// Post target of a linked account ("Linked-<id>"); both services by default.
+    func twitterPanelPostTarget(for accountKey: String) -> TwitterPanelPostTarget {
+        twitterPanelPostTargets[accountKey] ?? TwitterPanelPostTarget()
+    }
+
+    func setTwitterPanelPostTarget(_ target: TwitterPanelPostTarget, for accountKey: String) {
+        guard twitterPanelPostTargets[accountKey] != target else { return }
+        twitterPanelPostTargets[accountKey] = target
+        storeTwitterState(twitterPanelPostTargets, forKey: PreferenceKeys.twitterPanelPostTargets)
+    }
+
+    func twitterReplyThreadState(for screenName: String) -> TwitterReplyThreadState? {
+        twitterReplyThreadStates[screenName]
+    }
+
+    func setTwitterReplyThreadState(
+        _ state: TwitterReplyThreadState?,
+        for screenName: String
+    ) {
+        if let state {
+            twitterReplyThreadStates[screenName] = state
+        } else {
+            twitterReplyThreadStates.removeValue(forKey: screenName)
+        }
+        storeTwitterState(twitterReplyThreadStates, forKey: PreferenceKeys.twitterReplyThreadStates)
+    }
+
+    func blueskyReplyThreadState(for handle: String) -> BlueskyReplyThreadState? {
+        blueskyReplyThreadStates[handle]
+    }
+
+    func setBlueskyReplyThreadState(
+        _ state: BlueskyReplyThreadState?,
+        for handle: String
+    ) {
+        if let state {
+            blueskyReplyThreadStates[handle] = state
+        } else {
+            blueskyReplyThreadStates.removeValue(forKey: handle)
+        }
+        storeTwitterState(
+            blueskyReplyThreadStates,
+            forKey: PreferenceKeys.blueskyReplyThreadStates
+        )
+    }
+
+    private func storeTwitterState<T: Encodable>(_ value: T, forKey key: String) {
+        guard let data = try? JSONCoding.encode(value) else { return }
+        defaults.set(String(decoding: data, as: UTF8.self), forKey: key)
     }
 
     // MARK: - Recorded programs

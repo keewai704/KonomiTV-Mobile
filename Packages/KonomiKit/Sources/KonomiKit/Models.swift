@@ -999,6 +999,12 @@ public struct User: Codable, Sendable, Hashable, Identifiable {
     /// Whether the linked account is a Niconico premium member. Premium is
     /// required to post fixed (top / bottom) and big comments to Nicolive.
     public var niconicoUserPremium: Bool?
+    /// Twitter accounts linked to the user (the watch screen's Twitter tab).
+    public var twitterAccounts: [TwitterAccount]
+    /// Bluesky accounts linked to the user.
+    public var blueskyAccounts: [BlueskyAccount]
+    /// Twitter / Bluesky pairs that post and read both services together.
+    public var accountLinks: [AccountLink]
     public var createdAt: Date?
     public var updatedAt: Date?
 
@@ -1009,6 +1015,9 @@ public struct User: Codable, Sendable, Hashable, Identifiable {
         niconicoUserID: Int? = nil,
         niconicoUserName: String? = nil,
         niconicoUserPremium: Bool? = nil,
+        twitterAccounts: [TwitterAccount] = [],
+        blueskyAccounts: [BlueskyAccount] = [],
+        accountLinks: [AccountLink] = [],
         createdAt: Date? = nil,
         updatedAt: Date? = nil
     ) {
@@ -1018,6 +1027,9 @@ public struct User: Codable, Sendable, Hashable, Identifiable {
         self.niconicoUserID = niconicoUserID
         self.niconicoUserName = niconicoUserName
         self.niconicoUserPremium = niconicoUserPremium
+        self.twitterAccounts = twitterAccounts
+        self.blueskyAccounts = blueskyAccounts
+        self.accountLinks = accountLinks
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -1029,6 +1041,9 @@ public struct User: Codable, Sendable, Hashable, Identifiable {
         case niconicoUserID = "niconico_user_id"
         case niconicoUserName = "niconico_user_name"
         case niconicoUserPremium = "niconico_user_premium"
+        case twitterAccounts = "twitter_accounts"
+        case blueskyAccounts = "bluesky_accounts"
+        case accountLinks = "account_links"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -1041,6 +1056,9 @@ public struct User: Codable, Sendable, Hashable, Identifiable {
         niconicoUserID = container.lenient(Int.self, forKey: .niconicoUserID)
         niconicoUserName = container.lenient(String.self, forKey: .niconicoUserName)
         niconicoUserPremium = container.lenient(Bool.self, forKey: .niconicoUserPremium)
+        twitterAccounts = container.lenient([TwitterAccount].self, forKey: .twitterAccounts) ?? []
+        blueskyAccounts = container.lenient([BlueskyAccount].self, forKey: .blueskyAccounts) ?? []
+        accountLinks = container.lenient([AccountLink].self, forKey: .accountLinks) ?? []
         createdAt = container.lenient(Date.self, forKey: .createdAt)
         updatedAt = container.lenient(Date.self, forKey: .updatedAt)
     }

@@ -52,6 +52,9 @@ final class CaptureController {
     private(set) var producedImageCount = 0
     /// Filename of the last produced image (read by the UI tests).
     private(set) var lastFilename: String?
+    /// Images produced since launch, newest last. The Twitter panel shows them
+    /// as attachments; the oldest are dropped beyond the panel's limit.
+    private(set) var sessionCaptures: [ProducedCapture] = []
     /// A capture is being composited or saved.
     private(set) var isCapturing = false
 
@@ -175,8 +178,79 @@ final class CaptureController {
             }
             self.producedImageCount += images.count
             self.lastFilename = images.last?.filename
+            self.rememberSessionCaptures(images)
             self.save(images, saveMode: saveMode, client: client, copyToClipboard: copyToClipboard)
         }
+    }
+
+    // MARK: - Session captures
+
+    /// Keeps the latest captures for the Twitter panel's attachment grid.
+    private func rememberSessionCaptures(_ images: [ProducedCapture]) {
+        sessionCaptures.append(contentsOf: images)
+        let limit = 100
+        if sessionCaptures.count > limit {
+            sessionCaptures.removeFirst(sessionCaptures.count - limit)
+        }
+    }
+
+    /// Draws the program title onto a capture (tweet_capture_watermark_position).
+    ///
+    /// Text and shadow follow the web client's drawProgramTitleOnCapture:
+    /// semi-transparent bold white with a black glow, 16 px from the edges.
+    static func watermarked(
+        _ data: Data,
+        title: String,
+        position: TweetCaptureWatermarkPosition
+    ) -> Data? {
+        guard position != .none, !title.isEmpty, let image = UIImage(data: data) else {
+            return nil
+        }
+        let size = image.size
+        guard size.width >= 1, size.height >= 1 else { return nil }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+
+        let output = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+
+            // The web client uses 22 px on a full-size screenshot; scale with
+            // the image so the watermark keeps its relative size.
+            let fontSize = max(22 * size.width / 1920, 12)
+            let shadow = NSShadow()
+            shadow.shadowColor = UIColor.black
+            shadow.shadowBlurRadius = 4
+            shadow.shadowOffset = .zero
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: fontSize, weight: .bold),
+                .foregroundColor: UIColor.white.withAlphaComponent(0.7),
+                .shadow: shadow,
+            ]
+
+            let text = title as NSString
+            let textSize = text.size(withAttributes: attributes)
+            let margin: CGFloat = 16
+            let origin: CGPoint
+            switch position {
+            case .none:
+                origin = .zero
+            case .topLeft:
+                origin = CGPoint(x: margin, y: margin / 2)
+            case .topRight:
+                origin = CGPoint(x: size.width - margin - textSize.width, y: margin / 2)
+            case .bottomLeft:
+                origin = CGPoint(x: margin, y: size.height - textSize.height - margin / 2)
+            case .bottomRight:
+                origin = CGPoint(
+                    x: size.width - margin - textSize.width,
+                    y: size.height - textSize.height - margin / 2
+                )
+            }
+            text.draw(at: origin, withAttributes: attributes)
+        }
+        return output.jpegData(compressionQuality: 1)
     }
 
     /// Reads the current frame of the shared player, in the renderer's pixel

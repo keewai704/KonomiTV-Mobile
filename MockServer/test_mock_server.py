@@ -2461,5 +2461,523 @@ class JikkyoMockTestCase(unittest.TestCase):
         self.assertTrue(self.stats()["captures_library"])
 
 
+
+
+# ---------------------------------------------------------------------------
+# Twitter / Bluesky / アカウント紐付け
+# ---------------------------------------------------------------------------
+
+TWITTER_HEADERS = {"Authorization": "Bearer mock-access-token"}
+
+
+class TwitterMockTestCase(unittest.TestCase):
+    """Twitter / Bluesky 連携とアカウント紐付けのモック API。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = mock_server.create_server("127.0.0.1", 0)
+        cls.host, cls.port = cls.server.server_address[:2]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self) -> None:
+        self.reset()
+
+    # -- helpers -----------------------------------------------------------
+
+    def request(self, method: str, path: str, body: bytes | None = None,
+                headers: dict | None = None):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            hdrs = {"Accept": "*/*"}
+            if headers:
+                hdrs.update(headers)
+            conn.request(method, path, body=body, headers=hdrs)
+            response = conn.getresponse()
+            data = response.read()
+            return response.status, dict(response.getheaders()), data
+        finally:
+            conn.close()
+
+    def get_json(self, path: str, headers: dict | None = None):
+        status, response_headers, data = self.request("GET", path, headers=headers)
+        return status, response_headers, json.loads(data.decode("utf-8"))
+
+    def send_json(self, method: str, path: str, payload, headers=None):
+        status, response_headers, data = self.request(
+            method, path,
+            body=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", **(headers or {})},
+        )
+        payload_out = json.loads(data.decode("utf-8")) if data else None
+        return status, response_headers, payload_out
+
+    def stats(self) -> dict:
+        status, _, payload = self.get_json("/__mock/stats")
+        self.assertEqual(status, 200)
+        return payload
+
+    def reset(self) -> None:
+        status, _, _ = self.request("POST", "/__mock/reset")
+        self.assertEqual(status, 200)
+
+    def multipart(self, fields: dict[str, str],
+                  images: list[tuple[str, bytes]]) -> tuple[bytes, str]:
+        boundary = "MOCKTWITTERBOUNDARY"
+        parts: list[bytes] = []
+        for name, value in fields.items():
+            parts.extend([
+                b"--" + boundary.encode() + b"\r\n",
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode("utf-8"),
+                b"\r\n",
+            ])
+        for filename, data in images:
+            parts.extend([
+                b"--" + boundary.encode() + b"\r\n",
+                (
+                    'Content-Disposition: form-data; name="images"; filename="'
+                    + filename
+                    + '"\r\n'
+                ).encode(),
+                b"Content-Type: image/jpeg\r\n",
+                b"\r\n",
+                data,
+                b"\r\n",
+            ])
+        parts.append(b"--" + boundary.encode() + b"--\r\n")
+        return b"".join(parts), "multipart/form-data; boundary=" + boundary
+
+    def link_twitter(self, screen_name: str = "konomi_tv") -> None:
+        status, _, _ = self.send_json(
+            "POST", "/api/twitter/auth",
+            {"cookies_txt": "# Netscape HTTP Cookie File\n.x.com\tTRUE\t/\tFALSE\t0\tauth_token\tx"},
+            TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 204)
+
+    def link_bluesky(self, handle: str = "mock.bsky.social") -> None:
+        status, _, _ = self.send_json(
+            "POST", "/api/bluesky/auth",
+            {"handle": handle, "app_password": "app-password"},
+            TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 204)
+
+    # -- Twitter auth / accounts ------------------------------------------
+
+    def test_twitter_auth_links_account_and_users_me_lists_it(self) -> None:
+        before = self.stats()["twitter_auth_count"]
+        self.link_twitter()
+
+        status, _, user = self.get_json("/api/users/me", headers=TWITTER_HEADERS)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(user["twitter_accounts"]), 1)
+        account = user["twitter_accounts"][0]
+        self.assertEqual(account["screen_name"], "konomi_tv")
+        self.assertTrue(account["name"])
+        self.assertTrue(account["icon_url"].startswith("http://"))
+        self.assertIn("created_at", account)
+        self.assertIn("updated_at", account)
+        self.assertEqual(user["bluesky_accounts"], [])
+        self.assertEqual(user["account_links"], [])
+        self.assertEqual(self.stats()["twitter_auth_count"], before + 1)
+
+        # Linking the same screen name again updates instead of duplicating.
+        self.link_twitter()
+        status, _, user = self.get_json("/api/users/me", headers=TWITTER_HEADERS)
+        self.assertEqual(len(user["twitter_accounts"]), 1)
+
+    def test_twitter_auth_rejects_bad_cookies(self) -> None:
+        status, _, payload = self.send_json(
+            "POST", "/api/twitter/auth",
+            {"cookies_txt": "not a netscape cookie file"},
+            TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("cookies", payload["detail"])
+
+    def test_twitter_auth_requires_login(self) -> None:
+        status, _, _ = self.send_json(
+            "POST", "/api/twitter/auth", {"cookies_txt": "x.com"}
+        )
+        self.assertEqual(status, 401)
+
+    def test_twitter_endpoints_require_auth(self) -> None:
+        self.link_twitter()
+        for method, path in (
+            ("GET", "/api/twitter/accounts/konomi_tv/timeline"),
+            ("GET", "/api/twitter/accounts/konomi_tv/search?query=%23nhk"),
+            ("POST", "/api/twitter/accounts/konomi_tv/keep-alive"),
+            ("PUT", "/api/twitter/accounts/konomi_tv/tweets/1/retweet"),
+            ("DELETE", "/api/twitter/accounts/konomi_tv/tweets/1/favorite"),
+            ("DELETE", "/api/twitter/accounts/konomi_tv"),
+        ):
+            status, _, _ = self.request(method, path)
+            self.assertEqual(status, 401, path)
+
+    def test_keep_alive_and_unlink(self) -> None:
+        self.link_twitter()
+        before = self.stats()["twitter_keep_alive_count"]
+        status, _, body = self.request(
+            "POST", "/api/twitter/accounts/konomi_tv/keep-alive",
+            headers=TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+        self.assertEqual(self.stats()["twitter_keep_alive_count"], before + 1)
+
+        status, _, body = self.request(
+            "DELETE", "/api/twitter/accounts/konomi_tv", headers=TWITTER_HEADERS
+        )
+        self.assertEqual(status, 204)
+        status, _, user = self.get_json("/api/users/me", headers=TWITTER_HEADERS)
+        self.assertEqual(user["twitter_accounts"], [])
+        self.assertEqual(self.stats()["twitter_account_delete_count"], 1)
+
+        # The account is gone: the timeline answers 422 like the real server.
+        status, _, payload = self.get_json(
+            "/api/twitter/accounts/konomi_tv/timeline", headers=TWITTER_HEADERS
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("screen_name", payload["detail"])
+
+    # -- Tweets ------------------------------------------------------------
+
+    def test_post_records_text_and_images(self) -> None:
+        self.link_twitter()
+        body, content_type = self.multipart(
+            {"tweet": "テスト投稿 #nhk"},
+            [("capture.jpg", b"\xff\xd8\xff" + b"a" * 100)],
+        )
+        status, _, payload = self.request(
+            "POST", "/api/twitter/accounts/konomi_tv/tweets",
+            body=body,
+            headers={"Content-Type": content_type, **TWITTER_HEADERS},
+        )
+        self.assertEqual(status, 200)
+        result = json.loads(payload.decode("utf-8"))
+        self.assertTrue(result["is_success"])
+        self.assertEqual(result["tweet_id"], "1001")
+        self.assertIn("tweet_url", result)
+        self.assertIsNone(result["post_uri"])
+
+        posted = self.stats()["twitter_posted_tweets"]
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0]["text"], "テスト投稿 #nhk")
+        self.assertEqual(posted[0]["image_count"], 1)
+        self.assertEqual(posted[0]["image_sizes"], [103])
+        self.assertIsNone(posted[0]["in_reply_to_status_id"])
+
+    def test_post_rejects_more_than_four_images(self) -> None:
+        self.link_twitter()
+        images = [(f"capture{index}.jpg", b"\xff\xd8\xff") for index in range(5)]
+        body, content_type = self.multipart({"tweet": "画像 5 枚"}, images)
+        status, _, payload = self.request(
+            "POST", "/api/twitter/accounts/konomi_tv/tweets",
+            body=body,
+            headers={"Content-Type": content_type, **TWITTER_HEADERS},
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("4", json.loads(payload.decode("utf-8"))["detail"])
+
+    def test_post_forwards_reply_target(self) -> None:
+        self.link_twitter()
+        body, content_type = self.multipart(
+            {"tweet": "リプライ", "in_reply_to_status_id": "999"},
+            [],
+        )
+        status, _, _ = self.request(
+            "POST", "/api/twitter/accounts/konomi_tv/tweets",
+            body=body,
+            headers={"Content-Type": content_type, **TWITTER_HEADERS},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.stats()["twitter_posted_tweets"][-1]["in_reply_to_status_id"],
+            "999",
+        )
+
+    def test_retweet_and_favorite_toggles_are_counted(self) -> None:
+        self.link_twitter()
+        for method, path in (
+            ("PUT", "/api/twitter/accounts/konomi_tv/tweets/101/retweet"),
+            ("DELETE", "/api/twitter/accounts/konomi_tv/tweets/101/retweet"),
+            ("PUT", "/api/twitter/accounts/konomi_tv/tweets/102/favorite"),
+            ("DELETE", "/api/twitter/accounts/konomi_tv/tweets/102/favorite"),
+        ):
+            status, _, payload = self.request(method, path, headers=TWITTER_HEADERS)
+            self.assertEqual(status, 200, path)
+            self.assertTrue(json.loads(payload.decode("utf-8"))["is_success"])
+
+        stats = self.stats()
+        self.assertEqual(stats["twitter_retweet_count"], 1)
+        self.assertEqual(stats["twitter_unretweet_count"], 1)
+        self.assertEqual(stats["twitter_favorite_count"], 1)
+        self.assertEqual(stats["twitter_unfavorite_count"], 1)
+        self.assertEqual(
+            [event["action"] for event in stats["twitter_reaction_events"]],
+            ["retweet", "unretweet", "favorite", "unfavorite"],
+        )
+
+    def test_timeline_paginates_and_search_filters(self) -> None:
+        self.link_twitter()
+        status, _, first = self.get_json(
+            "/api/twitter/accounts/konomi_tv/timeline", headers=TWITTER_HEADERS
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(first["is_success"])
+        self.assertEqual(len(first["tweets"]), 2)
+        self.assertTrue(first["is_cursor_consumed"])
+        older = [c for c in first["load_more_cursors"] if c["cursor_type"] == "Older"]
+        self.assertEqual(len(older), 1)
+        tweet = first["tweets"][0]
+        for field in ("source", "id", "created_at", "user", "text",
+                      "image_urls", "retweet_count", "retweeted",
+                      "favorite_count", "favorited"):
+            self.assertIn(field, tweet)
+        self.assertTrue(tweet["user"]["icon_url"].startswith("http://"))
+
+        status, _, second = self.get_json(
+            "/api/twitter/accounts/konomi_tv/timeline?cursor_id="
+            + older[0]["cursor_id"],
+            headers=TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(second["tweets"]), 2)
+        self.assertNotEqual(
+            [item["id"] for item in first["tweets"]],
+            [item["id"] for item in second["tweets"]],
+        )
+        self.assertEqual(second["load_more_cursors"], [])
+
+        # The repost fixture carries the original tweet.
+        all_tweets = first["tweets"] + second["tweets"]
+        reposts = [item for item in all_tweets if item["retweeted_tweet"]]
+        self.assertEqual(len(reposts), 1)
+        self.assertTrue(reposts[0]["retweeted_tweet"]["id"])
+
+        status, _, search = self.get_json(
+            "/api/twitter/accounts/konomi_tv/search?query=" + quote("#nhk"),
+            headers=TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(search["tweets"]), 1)
+        for item in search["tweets"]:
+            self.assertIn("nhk", item["text"].lower())
+
+        status, _, empty = self.get_json(
+            "/api/twitter/accounts/konomi_tv/search?query=zzz-no-match",
+            headers=TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(empty["tweets"], [])
+
+    def test_tweet_images_are_served(self) -> None:
+        status, headers, body = self.request(
+            "GET", "/__mock/twitter/image/1.png"
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("image/png", headers.get("Content-Type", ""))
+        self.assertTrue(body.startswith(b"\x89PNG\r\n\x1a\n"))
+
+        status, headers, body = self.request("GET", "/__mock/twitter/icon/2.png")
+        self.assertEqual(status, 200)
+        self.assertTrue(body.startswith(b"\x89PNG\r\n\x1a\n"))
+
+        status, _, _ = self.request("GET", "/__mock/twitter/unknown/1.png")
+        self.assertEqual(status, 404)
+
+    # -- Bluesky -----------------------------------------------------------
+
+    def test_bluesky_auth_post_and_reactions(self) -> None:
+        self.link_bluesky()
+        status, _, user = self.get_json("/api/users/me", headers=TWITTER_HEADERS)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(user["bluesky_accounts"]), 1)
+        account = user["bluesky_accounts"][0]
+        self.assertEqual(account["handle"], "mock.bsky.social")
+        self.assertTrue(account["did"].startswith("did:plc:"))
+        self.assertEqual(self.stats()["bluesky_auth_count"], 1)
+
+        # An invalid login is rejected.
+        status, _, _ = self.send_json(
+            "POST", "/api/bluesky/auth", {"handle": "", "app_password": ""},
+            TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 422)
+
+        body, content_type = self.multipart(
+            {
+                "post": "Bluesky の投稿 #nhk",
+                "reply_root_uri": "at://did:plc:x/app.bsky.feed.post/1",
+                "reply_root_cid": "cid-root",
+                "reply_parent_uri": "at://did:plc:x/app.bsky.feed.post/2",
+                "reply_parent_cid": "cid-parent",
+            },
+            [("capture.jpg", b"\xff\xd8\xff")],
+        )
+        status, _, payload = self.request(
+            "POST", "/api/bluesky/accounts/mock.bsky.social/posts",
+            body=body,
+            headers={"Content-Type": content_type, **TWITTER_HEADERS},
+        )
+        self.assertEqual(status, 200)
+        result = json.loads(payload.decode("utf-8"))
+        self.assertTrue(result["is_success"])
+        self.assertTrue(result["post_uri"].startswith("at://"))
+        self.assertTrue(result["post_cid"])
+
+        posted = self.stats()["bluesky_posted_posts"]
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0]["text"], "Bluesky の投稿 #nhk")
+        self.assertEqual(posted[0]["image_count"], 1)
+        self.assertEqual(
+            posted[0]["reply_parent_uri"],
+            "at://did:plc:x/app.bsky.feed.post/2",
+        )
+
+        # Incomplete reply references are rejected (the StrongRef needs all four).
+        body, content_type = self.multipart(
+            {"post": "リプライ", "reply_root_uri": "at://root"}, []
+        )
+        status, _, _ = self.request(
+            "POST", "/api/bluesky/accounts/mock.bsky.social/posts",
+            body=body,
+            headers={"Content-Type": content_type, **TWITTER_HEADERS},
+        )
+        self.assertEqual(status, 422)
+
+    def test_bluesky_repost_and_like_use_the_at_uri(self) -> None:
+        self.link_bluesky()
+        post_id = quote("at://did:plc:mock/app.bsky.feed.post/abc", safe="")
+        for method, action in (
+            ("PUT", "repost"), ("DELETE", "repost"),
+            ("PUT", "like"), ("DELETE", "like"),
+        ):
+            status, _, payload = self.request(
+                method,
+                f"/api/bluesky/accounts/mock.bsky.social/posts/{post_id}/{action}",
+                headers=TWITTER_HEADERS,
+            )
+            self.assertEqual(status, 200, f"{method} {action}")
+            self.assertTrue(json.loads(payload.decode("utf-8"))["is_success"])
+
+        stats = self.stats()
+        self.assertEqual(stats["bluesky_repost_count"], 1)
+        self.assertEqual(stats["bluesky_unrepost_count"], 1)
+        self.assertEqual(stats["bluesky_like_count"], 1)
+        self.assertEqual(stats["bluesky_unlike_count"], 1)
+        self.assertEqual(
+            stats["bluesky_reaction_events"][0]["post_id"],
+            "at://did:plc:mock/app.bsky.feed.post/abc",
+        )
+
+    def test_bluesky_timeline_and_search(self) -> None:
+        self.link_bluesky()
+        status, _, timeline = self.get_json(
+            "/api/bluesky/accounts/mock.bsky.social/timeline",
+            headers=TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(timeline["tweets"]), 2)
+        self.assertEqual(timeline["tweets"][0]["source"], "Bluesky")
+        self.assertTrue(timeline["tweets"][0]["id"].startswith("at://"))
+
+        status, _, search = self.get_json(
+            "/api/bluesky/accounts/mock.bsky.social/search?query=" + quote("#nhk"),
+            headers=TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(search["tweets"]), 1)
+
+    # -- Account links -----------------------------------------------------
+
+    def test_account_links_create_and_delete(self) -> None:
+        self.link_twitter()
+        self.link_bluesky()
+        status, _, user = self.get_json("/api/users/me", headers=TWITTER_HEADERS)
+        twitter_id = user["twitter_accounts"][0]["id"]
+        bluesky_id = user["bluesky_accounts"][0]["id"]
+
+        status, _, link = self.send_json(
+            "POST", "/api/users/me/account-links",
+            {"twitter_account_id": twitter_id, "bluesky_account_id": bluesky_id},
+            TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 201)
+        self.assertTrue(link["id"])
+        self.assertEqual(link["twitter_account"]["screen_name"], "konomi_tv")
+        self.assertEqual(link["bluesky_account"]["handle"], "mock.bsky.social")
+
+        status, _, user = self.get_json("/api/users/me", headers=TWITTER_HEADERS)
+        self.assertEqual(len(user["account_links"]), 1)
+
+        # A second link for the same accounts is rejected.
+        status, _, payload = self.send_json(
+            "POST", "/api/users/me/account-links",
+            {"twitter_account_id": twitter_id, "bluesky_account_id": bluesky_id},
+            TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 422)
+        self.assertIn("already linked", payload["detail"])
+
+        status, _, _ = self.request(
+            "DELETE", f"/api/users/me/account-links/{link['id']}",
+            headers=TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 204)
+        status, _, user = self.get_json("/api/users/me", headers=TWITTER_HEADERS)
+        self.assertEqual(user["account_links"], [])
+        # The individual accounts stay linked.
+        self.assertEqual(len(user["twitter_accounts"]), 1)
+        self.assertEqual(len(user["bluesky_accounts"]), 1)
+
+        status, _, _ = self.request(
+            "DELETE", f"/api/users/me/account-links/{link['id']}",
+            headers=TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 422)
+
+        stats = self.stats()
+        self.assertEqual(stats["account_link_create_count"], 1)
+        self.assertEqual(stats["account_link_delete_count"], 1)
+
+    def test_unlinking_a_bluesky_account_removes_its_links(self) -> None:
+        self.link_twitter()
+        self.link_bluesky()
+        status, _, user = self.get_json("/api/users/me", headers=TWITTER_HEADERS)
+        twitter_id = user["twitter_accounts"][0]["id"]
+        bluesky_id = user["bluesky_accounts"][0]["id"]
+        self.send_json(
+            "POST", "/api/users/me/account-links",
+            {"twitter_account_id": twitter_id, "bluesky_account_id": bluesky_id},
+            TWITTER_HEADERS,
+        )
+        status, _, _ = self.request(
+            "DELETE", "/api/bluesky/accounts/mock.bsky.social",
+            headers=TWITTER_HEADERS,
+        )
+        self.assertEqual(status, 204)
+        status, _, user = self.get_json("/api/users/me", headers=TWITTER_HEADERS)
+        self.assertEqual(user["account_links"], [])
+        self.assertEqual(user["bluesky_accounts"], [])
+
+    def test_reset_clears_twitter_state(self) -> None:
+        self.link_twitter()
+        self.link_bluesky()
+        self.reset()
+        status, _, user = self.get_json("/api/users/me", headers=TWITTER_HEADERS)
+        self.assertEqual(user["twitter_accounts"], [])
+        self.assertEqual(user["bluesky_accounts"], [])
+        self.assertEqual(user["account_links"], [])
+        self.assertEqual(self.stats()["twitter_posted_tweets"], [])
+
 if __name__ == "__main__":
     unittest.main()

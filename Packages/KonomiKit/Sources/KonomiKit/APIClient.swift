@@ -549,7 +549,24 @@ public struct APIClient: Sendable {
         contentType: String? = nil,
         authorized: Bool = true
     ) -> URLRequest {
-        let url = Endpoints.url(baseURL: baseURL, path: path, query: query)
+        makeRequest(
+            url: Endpoints.url(baseURL: baseURL, path: path, query: query),
+            method: method,
+            body: body,
+            contentType: contentType,
+            authorized: authorized
+        )
+    }
+
+    /// Builds a request for a URL that was assembled by hand (endpoints whose
+    /// path parameter itself contains slashes, like a Bluesky AT URI).
+    func makeRequest(
+        url: URL,
+        method: String = "GET",
+        body: Data? = nil,
+        contentType: String? = nil,
+        authorized: Bool = true
+    ) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = 30

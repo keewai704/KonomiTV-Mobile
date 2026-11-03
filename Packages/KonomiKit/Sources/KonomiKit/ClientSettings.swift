@@ -75,6 +75,40 @@ public struct WatchedHistoryItem: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
+// MARK: - Panel tabs
+
+/// Tab of the live player's information panel (tv_panel_active_tab).
+public enum LivePanelTab: String, Codable, CaseIterable, Sendable, Hashable {
+    case program = "Program"
+    case channel = "Channel"
+    case comment = "Comment"
+    case twitter = "Twitter"
+
+    public var displayName: String {
+        switch self {
+        case .program: return "番組"
+        case .channel: return "チャンネル"
+        case .comment: return "コメント"
+        case .twitter: return "Twitter"
+        }
+    }
+}
+
+/// Tab of the recorded video's information panel (video_panel_active_tab).
+public enum VideoPanelTab: String, Codable, CaseIterable, Sendable, Hashable {
+    case recordedProgram = "RecordedProgram"
+    case comment = "Comment"
+    case twitter = "Twitter"
+
+    public var displayName: String {
+        switch self {
+        case .recordedProgram: return "番組"
+        case .comment: return "コメント"
+        case .twitter: return "Twitter"
+        }
+    }
+}
+
 // MARK: - Client settings
 
 /// The current user's client settings, as stored by the server
@@ -278,6 +312,110 @@ public struct ClientSettings: Codable, Sendable, Hashable {
         set { setTypedValue(newValue, forKey: "muted_niconico_user_ids") }
     }
 
+    // MARK: Panels
+
+    /// Panel tab opened first when a live channel starts (tv_panel_active_tab).
+    public var tvPanelActiveTab: LivePanelTab {
+        get {
+            values["tv_panel_active_tab"]?.decode(LivePanelTab.self)
+                ?? ClientSettingsDefaults.tvPanelActiveTab
+        }
+        set { setTypedValue(newValue, forKey: "tv_panel_active_tab") }
+    }
+
+    /// Panel tab opened first when a recorded program starts
+    /// (video_panel_active_tab).
+    public var videoPanelActiveTab: VideoPanelTab {
+        get {
+            values["video_panel_active_tab"]?.decode(VideoPanelTab.self)
+                ?? ClientSettingsDefaults.videoPanelActiveTab
+        }
+        set { setTypedValue(newValue, forKey: "video_panel_active_tab") }
+    }
+
+    // MARK: Twitter / Bluesky
+
+    /// The saved hashtag list of the Twitter panel (saved_twitter_hashtags).
+    public var savedTwitterHashtags: [String] {
+        get { typedValue([String].self, forKey: "saved_twitter_hashtags") ?? [] }
+        set { setTypedValue(newValue, forKey: "saved_twitter_hashtags") }
+    }
+
+    /// Fold the panel after posting (fold_panel_after_sending_tweet).
+    public var foldPanelAfterSendingTweet: Bool {
+        get {
+            values["fold_panel_after_sending_tweet"]?.boolValue
+                ?? ClientSettingsDefaults.foldPanelAfterSendingTweet
+        }
+        set { values["fold_panel_after_sending_tweet"] = .bool(newValue) }
+    }
+
+    /// Clear the hashtag field when the channel or program changes
+    /// (reset_hashtag_when_program_switches).
+    public var resetHashtagWhenProgramSwitches: Bool {
+        get {
+            values["reset_hashtag_when_program_switches"]?.boolValue
+                ?? ClientSettingsDefaults.resetHashtagWhenProgramSwitches
+        }
+        set { values["reset_hashtag_when_program_switches"] = .bool(newValue) }
+    }
+
+    /// Add the watched channel's station hashtag automatically
+    /// (auto_add_watching_channel_hashtag). Live playback only.
+    public var autoAddWatchingChannelHashtag: Bool {
+        get {
+            values["auto_add_watching_channel_hashtag"]?.boolValue
+                ?? ClientSettingsDefaults.autoAddWatchingChannelHashtag
+        }
+        set { values["auto_add_watching_channel_hashtag"] = .bool(newValue) }
+    }
+
+    /// Reply tree mode of Twitter posts (twitter_reply_thread_mode).
+    public var twitterReplyThreadMode: TweetReplyThreadMode {
+        get {
+            values["twitter_reply_thread_mode"]?.decode(TweetReplyThreadMode.self)
+                ?? ClientSettingsDefaults.twitterReplyThreadMode
+        }
+        set { setTypedValue(newValue, forKey: "twitter_reply_thread_mode") }
+    }
+
+    /// Reply tree mode of Bluesky posts (bluesky_reply_thread_mode).
+    public var blueskyReplyThreadMode: TweetReplyThreadMode {
+        get {
+            values["bluesky_reply_thread_mode"]?.decode(TweetReplyThreadMode.self)
+                ?? ClientSettingsDefaults.blueskyReplyThreadMode
+        }
+        set { setTypedValue(newValue, forKey: "bluesky_reply_thread_mode") }
+    }
+
+    /// Sub tab opened first by the Twitter panel (twitter_active_tab).
+    public var twitterActiveTab: TwitterPanelTab {
+        get {
+            values["twitter_active_tab"]?.decode(TwitterPanelTab.self)
+                ?? ClientSettingsDefaults.twitterActiveTab
+        }
+        set { setTypedValue(newValue, forKey: "twitter_active_tab") }
+    }
+
+    /// Where hashtags are placed in the posted text (tweet_hashtag_position).
+    public var tweetHashtagPosition: TweetHashtagPosition {
+        get {
+            values["tweet_hashtag_position"]?.decode(TweetHashtagPosition.self)
+                ?? ClientSettingsDefaults.tweetHashtagPosition
+        }
+        set { setTypedValue(newValue, forKey: "tweet_hashtag_position") }
+    }
+
+    /// Where the program title watermark is drawn on attached captures
+    /// (tweet_capture_watermark_position).
+    public var tweetCaptureWatermarkPosition: TweetCaptureWatermarkPosition {
+        get {
+            values["tweet_capture_watermark_position"]?.decode(TweetCaptureWatermarkPosition.self)
+                ?? ClientSettingsDefaults.tweetCaptureWatermarkPosition
+        }
+        set { setTypedValue(newValue, forKey: "tweet_capture_watermark_position") }
+    }
+
     // MARK: My List / history mutation
 
     public func isInMylist(type: MylistItem.Kind, id: Int) -> Bool {
@@ -355,6 +493,17 @@ public enum ClientSettingsDefaults {
     public static let muteCommentKeywordsNormalizeAlphanumericWidthCase = true
     public static let mutedCommentKeywords: [MutedCommentKeyword] = []
     public static let mutedNiconicoUserIDs: [String] = []
+    public static let tvPanelActiveTab: LivePanelTab = .program
+    public static let videoPanelActiveTab: VideoPanelTab = .recordedProgram
+    public static let savedTwitterHashtags: [String] = []
+    public static let foldPanelAfterSendingTweet = false
+    public static let resetHashtagWhenProgramSwitches = true
+    public static let autoAddWatchingChannelHashtag = true
+    public static let twitterReplyThreadMode: TweetReplyThreadMode = .perHashtag
+    public static let blueskyReplyThreadMode: TweetReplyThreadMode = .disabled
+    public static let twitterActiveTab: TwitterPanelTab = .capture
+    public static let tweetHashtagPosition: TweetHashtagPosition = .append
+    public static let tweetCaptureWatermarkPosition: TweetCaptureWatermarkPosition = .none
 }
 
 // MARK: - Sync decision

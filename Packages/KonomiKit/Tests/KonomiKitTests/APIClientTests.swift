@@ -29,6 +29,14 @@ actor StubTransport: HTTPTransport {
     func requestCount() -> Int {
         recordedRequests.count
     }
+
+    func recordedMethods() -> [String] {
+        recordedRequests.map { $0.httpMethod ?? "" }
+    }
+
+    func recordedPaths() -> [String] {
+        recordedRequests.compactMap { $0.url?.path }
+    }
 }
 
 private let serverBaseURL = URL(string: "http://127.0.0.1:7010")!

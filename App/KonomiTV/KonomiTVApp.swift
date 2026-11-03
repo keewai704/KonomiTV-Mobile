@@ -56,6 +56,10 @@ struct LaunchOptions: Sendable {
                 PreferenceKeys.captionOpacity,
                 PreferenceKeys.tvShowSuperimpose,
                 PreferenceKeys.videoShowSuperimpose,
+                PreferenceKeys.twitterPanelAccount,
+                PreferenceKeys.twitterPanelPostTargets,
+                PreferenceKeys.twitterReplyThreadStates,
+                PreferenceKeys.blueskyReplyThreadStates,
             ] {
                 defaults.removeObject(forKey: key)
             }

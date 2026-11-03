@@ -26,6 +26,7 @@ API が 404 を返すサーバーでは画面に出しません。
 | チャンネル切り替え（上下・リモコンパネル） | — | ✅ |
 | ライブ視聴の番組・チャンネルパネル | `GET /api/channels` | ✅ |
 | ライブのコメントパネル（一覧・自動スクロール・投稿・色／位置／サイズ） | `GET /api/channels/{id}/jikkyo`、WebSocket | ✅ |
+| ライブの Twitter / Bluesky パネル（投稿・タイムライン・検索・キャプチャ添付） | `/api/twitter/*`, `/api/bluesky/*` | ✅ |
 
 ## 番組表・番組検索
 
@@ -64,7 +65,7 @@ API が 404 を返すサーバーでは画面に出しません。
 | 録画番組の過去ログコメント | ✅ |
 | ARIB 字幕・文字スーパー | ✅ |
 | キャプチャ（字幕・コメント合成、写真への保存、サーバーへのアップロード） | ✅ |
-| Twitter / Bluesky パネル（投稿・タイムライン・検索・RT・いいね） | 🚧 6 |
+| Twitter / Bluesky パネル（投稿・タイムライン・検索・RT・いいね） | ✅ |
 | データ放送 | ⚠️ 10 |
 
 ## キャプチャ（0.15）
@@ -76,6 +77,24 @@ API が 404 を返すサーバーでは画面に出しません。
 | 一覧・日付別・放送回別・お気に入り・タグ・検索 | `/api/captures/*` | ✅ |
 | 保存先（端末・KonomiTV サーバー・両方）・ファイル名パターン・クリップボードへのコピー | `POST /api/captures`、クライアント設定 | ✅ |
 | 字幕・コメントの合成（EXIF の XPComment に番組情報を書き込む） | — | ✅ |
+
+## Twitter / Bluesky
+
+視聴画面のパネルの「Twitter」タブと、設定 → Twitter / Bluesky の画面です。
+
+| 機能 | API | 状態 |
+| --- | --- | --- |
+| Twitter アカウント連携（Cookie / cookies.txt）・連携解除 | `POST /api/twitter/auth`, `DELETE /api/twitter/accounts/{screen_name}` | ✅ |
+| Bluesky アカウント連携（ハンドル + App Password）・連携解除 | `POST /api/bluesky/auth`, `DELETE /api/bluesky/accounts/{handle}` | ✅ |
+| Twitter / Bluesky アカウントの紐付け・紐付け解除 | `POST/DELETE /api/users/me/account-links` | ✅ |
+| 投稿（ハッシュタグ、保存したハッシュタグ、文字数、位置、キャプチャ 4 枚まで・透かし、同時投稿） | `POST /api/twitter/accounts/{screen_name}/tweets`, `POST /api/bluesky/accounts/{handle}/posts` | ✅ |
+| リプライツリー実況（ハッシュタグごと・1 日ごと・無効） | — | ✅ |
+| タイムライン（Twitter と Bluesky の統合表示、続きの読み込み） | `GET /api/twitter/accounts/{screen_name}/timeline`, `GET /api/bluesky/accounts/{handle}/timeline` | ✅ |
+| 検索（チャンネルの局タグで自動検索、統合表示） | `GET /api/twitter/accounts/{screen_name}/search`, `GET /api/bluesky/accounts/{handle}/search` | ✅ |
+| リツイート／リポスト・いいね | `PUT/DELETE .../retweet`, `.../repost`, `.../favorite`, `.../like` | ✅ |
+| ヘッドレスブラウザの Keep-Alive | `POST /api/twitter/accounts/{screen_name}/keep-alive` | ✅ |
+| ツイートの動画（プロキシ再生） | `GET /api/twitter/video-proxy` | ⚠️ 画像のみ対応 |
+| 「リツイートを表示する」の切り替え | — | ⚠️ 未対応 |
 
 ## 録画予約
 
@@ -92,7 +111,7 @@ API が 404 を返すサーバーでは画面に出しません。
 | ログイン・ログアウト | `POST /api/users/token` | ✅ |
 | アカウント作成 | `POST /api/users` | 🚧 8 |
 | ユーザー名・パスワード変更、アイコン、アカウント削除 | `/api/users/me*` | 🚧 8 |
-| ニコニコ・Twitter・Bluesky アカウント連携 | `/api/niconico/*`, `/api/twitter/*`, `/api/bluesky/*` | ✅（ニコニコ）／🚧 6（Twitter・Bluesky） |
+| ニコニコ・Twitter・Bluesky アカウント連携 | `/api/niconico/*`, `/api/twitter/*`, `/api/bluesky/*` | ✅ |
 | 設定の同期 | `GET/PUT /api/settings/client` | ✅ |
 | 管理者: ユーザー管理 | `/api/users`, `/api/users/{name}` | 🚧 8 |
 | 管理者: サーバー設定 | `GET/PUT /api/settings/server` | 🚧 8 |

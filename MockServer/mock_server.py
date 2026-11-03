@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import caption_injector
 import captures_mock
+import twitter_mock
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FIXTURE_DIR = os.path.join(BASE_DIR, "fixtures")
@@ -304,6 +305,26 @@ class MockServerState:
         # お気に入りの付け外しの回数 (UI テストの検証用)
         self.capture_favorite_add_count = 0
         self.capture_favorite_remove_count = 0
+        # Twitter / Bluesky 連携・投稿・リアクションのカウンタ (UI テストの検証用)
+        self.twitter_auth_count = 0
+        self.twitter_account_delete_count = 0
+        self.twitter_keep_alive_count = 0
+        self.twitter_posted_tweets: list[dict] = []
+        self.twitter_retweet_count = 0
+        self.twitter_unretweet_count = 0
+        self.twitter_favorite_count = 0
+        self.twitter_unfavorite_count = 0
+        self.twitter_reaction_events: list[dict] = []
+        self.bluesky_auth_count = 0
+        self.bluesky_account_delete_count = 0
+        self.bluesky_posted_posts: list[dict] = []
+        self.bluesky_repost_count = 0
+        self.bluesky_unrepost_count = 0
+        self.bluesky_like_count = 0
+        self.bluesky_unlike_count = 0
+        self.bluesky_reaction_events: list[dict] = []
+        self.account_link_create_count = 0
+        self.account_link_delete_count = 0
 
     def record_keepalive(self, video_id: str) -> None:
         with self.lock:
@@ -459,6 +480,25 @@ class MockServerState:
                 "last_capture_upload": copy.deepcopy(self.last_capture_upload),
                 "capture_favorite_add_count": self.capture_favorite_add_count,
                 "capture_favorite_remove_count": self.capture_favorite_remove_count,
+                "twitter_auth_count": self.twitter_auth_count,
+                "twitter_account_delete_count": self.twitter_account_delete_count,
+                "twitter_keep_alive_count": self.twitter_keep_alive_count,
+                "twitter_posted_tweets": copy.deepcopy(self.twitter_posted_tweets),
+                "twitter_retweet_count": self.twitter_retweet_count,
+                "twitter_unretweet_count": self.twitter_unretweet_count,
+                "twitter_favorite_count": self.twitter_favorite_count,
+                "twitter_unfavorite_count": self.twitter_unfavorite_count,
+                "twitter_reaction_events": copy.deepcopy(self.twitter_reaction_events),
+                "bluesky_auth_count": self.bluesky_auth_count,
+                "bluesky_account_delete_count": self.bluesky_account_delete_count,
+                "bluesky_posted_posts": copy.deepcopy(self.bluesky_posted_posts),
+                "bluesky_repost_count": self.bluesky_repost_count,
+                "bluesky_unrepost_count": self.bluesky_unrepost_count,
+                "bluesky_like_count": self.bluesky_like_count,
+                "bluesky_unlike_count": self.bluesky_unlike_count,
+                "bluesky_reaction_events": copy.deepcopy(self.bluesky_reaction_events),
+                "account_link_create_count": self.account_link_create_count,
+                "account_link_delete_count": self.account_link_delete_count,
             }
 
 
@@ -531,6 +571,7 @@ def load_fixtures() -> dict:
         "sample_ts": sample_ts,
         "download_bytes": download_bytes,
         **captures_mock.build_fixtures(videos, channels),
+        **twitter_mock.build_fixtures(),
     }
 
 
@@ -1258,6 +1299,12 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_niconico_authorize(query)
             return
 
+        # Twitter / Bluesky のツイート画像・アイコン (生成した PNG)
+        if path.startswith("/__mock/twitter/"):
+            if not twitter_mock.handle_mock_image(self, path):
+                self._not_found()
+            return
+
         if not path.startswith("/api"):
             self._not_found()
             return
@@ -1298,6 +1345,16 @@ class MockHandler(BaseHTTPRequestHandler):
         if parts[0] == "series":
             self._handle_series(parts, query, fixtures)
             return
+
+        # Twitter / Bluesky (TwitterRouter / BlueskyRouter)
+        if parts[0] in ("twitter", "bluesky"):
+            if twitter_mock.handle(self, "GET", parts, query, fixtures, state):
+                return
+
+        # /api/users/me/account-links/{link_id} (DELETE のみ)
+        if len(parts) == 4 and parts[:3] == ["users", "me", "account-links"]:
+            if twitter_mock.handle(self, "GET", parts, query, fixtures, state):
+                return
 
         if parts == ["programs", "timetable"]:
             self._handle_timetable(query, fixtures)
@@ -1347,6 +1404,10 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_client_settings_put(fixtures, state)
             return
 
+        if parts and parts[0] in ("twitter", "bluesky"):
+            if twitter_mock.handle(self, "PUT", parts, query, fixtures, state):
+                return
+
         if parts and parts[0] == "captures":
             captures_mock.handle(self, "PUT", parts, query, fixtures, state)
             return
@@ -1386,6 +1447,16 @@ class MockHandler(BaseHTTPRequestHandler):
         if split.path == "/__mock/config":
             self._handle_mock_config()
             return
+
+        if parts and parts[0] in ("twitter", "bluesky"):
+            state = self.server.state  # type: ignore[attr-defined]
+            if twitter_mock.handle(self, "POST", parts, self._query(), fixtures, state):
+                return
+
+        if parts == ["users", "me", "account-links"]:
+            state = self.server.state  # type: ignore[attr-defined]
+            if twitter_mock.handle(self, "POST", parts, self._query(), fixtures, state):
+                return
 
         if parts and parts[0] == "captures":
             state = self.server.state  # type: ignore[attr-defined]
@@ -1454,6 +1525,14 @@ class MockHandler(BaseHTTPRequestHandler):
         if parts == ["niconico", "logout"]:
             self._handle_niconico_logout(fixtures, state)
             return
+
+        # Twitter / Bluesky の連携解除とアカウント紐付け解除
+        if parts and parts[0] in ("twitter", "bluesky"):
+            if twitter_mock.handle(self, "DELETE", parts, self._query(), fixtures, state):
+                return
+        if len(parts) == 4 and parts[:3] == ["users", "me", "account-links"]:
+            if twitter_mock.handle(self, "DELETE", parts, self._query(), fixtures, state):
+                return
 
         if parts and parts[0] == "captures":
             captures_mock.handle(self, "DELETE", parts, self._query(), fixtures, state)
@@ -2654,10 +2733,10 @@ class MockHandler(BaseHTTPRequestHandler):
         self._send_bytes(html.encode("utf-8"), "text/html; charset=utf-8", status=status)
 
     def _handle_users_me(self, fixtures: dict) -> None:
-        user = self._require_user(fixtures)
-        if user is None:
+        if self._require_user(fixtures) is None:
             return
-        self._send_json(user)
+        # Twitter / Bluesky の連携アカウントと紐付けを含めて返す
+        self._send_json(twitter_mock.user_payload(fixtures, self))
 
 
 # ---------------------------------------------------------------------------

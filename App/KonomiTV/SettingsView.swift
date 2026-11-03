@@ -25,6 +25,7 @@ struct SettingsView: View {
             historySection
             captionSection
             captureSection
+            twitterSection
             informationSection
         }
         .navigationTitle("設定")
@@ -101,6 +102,17 @@ struct SettingsView: View {
                 Label("キャプチャ", systemImage: "camera")
             }
             .accessibilityIdentifier("settings.capture")
+        }
+    }
+
+    private var twitterSection: some View {
+        Section("SNS") {
+            NavigationLink {
+                TwitterSettingsView(model: model)
+            } label: {
+                Label("Twitter / Bluesky", systemImage: "at")
+            }
+            .accessibilityIdentifier("settings.twitter")
         }
     }
 

@@ -20,6 +20,9 @@ struct VideoDetailView: View {
     @State private var isDownloading = false
     @State private var downloadProgress: Double = 0
     @State private var commentSession: RecordedCommentSession?
+    @State private var panelTab: VideoPanelTab = .recordedProgram
+    @State private var didSetInitialPanelTab = false
+    @State private var twitterSession: TwitterSession?
 
     private var current: RecordedProgram { detail ?? video }
 
@@ -43,11 +46,21 @@ struct VideoDetailView: View {
         .task {
             startPlayback()
             startComments()
+            startTwitter()
         }
         .task { await loadDetail() }
         .onAppear {
             model.playback.comments.apply(settings: model.settings)
             model.playback.viewAppeared(for: playbackItem)
+            if !didSetInitialPanelTab {
+                didSetInitialPanelTab = true
+                panelTab = model.settings.videoPanelActiveTab
+            }
+        }
+        .onChange(of: panelTab) { _, newValue in
+            model.mutateSettings { settings in
+                settings.videoPanelActiveTab = newValue
+            }
         }
         .onDisappear {
             commentSession?.stop()
@@ -229,6 +242,89 @@ struct VideoDetailView: View {
 
     private var info: some View {
         VStack(alignment: .leading, spacing: 12) {
+            panelTabPicker
+
+            switch panelTab {
+            case .recordedProgram:
+                programInfo
+            case .comment:
+                commentTab
+            case .twitter:
+                twitterPanel
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var panelTabPicker: some View {
+        HStack(spacing: 2) {
+            panelTabButton(.recordedProgram, identifier: "video.panel.program")
+            panelTabButton(.comment, identifier: "video.panel.comment")
+            panelTabButton(.twitter, identifier: "video.panel.twitter")
+        }
+        .padding(2)
+        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    private func panelTabButton(_ tab: VideoPanelTab, identifier: String) -> some View {
+        Button {
+            panelTab = tab
+        } label: {
+            Text(tab.displayName)
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .background(
+                    panelTab == tab ? Color.accentColor : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 7)
+                )
+                .foregroundStyle(panelTab == tab ? Color.white : Color.primary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+    }
+
+    @ViewBuilder
+    private var twitterPanel: some View {
+        if let twitterSession {
+            TwitterPanelView(
+                model: model,
+                session: twitterSession,
+                context: TwitterPanelContext(
+                    channelName: nil,
+                    programTitle: current.title,
+                    programID: nil
+                )
+            )
+        } else {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private var commentTab: some View {
+        if let commentSession {
+            CommentListPanel(
+                title: "コメント",
+                comments: commentSession.visibleComments,
+                statusMessage: commentSession.statusMessage,
+                height: 360,
+                onMuteUser: { userID in
+                    model.addMutedNiconicoUser(userID)
+                    commentSession.removeComments(from: userID)
+                }
+            )
+        } else {
+            Text("コメントはありません")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// The program information tab.
+    private var programInfo: some View {
+        VStack(alignment: .leading, spacing: 12) {
             Text(current.title)
                 .font(.title3.weight(.semibold))
                 .fixedSize(horizontal: false, vertical: true)
@@ -273,19 +369,6 @@ struct VideoDetailView: View {
                     .font(.body)
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if let commentSession {
-                CommentListPanel(
-                    title: "コメント",
-                    comments: commentSession.visibleComments,
-                    statusMessage: commentSession.statusMessage,
-                    height: 320,
-                    onMuteUser: { userID in
-                        model.addMutedNiconicoUser(userID)
-                        commentSession.removeComments(from: userID)
-                    }
-                )
             }
 
             if !seriesEpisodes.isEmpty {
@@ -381,6 +464,14 @@ struct VideoDetailView: View {
             profile: QualityPreferences.videoProfile(cellular: model.networkMonitor.isCellular),
             startAt: model.resumePosition(for: video)
         )
+    }
+
+    /// Creates the Twitter panel session once per screen.
+    private func startTwitter() {
+        guard twitterSession == nil else { return }
+        let session = TwitterSession(model: model, playback: model.playback)
+        session.onFoldPanel = {}
+        twitterSession = session
     }
 
     /// Loads the past log comments of the recording (step 2 of the comment

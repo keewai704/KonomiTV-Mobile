@@ -17,17 +17,13 @@ struct LivePlayerView: View {
     @State private var channels: LiveChannels?
     @State private var channelsError: String?
     @State private var panelTab: LivePanelTab = .program
+    @State private var didSetInitialPanelTab = false
     @State private var showsPanel = true
     @State private var showsRemocon = false
     @State private var commentSession: LiveCommentSession?
+    @State private var twitterSession: TwitterSession?
     /// Incremented by the M shortcut so the posting form focuses its field.
     @State private var commentFocusRequest = 0
-
-    private enum LivePanelTab: String, Hashable {
-        case program
-        case channel
-        case comment
-    }
 
     init(model: AppModel, channel: LiveChannel) {
         self.model = model
@@ -57,11 +53,21 @@ struct LivePlayerView: View {
         .task(id: channel.displayChannelID) {
             startPlayback()
             startComments()
+            startTwitter()
         }
         .task { await loadChannels() }
         .onAppear {
             playback.comments.apply(settings: model.settings)
             playback.viewAppeared(for: playbackItem)
+            if !didSetInitialPanelTab {
+                didSetInitialPanelTab = true
+                panelTab = model.settings.tvPanelActiveTab
+            }
+        }
+        .onChange(of: panelTab) { _, newValue in
+            model.mutateSettings { settings in
+                settings.tvPanelActiveTab = newValue
+            }
         }
         .onDisappear {
             commentSession?.stop()
@@ -256,6 +262,8 @@ struct LivePlayerView: View {
                 channelPanel
             case .comment:
                 commentPanel
+            case .twitter:
+                twitterPanel
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -266,6 +274,7 @@ struct LivePlayerView: View {
             panelTabButton(.program, title: "番組", identifier: "panel.program")
             panelTabButton(.channel, title: "チャンネル", identifier: "panel.channel")
             panelTabButton(.comment, title: "コメント", identifier: "panel.comment")
+            panelTabButton(.twitter, title: "Twitter", identifier: "panel.twitter")
         }
         .padding(2)
         .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
@@ -427,6 +436,24 @@ struct LivePlayerView: View {
     }
 
     @ViewBuilder
+    private var twitterPanel: some View {
+        if let twitterSession {
+            TwitterPanelView(
+                model: model,
+                session: twitterSession,
+                context: TwitterPanelContext(
+                    channelName: channel.name,
+                    programTitle: channel.programPresent?.title ?? channel.name,
+                    programID: channel.programPresent?.id
+                )
+            )
+        } else {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder
     private var channelPanel: some View {
         if !typeChannels.isEmpty {
             VStack(spacing: 0) {
@@ -548,6 +575,16 @@ struct LivePlayerView: View {
             client: client,
             profile: QualityPreferences.liveProfile(cellular: model.networkMonitor.isCellular)
         )
+    }
+
+    /// Creates the Twitter panel session once per player screen. The panel
+    /// keeps its own state (composer, feeds) while other tabs are shown.
+    private func startTwitter() {
+        guard twitterSession == nil else { return }
+        let session = TwitterSession(model: model, playback: playback)
+        // Folding the panel hides the information column the panel lives in.
+        session.onFoldPanel = { showsPanel = false }
+        twitterSession = session
     }
 
     /// Starts a fresh comment session for the current channel. Called from the
