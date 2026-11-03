@@ -65,6 +65,7 @@ targets:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         NSLocalNetworkUsageDescription: 同じネットワーク上のKonomiTVサーバーに接続して、テレビ放送やビデオを再生します。
+        NSPhotoLibraryAddUsageDescription: キャプチャした画像を写真ライブラリに保存します。
     settings:
       base:
         PRODUCT_NAME: KonomiTV

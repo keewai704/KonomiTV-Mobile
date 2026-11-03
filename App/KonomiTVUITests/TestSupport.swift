@@ -18,6 +18,7 @@ enum TestSection: String, CaseIterable {
     case videos
     case mylist
     case history
+    case captures
     case settings
 
     var title: String {
@@ -27,6 +28,7 @@ enum TestSection: String, CaseIterable {
         case .videos: return "ビデオ"
         case .mylist: return "マイリスト"
         case .history: return "視聴履歴"
+        case .captures: return "キャプチャ"
         case .settings: return "設定"
         }
     }
@@ -36,7 +38,7 @@ enum TestSection: String, CaseIterable {
         switch self {
         case .live: return "live"
         case .videos: return "videos"
-        case .timetable, .mylist, .history, .settings: return "mypage"
+        case .timetable, .mylist, .history, .captures, .settings: return "mypage"
         }
     }
 
@@ -46,6 +48,7 @@ enum TestSection: String, CaseIterable {
         case .timetable: return "mypage.timetable"
         case .mylist: return "mypage.mylist"
         case .history: return "mypage.history"
+        case .captures: return "mypage.captures"
         case .settings: return "mypage.settings"
         case .live, .videos: return nil
         }
@@ -97,6 +100,20 @@ enum MockServerControl {
             }
         }
         return status
+    }
+
+    /// `POST /__mock/config {"captures_library": false}`: makes the mock
+    /// behave like KonomiTV v0.14.1, which has no captures library.
+    @discardableResult
+    static func setCapturesLibrary(_ available: Bool) -> Int {
+        var request = URLRequest(url: baseURL.appendingPathComponent("__mock/config"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["captures_library": available]
+        )
+        return perform(request).status
     }
 
     /// `GET /__mock/stats`.
@@ -502,6 +519,7 @@ func dismissKeyboard(in app: XCUIApplication) {
 /// items can still be animating and report an invalid activation point, so
 /// wait for them to settle and fall back to tapping the frame's center (a
 /// swipe, as `tapWhenHittable` does, would close the menu).
+@MainActor
 func tapMenuItem(_ element: XCUIElement, timeout: TimeInterval = 3) {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
@@ -514,6 +532,7 @@ func tapMenuItem(_ element: XCUIElement, timeout: TimeInterval = 3) {
     element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
 }
 
+@MainActor
 func tapWhenHittable(
     _ element: XCUIElement,
     in app: XCUIApplication,

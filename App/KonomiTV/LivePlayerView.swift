@@ -105,6 +105,11 @@ struct LivePlayerView: View {
             .accessibilityLabel("字幕")
             .accessibilityValue(playback.captions.isVisible ? "表示" : "非表示")
 
+            // A radio channel has no video, so capturing is not offered.
+            if !channel.isRadioChannel {
+                CaptureButton(playback: playback, settings: model.settings)
+            }
+
             qualityMenu
 
             if playback.hasSecondaryAudio {

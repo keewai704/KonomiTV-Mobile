@@ -114,6 +114,10 @@ final class PlaybackController {
     /// ARIB caption (字幕・文字スーパー) pipeline and overlay state.
     let captions = CaptionController()
 
+    /// Capture (キャプチャ) pipeline: frame grab, caption / comment compositing
+    /// and saving. Reads the frame from the shared player.
+    let capture = CaptureController()
+
     @ObservationIgnored private var delegateProxy = PlayerViewControllerDelegate()
     @ObservationIgnored private var player: AVPlayer?
     @ObservationIgnored private var liveSession: LiveStreamSession?
@@ -151,6 +155,8 @@ final class PlaybackController {
 
         delegateProxy.owner = self
         playerViewController.delegate = delegateProxy
+
+        capture.playback = self
 
         attachOverlays()
         observeAudioSessionInterruptions()
@@ -213,6 +219,7 @@ final class PlaybackController {
         keepAliveTask = nil
 
         detachPlayerObservers()
+        capture.detach()
         player?.pause()
         player = nil
         playerViewController.player = nil
@@ -390,6 +397,22 @@ final class PlaybackController {
         stop()
     }
 
+    // MARK: - Capture inputs
+
+    /// The AVPlayer the capture pipeline reads frames from (nil when idle).
+    var capturePlayer: AVPlayer? { player }
+
+    /// The client captures are uploaded with.
+    var captureClient: APIClient? { client }
+
+    /// The danmaku overlay view, whose layer tree is rendered into a comment
+    /// capture.
+    var commentOverlay: CommentOverlayUIView? { commentOverlayView }
+
+    /// Playback position in seconds, with sub-second precision for the EXIF
+    /// metadata.
+    var capturePosition: Double { currentPosition }
+
     private var isPlayerScreenVisible: Bool {
         guard let current = item else { return false }
         return visibleItem == current
@@ -459,6 +482,7 @@ final class PlaybackController {
         keepAliveTask = nil
 
         detachPlayerObservers()
+        capture.detach()
         player?.pause()
         player = nil
         playerViewController.player = nil
@@ -554,6 +578,7 @@ final class PlaybackController {
         activateAudioSession()
 
         let playerItem = AVPlayerItem(url: url)
+        capture.attach(to: playerItem)
         let newPlayer = AVPlayer(playerItem: playerItem)
         configure(newPlayer, item: .video(video))
         attach(newPlayer)
@@ -672,6 +697,7 @@ final class PlaybackController {
         activateAudioSession()
 
         let item = AVPlayerItem(url: url)
+        capture.attach(to: item)
         if profile.lowLatency {
             // Keep playback close to the live edge and let AVPlayer speed up
             // slightly when it falls behind.

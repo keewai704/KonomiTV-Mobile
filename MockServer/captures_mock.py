@@ -81,6 +81,134 @@ def image_dimensions(data: bytes) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
+# EXIF reading (stdlib only)
+# ---------------------------------------------------------------------------
+
+# TIFF の型ごとのバイト数 (BYTE/ASCII/SBYTE/UNDEFINED は 1、SHORT/SSHORT は 2、LONG 系は 4、RATIONAL 系は 8)
+_EXIF_TYPE_SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8}
+
+
+def _exif_tiff(data: bytes) -> bytes | None:
+    """JPEG の APP1 Exif セグメントから TIFF ブロックを取り出す (見つからなければ None)。"""
+    if not data.startswith(b"\xff\xd8"):
+        return None
+    index = 2
+    size = len(data)
+    while index + 3 < size:
+        if data[index] != 0xFF:
+            return None
+        marker = data[index + 1]
+        if marker in (0xDA, 0xD9):
+            return None
+        if marker == 0xFF:
+            index += 1
+            continue
+        if marker == 0xD8 or marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            index += 2
+            continue
+        length = int.from_bytes(data[index + 2:index + 4], "big")
+        if length < 2:
+            return None
+        start = index + 4
+        end = index + 2 + length
+        if end > size:
+            return None
+        if marker == 0xE1 and data[start:start + 6] == b"Exif\x00\x00":
+            return data[start + 6:end]
+        index = end
+    return None
+
+
+def _read_exif_ifd(tiff: bytes, offset: int, byte_order: str) -> dict[int, bytes]:
+    """1 つの IFD を読み、タグ番号から生の値への辞書を返す。"""
+    entries: dict[int, bytes] = {}
+    if offset < 0 or offset + 2 > len(tiff):
+        return entries
+    count = int.from_bytes(tiff[offset:offset + 2], byte_order)
+    for position in range(count):
+        base = offset + 2 + position * 12
+        if base + 12 > len(tiff):
+            break
+        tag = int.from_bytes(tiff[base:base + 2], byte_order)
+        kind = int.from_bytes(tiff[base + 2:base + 4], byte_order)
+        value_count = int.from_bytes(tiff[base + 4:base + 8], byte_order)
+        length = _EXIF_TYPE_SIZES.get(kind, 1) * value_count
+        if length <= 4:
+            entries[tag] = tiff[base + 8:base + 8 + length]
+            continue
+        value_offset = int.from_bytes(tiff[base + 8:base + 12], byte_order)
+        if value_offset < 0 or value_offset + length > len(tiff):
+            continue
+        entries[tag] = tiff[value_offset:value_offset + length]
+    return entries
+
+
+def read_capture_exif(data: bytes) -> tuple[dict | None, str | None]:
+    """キャプチャ画像の EXIF から、番組情報 (XPComment) と撮影日時を読み出す。
+
+    Returns:
+        tuple[dict | None, str | None]: XPComment の JSON と DateTimeOriginal
+            (EXIF 形式の文字列) 。読めなければ None 。
+    """
+    tiff = _exif_tiff(data)
+    if tiff is None or len(tiff) < 8:
+        return None, None
+    if tiff[0:2] == b"II":
+        byte_order = "little"
+    elif tiff[0:2] == b"MM":
+        byte_order = "big"
+    else:
+        return None, None
+
+    ifd0 = _read_exif_ifd(tiff, int.from_bytes(tiff[4:8], byte_order), byte_order)
+
+    metadata: dict | None = None
+    raw_comment = ifd0.get(40092)
+    if raw_comment:
+        try:
+            parsed = json.loads(raw_comment.decode("utf-16-le").rstrip("\x00"))
+            if isinstance(parsed, dict):
+                metadata = parsed
+        except (UnicodeDecodeError, ValueError):
+            metadata = None
+
+    date_time_original: str | None = None
+    exif_pointer = ifd0.get(34665)
+    if exif_pointer and len(exif_pointer) >= 4:
+        exif_ifd = _read_exif_ifd(
+            tiff,
+            int.from_bytes(exif_pointer[:4], byte_order),
+            byte_order,
+        )
+        raw_datetime = exif_ifd.get(36867)
+        if raw_datetime:
+            date_time_original = raw_datetime.decode("ascii", "replace").rstrip("\x00")
+
+    return metadata, date_time_original
+
+
+def match_capture_program(fixtures: dict, metadata: dict | None) -> int | None:
+    """XPComment の番組キー (network_id / service_id / event_id) に一致する放送回の ID 。"""
+    if not metadata:
+        return None
+    keys = []
+    for name in ("network_id", "service_id", "event_id"):
+        value = metadata.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        keys.append(value)
+    for program in fixtures["capture_programs"]:
+        if (
+            program["network_id"],
+            program["service_id"],
+            program["event_id"],
+        ) == tuple(keys):
+            return program["id"]
+    return None
+
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -964,6 +1092,7 @@ def _handle_post(handler, parts, query, fixtures, state) -> None:
         if ids is None:
             return
         fixtures["capture_favorites"].update(ids)
+        state.record_capture_favorite(added=len(ids))
         handler.send_response(204)
         handler.send_header("Content-Length", "0")
         handler.end_headers()
@@ -1060,8 +1189,12 @@ def _handle_delete(handler, parts, fixtures, state) -> None:
             _error(handler, 401, "Unauthorized")
             return
         body = handler._read_json_body()
+        removed = 0
         for capture_id in body.get("capture_ids") or []:
-            fixtures["capture_favorites"].discard(capture_id)
+            if capture_id in fixtures["capture_favorites"]:
+                fixtures["capture_favorites"].discard(capture_id)
+                removed += 1
+        state.record_capture_favorite(removed=removed)
         handler.send_response(204)
         handler.send_header("Content-Length", "0")
         handler.end_headers()
@@ -1175,6 +1308,10 @@ def _upload_capture(handler, fixtures, state, user) -> None:
     else:
         modified_at = datetime.now(JST)
 
+    # 実際のサーバーと同じく、アップロードされた画像の EXIF (XPComment) を読んで
+    # 番組情報・撮影日時・字幕/コメントの合成状態を登録する
+    metadata, date_time_original = read_capture_exif(data)
+
     fields_summary = {
         name: [
             {
@@ -1186,7 +1323,14 @@ def _upload_capture(handler, fixtures, state, user) -> None:
         ]
         for name, parts in fields.items()
     }
-    state.record_capture_upload(filename, fields_summary, len(data), content_type)
+    state.record_capture_upload(
+        filename,
+        fields_summary,
+        len(data),
+        content_type,
+        metadata=metadata,
+        date_time_original=date_time_original,
+    )
 
     # KonomiTV v0.14.1 has no captures library: it just writes the file and
     # answers 204 without registering anything.
@@ -1218,20 +1362,53 @@ def _upload_capture(handler, fixtures, state, user) -> None:
         count += 1
 
     width, height = image_dimensions(data)
+
+    # EXIF の番組情報をキャプチャの列に反映する (読めない画像は NoMetadata のまま)
+    captured_at = modified_at
+    metadata_status = "NoMetadata"
+    playback_position = None
+    caption_text = None
+    is_caption_composited = False
+    is_comment_composited = False
+    capture_program_id = None
+    broadcast_at = None
+    if metadata is not None:
+        metadata_status = "Parsed"
+        position = metadata.get("captured_playback_position")
+        if isinstance(position, (int, float)) and not isinstance(position, bool):
+            if position == position and position not in (float("inf"), float("-inf")):
+                playback_position = float(position)
+        text = metadata.get("caption_text")
+        if isinstance(text, str):
+            caption_text = text or None
+        is_caption_composited = bool(metadata.get("is_caption_composited"))
+        is_comment_composited = bool(metadata.get("is_comment_composited"))
+        capture_program_id = match_capture_program(fixtures, metadata)
+        program = _find_program(fixtures, capture_program_id)
+        if program is not None:
+            broadcast_at = program["start_time"]
+        # ファイルの更新日時が指定されていない場合は、EXIF の撮影日時を使う
+        exif_captured_at = metadata.get("captured_at")
+        if modified_raw == b"" and isinstance(exif_captured_at, str):
+            try:
+                captured_at = _parse_datetime(exif_captured_at)
+            except ValueError:
+                captured_at = modified_at
+
     capture = {
         "id": capture_id,
         "file_hash": digest,
         "file_size": len(data),
-        "captured_at": modified_at.isoformat(),
-        "broadcast_at": None,
+        "captured_at": captured_at.isoformat(),
+        "broadcast_at": broadcast_at,
         "image_width": width,
         "image_height": height,
-        "metadata_status": "NoMetadata",
-        "playback_position": None,
-        "caption_text": None,
-        "is_caption_composited": False,
-        "is_comment_composited": False,
-        "capture_program_id": None,
+        "metadata_status": metadata_status,
+        "playback_position": playback_position,
+        "caption_text": caption_text,
+        "is_caption_composited": is_caption_composited,
+        "is_comment_composited": is_comment_composited,
+        "capture_program_id": capture_program_id,
     }
     fixtures["captures"].append(capture)
     fixtures["capture_files"][capture_id] = [

@@ -24,6 +24,7 @@ struct SettingsView: View {
             timetableSection
             historySection
             captionSection
+            captureSection
             informationSection
         }
         .navigationTitle("設定")
@@ -89,6 +90,17 @@ struct SettingsView: View {
                 Label("字幕", systemImage: "captions.bubble")
             }
             .accessibilityIdentifier("settings.caption")
+        }
+    }
+
+    private var captureSection: some View {
+        Section("キャプチャ") {
+            NavigationLink {
+                CaptureSettingsView(model: model)
+            } label: {
+                Label("キャプチャ", systemImage: "camera")
+            }
+            .accessibilityIdentifier("settings.capture")
         }
     }
 

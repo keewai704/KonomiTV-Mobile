@@ -2261,6 +2261,164 @@ class JikkyoMockTestCase(unittest.TestCase):
         )
         self.assertEqual(status, 422)
 
+
+    # -- キャプチャの EXIF ---------------------------------------------------
+
+    def build_exif_jpeg(
+        self,
+        metadata: dict,
+        datetime_text: str = "2026:11:04 00:36:57",
+    ) -> bytes:
+        """ミニマムな JPEG に、手で組み立てた EXIF (XPComment + DateTimeOriginal) を付ける。"""
+        comment = (json.dumps(metadata, ensure_ascii=False) + "\x00").encode("utf-16-le")
+        datetime_bytes = (datetime_text + "\x00").encode("ascii")
+
+        ifd0_offset = 8
+        ifd0_size = 2 + 3 * 12 + 4
+        exif_offset = ifd0_offset + ifd0_size
+        exif_size = 2 + 12 + 4
+        datetime_offset = exif_offset + exif_size
+        comment_offset = datetime_offset + len(datetime_bytes)
+        digitized_offset = comment_offset + len(comment)
+
+        ifd0_entries = (
+            struct.pack("<HHI", 306, 2, len(datetime_bytes))
+            + struct.pack("<I", datetime_offset)
+            + struct.pack("<HHI", 34665, 4, 1)
+            + struct.pack("<I", exif_offset)
+            + struct.pack("<HHI", 40092, 1, len(comment))
+            + struct.pack("<I", comment_offset)
+        )
+        ifd0 = struct.pack("<H", 3) + ifd0_entries + struct.pack("<I", 0)
+        exif_entries = (
+            struct.pack("<HHI", 36867, 2, len(datetime_bytes))
+            + struct.pack("<I", digitized_offset)
+        )
+        exif_ifd = struct.pack("<H", 1) + exif_entries + struct.pack("<I", 0)
+
+        tiff = (
+            b"II"
+            + struct.pack("<H", 42)
+            + struct.pack("<I", ifd0_offset)
+            + ifd0
+            + exif_ifd
+            + datetime_bytes
+            + comment
+            + datetime_bytes
+        )
+        payload = b"Exif\x00\x00" + tiff
+        app1 = b"\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload
+        sos = b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00"
+        return b"\xff\xd8" + app1 + sos + b"\x12\x34\x56\x78" + b"\xff\xd9"
+
+    def capture_exif_metadata(self, event_id: int = 10001) -> dict:
+        return {
+            "captured_at": "2026-11-04T00:36:57+09:00",
+            "captured_playback_position": 2217.0,
+            "network_id": 32736,
+            "service_id": 1024,
+            "event_id": event_id,
+            "title": "ニュース7",
+            "description": "今日のニュース",
+            "start_time": "2026-11-03T23:40:00+09:00",
+            "end_time": None,
+            "duration": None,
+            "caption_text": "今日のニュースです",
+            "is_caption_composited": True,
+            "is_comment_composited": False,
+        }
+
+    def test_capture_upload_reads_exif_metadata(self) -> None:
+        self.reset()
+        image = self.build_exif_jpeg(self.capture_exif_metadata())
+        body, content_type = self.multipart_capture_body("Capture_20261104-003657.jpg", image)
+        status, _, response_body = self.request(
+            "POST",
+            "/api/captures",
+            body=body,
+            headers={"Content-Type": content_type},
+        )
+        self.assertEqual(status, 201)
+        uploaded = json.loads(response_body)
+        self.assertEqual(uploaded["metadata_status"], "Parsed")
+        self.assertEqual(uploaded["capture_program_id"], 1)
+        self.assertEqual(uploaded["caption_text"], "今日のニュースです")
+        self.assertAlmostEqual(uploaded["playback_position"], 2217.0)
+        self.assertTrue(uploaded["is_caption_composited"])
+        self.assertFalse(uploaded["is_comment_composited"])
+        # EXIF の撮影日時がそのままキャプチャ日時になる
+        self.assertTrue(uploaded["captured_at"].startswith("2026-11-04T00:36:57"))
+        self.assertEqual(uploaded["broadcast_at"], "2026-11-03T20:00:00+09:00")
+
+        # 番組が引ける
+        status, _, detail = self.get_json(f"/api/captures/{uploaded['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["program"]["title"], "ニュース7")
+
+        stats = self.stats()
+        self.assertGreaterEqual(len(stats["capture_uploads"]), 1)
+        last = stats["capture_uploads"][-1]
+        self.assertEqual(last["filename"], "Capture_20261104-003657.jpg")
+        self.assertEqual(last["date_time_original"], "2026:11:04 00:36:57")
+        self.assertEqual(last["metadata"]["title"], "ニュース7")
+        self.assertEqual(last["metadata"]["network_id"], 32736)
+        self.assertIsNone(last["metadata"]["end_time"])
+        self.assertIsNone(stats["last_capture_upload"]["metadata"]["duration"])
+
+    def test_capture_upload_without_matching_program_keeps_metadata(self) -> None:
+        self.reset()
+        image = self.build_exif_jpeg(self.capture_exif_metadata(event_id=9999))
+        body, content_type = self.multipart_capture_body("Capture.jpg", image)
+        status, _, response_body = self.request(
+            "POST",
+            "/api/captures",
+            body=body,
+            headers={"Content-Type": content_type},
+        )
+        self.assertEqual(status, 201)
+        uploaded = json.loads(response_body)
+        self.assertEqual(uploaded["metadata_status"], "Parsed")
+        self.assertIsNone(uploaded["capture_program_id"])
+        self.assertIsNone(uploaded["broadcast_at"])
+        stats = self.stats()
+        self.assertEqual(stats["last_capture_upload"]["metadata"]["event_id"], 9999)
+
+    def test_capture_upload_without_exif_is_no_metadata(self) -> None:
+        self.reset()
+        image = captures_mock.build_capture_png(31)
+        body, content_type = self.multipart_capture_body("Capture.png", image)
+        status, _, response_body = self.request(
+            "POST",
+            "/api/captures",
+            body=body,
+            headers={"Content-Type": content_type},
+        )
+        self.assertEqual(status, 201)
+        uploaded = json.loads(response_body)
+        self.assertEqual(uploaded["metadata_status"], "NoMetadata")
+        stats = self.stats()
+        self.assertIsNone(stats["last_capture_upload"]["metadata"])
+        self.assertIsNone(stats["last_capture_upload"]["date_time_original"])
+
+    def test_capture_favorite_counters(self) -> None:
+        self.reset()
+        status, _, _ = self.request(
+            "POST",
+            "/api/captures/favorites",
+            body=json.dumps({"capture_ids": [1, 2]}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(self.stats()["capture_favorite_add_count"], 2)
+        status, _, _ = self.request(
+            "DELETE",
+            "/api/captures/favorites",
+            body=json.dumps({"capture_ids": [1]}).encode(),
+            headers={**self.capture_auth(), "Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(self.stats()["capture_favorite_remove_count"], 1)
+
     def test_captures_library_toggle_matches_v0141(self) -> None:
         self.reset()
         try:

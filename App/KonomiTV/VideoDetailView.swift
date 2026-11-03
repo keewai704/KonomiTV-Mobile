@@ -115,6 +115,8 @@ struct VideoDetailView: View {
             .accessibilityLabel("字幕")
             .accessibilityValue(model.playback.captions.isVisible ? "表示" : "非表示")
 
+            CaptureButton(playback: model.playback, settings: model.settings)
+
             qualityMenu
 
             Button {

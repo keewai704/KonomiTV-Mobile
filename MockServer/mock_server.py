@@ -299,6 +299,11 @@ class MockServerState:
         self.captures_library = True
         self.capture_upload_count = 0
         self.last_capture_upload: dict | None = None
+        # 受け取ったキャプチャの一覧 (EXIF から読んだ番組情報と撮影日時を含む)
+        self.capture_uploads: list[dict] = []
+        # お気に入りの付け外しの回数 (UI テストの検証用)
+        self.capture_favorite_add_count = 0
+        self.capture_favorite_remove_count = 0
 
     def record_keepalive(self, video_id: str) -> None:
         with self.lock:
@@ -403,15 +408,28 @@ class MockServerState:
         fields: dict,
         size: int,
         content_type: str,
+        metadata: dict | None = None,
+        date_time_original: str | None = None,
     ) -> None:
         with self.lock:
             self.capture_upload_count += 1
-            self.last_capture_upload = {
+            upload = {
                 "filename": filename,
                 "fields": fields,
                 "size": size,
                 "content_type": content_type,
+                # EXIF の XPComment (読めなければ None)
+                "metadata": metadata,
+                # EXIF の DateTimeOriginal (EXIF 形式の文字列)
+                "date_time_original": date_time_original,
             }
+            self.last_capture_upload = upload
+            self.capture_uploads.append(copy.deepcopy(upload))
+
+    def record_capture_favorite(self, added: int = 0, removed: int = 0) -> None:
+        with self.lock:
+            self.capture_favorite_add_count += added
+            self.capture_favorite_remove_count += removed
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -437,7 +455,10 @@ class MockServerState:
                 "niconico_unlink_count": self.niconico_unlink_count,
                 "captures_library": self.captures_library,
                 "capture_upload_count": self.capture_upload_count,
+                "capture_uploads": copy.deepcopy(self.capture_uploads),
                 "last_capture_upload": copy.deepcopy(self.last_capture_upload),
+                "capture_favorite_add_count": self.capture_favorite_add_count,
+                "capture_favorite_remove_count": self.capture_favorite_remove_count,
             }
 
 

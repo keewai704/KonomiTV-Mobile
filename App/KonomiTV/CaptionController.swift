@@ -256,6 +256,17 @@ actor CaptionRenderPipeline {
     }
 }
 
+/// One caption / superimpose image with its destination, ready to be
+/// composited into a capture.
+///
+/// `CGImage` is not `Sendable`; the image is immutable once the renderer
+/// produced it, so it can be handed to a background composition task.
+struct CaptionCompositePlane: @unchecked Sendable {
+    let image: CGImage
+    /// Destination in the renderer's pixel space (origin top-left).
+    let rect: CGRect
+}
+
 /// Shared caption (字幕・文字スーパー) state for the app-wide player.
 ///
 /// The controller buffers caption PES packets by playback position, decodes
@@ -274,6 +285,10 @@ final class CaptionController {
     /// Number of distinct caption images shown since playback started (read by
     /// the hidden UI-test status label).
     private(set) var renderedCount = 0
+    /// Text of the caption currently on screen, or nil when no caption is
+    /// visible. Written into a capture's EXIF metadata whether or not the
+    /// caption is composited into the image.
+    private(set) var captionText: String?
     /// Whether the user has captions turned on (`player.captions.toggle`).
     private(set) var isVisible = true
     /// Captions are not part of the PiP window.
@@ -308,6 +323,9 @@ final class CaptionController {
     @ObservationIgnored private var needsClear = false
     @ObservationIgnored private var lastFrameCount = 0
     @ObservationIgnored private var lastNow: Double?
+    /// Text of the most recently appended caption, i.e. the one on screen while
+    /// the renderer still returns images.
+    @ObservationIgnored private var lastAppendedCaptionText: String?
 
     // MARK: - Lifecycle
 
@@ -333,9 +351,11 @@ final class CaptionController {
         pendingCaptions.removeAll()
         frames = []
         framesGeneration &+= 1
+        captionText = nil
         renderedCount = 0
         lastFrameCount = 0
         lastNow = nil
+        lastAppendedCaptionText = nil
         // The next session's first update clears the pipeline, so a
         // fire-and-forget clear can never land after the new captions.
         needsClear = true
@@ -351,9 +371,11 @@ final class CaptionController {
         pendingCaptions.removeAll()
         frames = []
         framesGeneration &+= 1
+        captionText = nil
         renderedCount = 0
         lastFrameCount = 0
         lastNow = nil
+        lastAppendedCaptionText = nil
         needsClear = true
         startTicker()
     }
@@ -413,7 +435,19 @@ final class CaptionController {
         if !isVisible {
             frames = []
             framesGeneration &+= 1
+            captionText = nil
             lastFrameCount = 0
+        }
+    }
+
+    /// The caption and superimpose images to burn into a capture, with their
+    /// destination rects in the renderer's pixel space (`renderSize`).
+    ///
+    /// Empty when the user hid captions or nothing is on screen.
+    func compositePlanes() -> [CaptionCompositePlane] {
+        guard isVisible, !frames.isEmpty else { return [] }
+        return frames.map { frame in
+            CaptionCompositePlane(image: frame.image, rect: frame.destinationRect)
         }
     }
 
@@ -425,8 +459,10 @@ final class CaptionController {
         pendingCaptions.removeAll { $0.time < target - 0.25 || $0.time > target + 60 }
         frames = []
         framesGeneration &+= 1
+        captionText = nil
         lastFrameCount = 0
         lastNow = nil
+        lastAppendedCaptionText = nil
         needsClear = true
     }
 
@@ -489,6 +525,11 @@ final class CaptionController {
                 await pipeline.append(first.decoded)
                 appended = true
                 newestAppendTime = first.time
+                if first.decoded.kind == .caption {
+                    let text = first.decoded.caption.plainText
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    lastAppendedCaptionText = text.isEmpty ? nil : text
+                }
             }
         }
 
@@ -516,6 +557,9 @@ final class CaptionController {
     private func publish(_ rendered: [CaptionRenderFrame], appended: Bool) {
         frames = rendered
         framesGeneration &+= 1
+        // A capture stores the caption text whenever a caption is on screen,
+        // whether or not the image has it burned in.
+        captionText = rendered.isEmpty ? nil : lastAppendedCaptionText
         if !rendered.isEmpty, appended || lastFrameCount == 0 {
             renderedCount += 1
         }

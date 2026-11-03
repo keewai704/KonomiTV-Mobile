@@ -65,6 +65,8 @@ struct RootView: View {
                     : "false",
                 identifier: "captions.visible"
             )
+            statusText(String(playback.capture.producedImageCount), identifier: "capture.count")
+            statusText(playback.capture.lastFilename ?? "", identifier: "capture.lastFilename")
         }
         .font(.system(size: 1))
         .opacity(0.01)
@@ -125,7 +127,7 @@ struct RootView: View {
     private var regularInterface: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             List(selection: sidebarSelection) {
-                ForEach(AppSection.allCases) { section in
+                ForEach(model.visibleSections) { section in
                     Label(section.title, systemImage: section.systemImage)
                         // One element per row, so the identifier is not also
                         // attached to the (non-hittable) icon image.
@@ -173,7 +175,7 @@ struct RootView: View {
     /// has no room for.
     private var mypageStack: some View {
         NavigationStack(path: $model.mypagePath) {
-            MyPageView()
+            MyPageView(model: model)
                 .navigationDestination(for: SectionRoute.self) { route in
                     destination(for: route)
                 }
@@ -187,6 +189,7 @@ struct RootView: View {
         case .videos: return $model.videosPath
         case .mylist: return $model.mylistPath
         case .history: return $model.historyPath
+        case .captures: return $model.capturesPath
         case .settings: return $model.settingsPath
         }
     }
@@ -204,6 +207,8 @@ struct RootView: View {
             MyListScreen(model: model)
         case .history:
             WatchedHistoryScreen(model: model)
+        case .captures:
+            CapturesLibraryScreen(model: model)
         case .settings:
             SettingsView(model: model)
         }
@@ -224,6 +229,10 @@ struct RootView: View {
             MyListScreen(model: model)
         case .history:
             WatchedHistoryScreen(model: model)
+        case .captures:
+            CapturesLibraryScreen(model: model)
+        case .captureProgram(let id):
+            CaptureProgramScreen(model: model, programID: id)
         case .settings:
             SettingsView(model: model)
         case .pinnedChannels:

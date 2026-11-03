@@ -2,9 +2,11 @@ import SwiftUI
 
 /// マイページ: the compact width hub that lists the sections without a tab.
 struct MyPageView: View {
+    let model: AppModel
+
     var body: some View {
         List {
-            ForEach(MypageRow.allCases) { row in
+            ForEach(model.visibleMypageRows) { row in
                 NavigationLink(value: row.route) {
                     Label(row.title, systemImage: row.systemImage)
                 }

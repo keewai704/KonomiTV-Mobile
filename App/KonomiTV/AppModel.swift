@@ -9,6 +9,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Sendable {
     case videos
     case mylist
     case history
+    /// キャプチャ (0.15+ only; hidden when the server has no captures library).
+    case captures
     case settings
 
     var id: String { rawValue }
@@ -20,6 +22,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .videos: return "ビデオ"
         case .mylist: return "マイリスト"
         case .history: return "視聴履歴"
+        case .captures: return "キャプチャ"
         case .settings: return "設定"
         }
     }
@@ -31,6 +34,7 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .videos: return "film.stack"
         case .mylist: return "bookmark"
         case .history: return "clock.arrow.circlepath"
+        case .captures: return "photo.on.rectangle"
         case .settings: return "gearshape"
         }
     }
@@ -68,6 +72,7 @@ enum MypageRow: String, CaseIterable, Identifiable, Hashable, Sendable {
     case timetable
     case mylist
     case history
+    case captures
     case settings
 
     var id: String { rawValue }
@@ -77,6 +82,7 @@ enum MypageRow: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .timetable: return .timetable
         case .mylist: return .mylist
         case .history: return .history
+        case .captures: return .captures
         case .settings: return .settings
         }
     }
@@ -86,6 +92,7 @@ enum MypageRow: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .timetable: return .timetable
         case .mylist: return .mylist
         case .history: return .history
+        case .captures: return .captures
         case .settings: return .settings
         }
     }
@@ -107,6 +114,8 @@ enum SectionRoute: Hashable, Sendable {
     case timetable
     case mylist
     case history
+    case captures
+    case captureProgram(Int)
     case settings
     case pinnedChannels
 }
@@ -188,6 +197,7 @@ final class AppModel {
     var videosPath: [SectionRoute] = []
     var mylistPath: [SectionRoute] = []
     var historyPath: [SectionRoute] = []
+    var capturesPath: [SectionRoute] = []
     var timetablePath: [SectionRoute] = []
     var settingsPath: [SectionRoute] = []
     /// Path of the compact マイページ hub.
@@ -201,6 +211,12 @@ final class AppModel {
     /// Whether settings are synced with the server. Local only, like the web
     /// client's `sync_settings` key.
     private(set) var syncSettings = true
+
+    /// Whether the configured server has the captures library (v0.15+).
+    /// KonomiTV v0.14.1 answers 404 to every captures endpoint except the
+    /// upload, so the キャプチャ section is hidden there. Probed once per
+    /// server / login.
+    private(set) var capturesLibraryAvailable = false
 
     /// UI tests replace the system `ASWebAuthenticationSession` sheet with a
     /// plain URLSession round trip (`-UITestingDisableASWebAuth`).
@@ -279,6 +295,33 @@ final class AppModel {
 
     var isConfigured: Bool { serverURL != nil }
 
+    // MARK: - Sections
+
+    /// Sections of the regular width sidebar. キャプチャ needs the captures
+    /// library, so it disappears on a v0.14.1 server.
+    var visibleSections: [AppSection] {
+        AppSection.allCases.filter { section in
+            section != .captures || capturesLibraryAvailable
+        }
+    }
+
+    /// Rows of the compact マイページ hub with the same rule.
+    var visibleMypageRows: [MypageRow] {
+        MypageRow.allCases.filter { row in
+            row != .captures || capturesLibraryAvailable
+        }
+    }
+
+    /// Probes whether the server has the captures library. One anonymous
+    /// request that answers 404 on v0.14.1.
+    func refreshCapturesLibraryAvailability() async {
+        guard let client else {
+            capturesLibraryAvailable = false
+            return
+        }
+        capturesLibraryAvailable = (try? await client.capturesLibraryAvailable()) ?? false
+    }
+
     var serverURLString: String { serverURL?.absoluteString ?? "" }
 
     /// Client for the configured server, including the bearer token when the
@@ -299,6 +342,7 @@ final class AppModel {
         serverURL = url
         version = info
         defaults.set(url.absoluteString, forKey: PreferenceKeys.serverURL)
+        await refreshCapturesLibraryAvailability()
     }
 
     func refreshVersion() async {
@@ -311,6 +355,7 @@ final class AppModel {
         defaults.removeObject(forKey: PreferenceKeys.serverURL)
         serverURL = nil
         version = nil
+        capturesLibraryAvailable = false
         resetNavigation()
     }
 
@@ -321,6 +366,7 @@ final class AppModel {
         videosPath = []
         mylistPath = []
         historyPath = []
+        capturesPath = []
         timetablePath = []
         settingsPath = []
         mypagePath = []
@@ -338,6 +384,7 @@ final class AppModel {
         if user == nil, let token, !token.isEmpty {
             user = try? await client.withToken(token).me()
         }
+        await refreshCapturesLibraryAvailability()
         if user != nil {
             await syncSettingsFromServer()
         }
@@ -351,6 +398,7 @@ final class AppModel {
         token = result.accessToken
         KeychainStore.save(result.accessToken, account: KeychainStore.tokenAccount)
         user = try await client.withToken(result.accessToken).me()
+        await refreshCapturesLibraryAvailability()
         await syncSettingsFromServer()
     }
 
