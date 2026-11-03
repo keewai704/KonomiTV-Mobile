@@ -46,7 +46,7 @@ enum TimeTableGenreColors {
 
     /// Colour of a genre major category, using the user's settings when present.
     static func color(forGenreMajor major: String, settings: ClientSettings) -> Color {
-        let configured = settings.value(forKey: "timetable_genre_colors")?.objectValue
+        let configured = settings.value(forKey: "timetable_genre_colors")?.objectValue?
             .compactMapValues { $0.stringValue } ?? [:]
         let table = configured.isEmpty ? defaults : configured
 
