@@ -206,7 +206,7 @@ struct CommentPostingForm: View {
 
     private var colorMenu: some View {
         Menu {
-            ForEach(CommentCommands.palette, id: \.self) { hex in
+            ForEach(JikkyoPostComment.palette, id: \.self) { hex in
                 Button {
                     color = hex
                 } label: {
