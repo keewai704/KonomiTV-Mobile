@@ -98,6 +98,10 @@ final class PlaybackController {
     /// See `monotonicPosition(_:)`.
     @ObservationIgnored private var liveTimeOffset: Double = 0
     @ObservationIgnored private var lastLiveTime: Double?
+    /// Live only: playing time libVLC's held time has missed (see
+    /// `carryHeldLiveTime`), and when the last held callback came.
+    @ObservationIgnored private var liveHeldExtra: Double = 0
+    @ObservationIgnored private var liveHeldHostTime: CFTimeInterval?
     /// Length of the current media in seconds (0 for live and while unknown).
     private(set) var durationSeconds: Double = 0
     private(set) var isPictureInPictureActive = false
@@ -341,6 +345,8 @@ final class PlaybackController {
         positionSeconds = 0
         liveTimeOffset = 0
         lastLiveTime = nil
+        liveHeldExtra = 0
+        liveHeldHostTime = nil
         durationSeconds = 0
         liveErrorMessage = nil
         isMuted = false
@@ -371,6 +377,8 @@ final class PlaybackController {
         positionSeconds = 0
         liveTimeOffset = 0
         lastLiveTime = nil
+        liveHeldExtra = 0
+        liveHeldHostTime = nil
         durationSeconds = 0
         liveErrorMessage = nil
         isMuted = false
@@ -419,6 +427,8 @@ final class PlaybackController {
         positionSeconds = 0
         liveTimeOffset = 0
         lastLiveTime = nil
+        liveHeldExtra = 0
+        liveHeldHostTime = nil
         durationSeconds = 0
         liveErrorMessage = nil
         liveStatus = ""
@@ -1196,10 +1206,10 @@ final class PlaybackController {
         invalidatePictureInPictureState()
     }
 
-    /// libVLC's time of a live stream restarts as the sliding playlist window
-    /// moves on and at a discontinuity (a PCR jump or an encoder restart). The
-    /// position shown and reported for live keeps counting across those
-    /// instead.
+    /// libVLC's time of a live stream restarts at a discontinuity (a PCR jump
+    /// or an encoder restart) and leaves the held window end
+    /// (`carryHeldLiveTime`) at a live-edge seek. The position shown and
+    /// reported for live keeps counting across those instead.
     private func monotonicPosition(_ seconds: Double) -> Double {
         guard case .live? = item else { return seconds }
         if let last = lastLiveTime, seconds + 1 < last {
@@ -1207,6 +1217,37 @@ final class PlaybackController {
         }
         lastLiveTime = seconds
         return liveTimeOffset + seconds
+    }
+
+    /// libVLC counts the time of a live stream from the first segment it
+    /// fetched, but never reports more than the length of the playlist window:
+    /// once the 20 s window is full the time stays at its end although playback
+    /// goes on. While it is held there and libVLC plays, the time is carried on
+    /// with the host clock, so the position and the caption clock keep moving.
+    private func carryHeldLiveTime(_ seconds: Double, playing: Bool) -> Double {
+        guard case .live? = item else { return seconds }
+        let length = clock.length
+        // Entered within 0.3 s of the end; a dip of a second (a late segment)
+        // does not leave it, so the carried time is not thrown away.
+        let margin = liveHeldHostTime == nil ? 0.3 : 1.5
+        guard length > 0, seconds >= length - margin else {
+            if liveHeldHostTime != nil {
+                AppLog.playback.notice("live time released at \(seconds, privacy: .public)s after \(self.liveHeldExtra, privacy: .public)s held")
+            }
+            liveHeldExtra = 0
+            liveHeldHostTime = nil
+            return seconds
+        }
+        let now = CACurrentMediaTime()
+        if let last = liveHeldHostTime {
+            if playing {
+                liveHeldExtra += min(max(now - last, 0), 1)
+            }
+        } else {
+            AppLog.playback.notice("live time held at the window length \(length, privacy: .public)s")
+        }
+        liveHeldHostTime = now
+        return seconds + liveHeldExtra
     }
 
     private func setDuration(_ seconds: Double) {
@@ -1246,7 +1287,8 @@ final class PlaybackController {
             errorDetail = nil
             state = "playing"
         }
-        clock.update(position: seconds, length: currentLength(), isPlaying: playing)
+        let time = carryHeldLiveTime(seconds, playing: playing)
+        clock.update(position: time, length: currentLength(), isPlaying: playing)
         updatePlaying(playing)
         // @Observable notifies on every assignment, equal or not; libVLC
         // reports the time four times a second, and a toolbar Menu rebuilt by
@@ -1254,9 +1296,8 @@ final class PlaybackController {
         setDuration(clock.length)
         // Videos show the clock, not the raw time: right after a seek libVLC
         // still reports the old position for a moment, and the label would
-        // jump back. Live has no seeking, and its clock stops at the window
-        // length, so it counts the raw time across window restarts.
-        let shown = item?.isVideo == true ? clock.settledTime : seconds
+        // jump back. Live counts its time across restarts instead.
+        let shown = item?.isVideo == true ? clock.settledTime : time
         let position = max(Int(monotonicPosition(shown)), 0)
         if positionSeconds != position {
             positionSeconds = position
@@ -1264,7 +1305,7 @@ final class PlaybackController {
 
         switch item {
         case .video(let video)?, .offline(let video)?:
-            onVideoProgress?(video, max(seconds, 0))
+            onVideoProgress?(video, max(time, 0))
         default:
             break
         }

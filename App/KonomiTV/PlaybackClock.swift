@@ -20,7 +20,8 @@ import QuartzCore
 final class PlaybackClock {
     /// Last position libVLC reported, in seconds.
     private(set) var position: Double = 0
-    /// Media length in seconds; 0 while unknown and for live streams.
+    /// Media length in seconds; 0 while unknown. libVLC reports the playlist
+    /// window length for live streams.
     private(set) var length: Double = 0
     /// libVLC is playing (not paused, not buffering).
     private(set) var isPlaying = false
@@ -113,10 +114,12 @@ final class PlaybackClock {
         lastCallbackHostTime = CACurrentMediaTime()
     }
 
+    /// A video's position stays inside its length. A live stream's length is
+    /// the playlist window, which its time runs past.
     private func clamped(_ value: Double) -> Double {
         guard value.isFinite else { return 0 }
         var result = max(value, 0)
-        if length > 0 {
+        if isSeekable, length > 0 {
             result = min(result, length)
         }
         return result

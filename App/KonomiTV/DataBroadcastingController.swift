@@ -39,7 +39,13 @@ final class DataBroadcastingController {
     }
 
     /// Current state of the data broadcasting page.
-    private(set) var state: State = .off
+    private(set) var state: State = .off {
+        didSet {
+            if state != oldValue {
+                AppLog.dataBroadcasting.notice("state \(oldValue.rawValue, privacy: .public) -> \(self.state.rawValue, privacy: .public)")
+            }
+        }
+    }
     /// Remote control keys the BML content accepts (web-bml's used-key-list).
     /// The data button (`d`) is always included.
     private(set) var enabledKeys: Set<String> = ["d"]
