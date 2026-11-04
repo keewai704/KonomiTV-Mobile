@@ -746,14 +746,19 @@ def load_fixtures() -> dict:
 
     # 録画予約のフィクスチャが参照する番組 (今日と明日の番組表と同じ ID になる)
     reservation_programs: dict[str, tuple[dict, dict]] = {}
-    reservation_day_start = now_jst().replace(hour=0, minute=0, second=0, microsecond=0)
+    reservation_now = now_jst()
+    reservation_day_start = reservation_now.replace(hour=0, minute=0, second=0, microsecond=0)
     for channel_index, channel in enumerate(all_channels({"channels": channels})):
         for day in (0, 1):
             for program in build_day_programs(
                 channel, reservation_day_start + timedelta(days=day), channel_index
             ):
-                # 番組 ID は日付に依存しないため、今日の番組を優先して残す
-                reservation_programs.setdefault(program["id"], (channel, program))
+                # 番組 ID は日付に依存しないため、同じ ID は今日の番組を優先して
+                # 残す。ただし終わった番組は明日の同じ時間帯の番組に置き換える
+                # (深夜には今日の番組がほとんど残っておらず、予約が作れない)。
+                kept = reservation_programs.get(program["id"])
+                if kept is None or datetime.fromisoformat(kept[1]["end_time"]) <= reservation_now:
+                    reservation_programs[program["id"]] = (channel, program)
 
     return {
         "version": version,
