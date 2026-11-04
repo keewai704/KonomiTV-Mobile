@@ -296,6 +296,10 @@ final class LocalHLSServer: @unchecked Sendable {
 
     // MARK: - Responses
 
+    /// Segments listed in the live playlist (one second each); the store
+    /// keeps 30.
+    static let liveWindowSegments = 20
+
     private static func makeResponse(
         for target: String,
         store: SegmentStore?,
@@ -315,7 +319,11 @@ final class LocalHLSServer: @unchecked Sendable {
         }
 
         if path == "/live.m3u8", let store {
-            let playlist = await store.playlist()
+            // libVLC's HLS module buffers several seconds before it plays and
+            // only reloads the playlist once it has fetched nearly everything
+            // listed; a six-segment window of one-second segments left it
+            // waiting at the window end. Twenty segments give it room.
+            let playlist = await store.playlist(windowSize: Self.liveWindowSegments)
             let firstSequence = playlist.split(separator: "\n")
                 .first { $0.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") }?
                 .dropFirst("#EXT-X-MEDIA-SEQUENCE:".count) ?? "-"

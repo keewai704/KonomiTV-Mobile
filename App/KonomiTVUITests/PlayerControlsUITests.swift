@@ -36,9 +36,9 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         openVideo(in: app)
         revealControls(in: app)
 
-        tapControl("player.playPause", in: app)
-
         let state = uiElement(app, "player.state")
+        tapControl("player.playPause", in: app) { state.label == "paused" }
+
         XCTAssertTrue(
             waitForLabel(state, equals: "paused", timeout: TestTimeout.ui),
             "一時停止しても状態が paused にならない (状態: \(state.label))"
@@ -59,14 +59,13 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
 
         let state = uiElement(app, "player.state")
 
-        tapControl("player.playPause", in: app)
+        tapControl("player.playPause", in: app) { state.label == "paused" }
         XCTAssertTrue(
             waitForLabel(state, equals: "paused", timeout: TestTimeout.ui),
             "再生／一時停止ボタンで paused にならない (状態: \(state.label))"
         )
 
-        revealControls(in: app)
-        tapControl("player.playPause", in: app)
+        tapControl("player.playPause", in: app) { state.label != "paused" }
         XCTAssertTrue(
             waitForLabel(state, equals: "playing", timeout: TestTimeout.playback),
             "再生／一時停止ボタンで playing に戻らない (状態: \(state.label))"
@@ -113,7 +112,9 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         )
         let before = intLabel(of: "playback.position", in: app) ?? 0
 
-        tapControl("player.skipForward", in: app)
+        tapControl("player.skipForward", in: app) {
+            (intLabel(of: "playback.position", in: app) ?? -1) >= before + 8
+        }
 
         XCTAssertTrue(
             waitUntil(timeout: TestTimeout.ui) {
@@ -193,14 +194,26 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         XCTAssertTrue(controls.exists, "再生コントロールが表示されない")
     }
 
-    /// Shows the controls and taps one of them straight away, before they hide
-    /// themselves again.
-    private func tapControl(_ identifier: String, in app: XCUIApplication) {
+    /// Shows the controls and taps one of them, until `done` holds.
+    ///
+    /// The controls can hide between finding a button and tapping it: on a
+    /// loaded CI simulator one query takes seconds. A tap on an element that
+    /// is gone fails the test, so the button's frame is read from a snapshot
+    /// (which throws instead) and the screen is tapped there. If the controls
+    /// had hidden, that tap only toggles them and the next attempt retries.
+    private func tapControl(
+        _ identifier: String,
+        in app: XCUIApplication,
+        until done: () -> Bool
+    ) {
         let control = uiElement(app, identifier)
-        for _ in 0..<3 {
+        for _ in 0..<4 {
             revealControls(in: app)
-            if control.exists, control.isHittable {
-                control.tap()
+            guard let frame = try? control.snapshot().frame, !frame.isEmpty else { continue }
+            app.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: frame.midX, dy: frame.midY))
+                .tap()
+            if waitUntil(timeout: 5, done) {
                 return
             }
         }

@@ -168,11 +168,13 @@ final class PlaybackController {
 
     // MARK: - Private state
 
-    /// Live network cache in milliseconds. The live playlist window is six
-    /// one-second segments and libVLC's hls-live-start default is three
-    /// segments, so the player sits about three seconds behind the encoder;
-    /// a one second cache keeps that latency without stalling on jitter.
+    /// Live network cache in milliseconds; jitter of the loopback segments is
+    /// absorbed by libVLC's HLS buffering (see `makeMedia`).
     private static let liveNetworkCaching = 1000
+    /// Live delay of libVLC's HLS module outside low latency mode, in
+    /// milliseconds: the web client's live buffer (4 s). libVLC still buffers
+    /// at least 6 s before playing then.
+    private static let liveDelay = 4000
     /// Recorded video goes through the loopback proxy; a deeper buffer makes
     /// seeking smoother and costs nothing but memory.
     private static let videoNetworkCaching = 3000
@@ -1105,6 +1107,16 @@ final class PlaybackController {
         switch playbackItem {
         case .live:
             media.addOption(":network-caching=\(Self.liveNetworkCaching)")
+            // libVLC's HLS defaults (6 s minimum buffer, 15 s behind the live
+            // edge) are made for 6 s segments. Low latency mode (the web
+            // client's tv_low_latency_mode) drops them to 2 s, which the
+            // one-second loopback segments can feed.
+            if profile.lowLatency {
+                media.addOption(":adaptive-lowlatency=1")
+            } else {
+                media.addOption(":adaptive-lowlatency=0")
+                media.addOption(":adaptive-livedelay=\(Self.liveDelay)")
+            }
         case .video:
             media.addOption(":network-caching=\(Self.videoNetworkCaching)")
         case .offline:
