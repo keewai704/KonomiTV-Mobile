@@ -146,10 +146,16 @@ final class AccountUITests: KonomiTVUITestCase {
         )
         tapWhenHittable(serverLink, in: app)
 
+        let form = uiElement(app, "settings.server.form")
+        XCTAssertTrue(
+            form.waitForExistence(timeout: TestTimeout.ui),
+            "サーバー設定画面が表示されない"
+        )
+        // The port field is below the fold of a lazy Form.
         let port = uiElement(app, "settings.server.port")
         XCTAssertTrue(
-            port.waitForExistence(timeout: TestTimeout.ui),
-            "サーバー設定画面が表示されない"
+            scrollUntilVisible(port, in: form),
+            "リッスンポートの欄が表示されない"
         )
         replaceText(in: port, with: "7100", in: app)
 
