@@ -243,6 +243,13 @@ struct SettingsView: View {
                 LabeledContent("ピン留めチャンネル", value: pinnedChannelCountText)
             }
             .accessibilityIdentifier("settings.pinnedChannels")
+
+            NavigationLink {
+                DataBroadcastingSettingsView()
+            } label: {
+                Label("データ放送", systemImage: "tv")
+            }
+            .accessibilityIdentifier("settings.dataBroadcasting")
         }
     }
 

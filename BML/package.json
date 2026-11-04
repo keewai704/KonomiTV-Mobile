@@ -1,0 +1,21 @@
+{
+  "name": "konomitv-bml",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Data broadcasting (BML) bundle of the KonomiTV iOS client",
+  "license": "MIT",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "web-bml": "github:tsukumijima/web-bml#47fec53cd66734d6cba0fff3c6dfcfc150043109"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.12",
+    "esbuild": "0.25.10",
+    "typescript": "5.9.3"
+  }
+}

@@ -20,6 +20,8 @@ struct LivePlayerView: View {
     @State private var didSetInitialPanelTab = false
     @State private var showsPanel = true
     @State private var showsRemocon = false
+    /// Whether the data broadcasting remote section of the panel is open.
+    @State private var showsBMLRemote = false
     @State private var commentSession: LiveCommentSession?
     @State private var twitterSession: TwitterSession?
     /// Recording reservations of the programs of the program panel.
@@ -41,6 +43,18 @@ struct LivePlayerView: View {
     private var playbackItem: PlaybackItem { .live(channel) }
 
     private var playback: PlaybackController { model.playback }
+
+    private var dataBroadcasting: DataBroadcastingController { playback.dataBroadcasting }
+
+    /// The program on air: the EIT[p/f] the live stream reports replaces the
+    /// value `GET /api/channels` returned (the web client does the same).
+    private var programPresent: Program? {
+        playback.liveProgramPresent ?? channel.programPresent
+    }
+
+    private var programFollowing: Program? {
+        playback.liveProgramFollowing ?? channel.programFollowing
+    }
 
     private var typeChannels: [LiveChannel] {
         channels?.channels(for: channel.type) ?? []
@@ -64,6 +78,16 @@ struct LivePlayerView: View {
         }
         .onChange(of: channel.programPresent?.id) { _, _ in
             Task { await loadReservations() }
+        }
+        .onChange(of: programPresent?.id) { _, _ in
+            Task { await loadReservations() }
+        }
+        .onChange(of: dataBroadcasting.isFeatureAvailable) { _, available in
+            // The channel lost its data broadcasting (or the setting was turned
+            // off): close the remote with it.
+            if !available {
+                showsBMLRemote = false
+            }
         }
         .task { await loadChannels() }
         .onAppear {
@@ -209,7 +233,22 @@ struct LivePlayerView: View {
                !playback.liveDetail.isEmpty {
                 liveNotice
             }
+
+            bmlStateLabel
         }
+    }
+
+    /// Hidden label the UI tests read (like `player.state`).
+    private var bmlStateLabel: some View {
+        Text(dataBroadcasting.state.rawValue)
+            .font(.system(size: 1))
+            .opacity(0.01)
+            .accessibilityLabel(dataBroadcasting.state.rawValue)
+            .accessibilityValue(
+                dataBroadcasting.errorMessage ?? dataBroadcasting.state.rawValue
+            )
+            .accessibilityIdentifier("bml.state")
+            .allowsHitTesting(false)
     }
 
     private var liveNotice: some View {
@@ -267,6 +306,12 @@ struct LivePlayerView: View {
         VStack(alignment: .leading, spacing: 14) {
             panelTabPicker
 
+            if dataBroadcasting.isFeatureAvailable, showsBMLRemote {
+                BMLRemoteControlView(
+                    controller: dataBroadcasting
+                )
+            }
+
             switch panelTab {
             case .program:
                 programPanel
@@ -282,14 +327,65 @@ struct LivePlayerView: View {
     }
 
     private var panelTabPicker: some View {
-        HStack(spacing: 2) {
-            panelTabButton(.program, title: "番組", identifier: "panel.program")
-            panelTabButton(.channel, title: "チャンネル", identifier: "panel.channel")
-            panelTabButton(.comment, title: "コメント", identifier: "panel.comment")
-            panelTabButton(.twitter, title: "Twitter", identifier: "panel.twitter")
+        HStack(spacing: 8) {
+            HStack(spacing: 2) {
+                panelTabButton(.program, title: "番組", identifier: "panel.program")
+                panelTabButton(.channel, title: "チャンネル", identifier: "panel.channel")
+                panelTabButton(.comment, title: "コメント", identifier: "panel.comment")
+                panelTabButton(.twitter, title: "Twitter", identifier: "panel.twitter")
+            }
+            .padding(2)
+            .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+
+            // データ放送のリモコン (BML があるチャンネルのみ)
+            if dataBroadcasting.isFeatureAvailable {
+                // データ放送: the web client's d button. In the panel row rather than
+                // the toolbar, which overflows into a menu on compact widths.
+                Button {
+                    toggleDataBroadcasting()
+                } label: {
+                    Group {
+                        if dataBroadcasting.isLoading {
+                            ProgressView()
+                        } else {
+                            Text("d")
+                                .font(.headline.weight(.bold))
+                        }
+                    }
+                    .frame(width: 34, height: 32)
+                    .background(
+                        dataBroadcasting.isPageVisible ? Color.accentColor : Color.secondary.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 9)
+                    )
+                    .foregroundStyle(dataBroadcasting.isPageVisible ? Color.white : Color.primary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("player.dataBroadcasting")
+                .accessibilityLabel("データ放送")
+                .accessibilityValue(
+                    dataBroadcasting.isLoading
+                        ? "読み込み中"
+                        : (dataBroadcasting.isPageVisible ? "表示" : "非表示")
+                )
+
+                Button {
+                    showsBMLRemote.toggle()
+                } label: {
+                    Image(systemName: "appletvremote.gen4")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(width: 34, height: 32)
+                        .background(
+                            showsBMLRemote ? Color.accentColor : Color.secondary.opacity(0.12),
+                            in: RoundedRectangle(cornerRadius: 9)
+                        )
+                        .foregroundStyle(showsBMLRemote ? Color.white : Color.primary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("bml.remote.toggle")
+                .accessibilityLabel("データ放送のリモコン")
+                .accessibilityValue(showsBMLRemote ? "表示" : "非表示")
+            }
         }
-        .padding(2)
-        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private func panelTabButton(
@@ -319,7 +415,7 @@ struct LivePlayerView: View {
         VStack(alignment: .leading, spacing: 10) {
             channelHeader
 
-            if let program = channel.programPresent {
+            if let program = programPresent {
                 Text(program.title)
                     .font(.headline)
                     .fixedSize(horizontal: false, vertical: true)
@@ -366,7 +462,7 @@ struct LivePlayerView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let following = channel.programFollowing {
+            if let following = programFollowing {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("次の番組")
                         .font(.caption.weight(.semibold))
@@ -487,10 +583,10 @@ struct LivePlayerView: View {
         }
         guard let list = try? await client.reservations() else { return }
         presentReservation = list.reservations.first {
-            $0.program.id == channel.programPresent?.id
+            $0.program.id == programPresent?.id
         }
         followingReservation = list.reservations.first {
-            $0.program.id == channel.programFollowing?.id
+            $0.program.id == programFollowing?.id
         }
     }
 
@@ -605,8 +701,8 @@ struct LivePlayerView: View {
                 session: twitterSession,
                 context: TwitterPanelContext(
                     channelName: channel.name,
-                    programTitle: channel.programPresent?.title ?? channel.name,
-                    programID: channel.programPresent?.id
+                    programTitle: programPresent?.title ?? channel.name,
+                    programID: programPresent?.id
                 )
             )
         } else {
@@ -693,6 +789,19 @@ struct LivePlayerView: View {
                 commentFocusRequest += 1
             })
 
+            // ***** データ放送 (Web 版の Alt + キー) *****
+
+            // Alt + D: データ放送の d ボタン
+            shortcut("d", modifiers: [.option], action: toggleDataBroadcasting)
+            // Alt + Delete (Backspace): 戻る
+            shortcut(.delete, modifiers: [.option], action: { sendBMLKey("back") })
+            // Alt + Return: 決定
+            shortcut(.return, modifiers: [.option], action: { sendBMLKey("enter") })
+            shortcut(.upArrow, modifiers: [.option], action: { sendBMLKey("up") })
+            shortcut(.downArrow, modifiers: [.option], action: { sendBMLKey("down") })
+            shortcut(.leftArrow, modifiers: [.option], action: { sendBMLKey("left") })
+            shortcut(.rightArrow, modifiers: [.option], action: { sendBMLKey("right") })
+
             remoconShortcuts(type: .gr, modifiers: [])
             remoconShortcuts(type: .bs, modifiers: [.shift])
         }
@@ -729,6 +838,20 @@ struct LivePlayerView: View {
     }
 
     // MARK: - Actions
+
+    /// Shows or hides the data broadcasting screen and opens the remote, so the
+    /// user can interact with it right away.
+    private func toggleDataBroadcasting() {
+        guard dataBroadcasting.isFeatureAvailable else { return }
+        playback.toggleDataBroadcasting()
+        showsBMLRemote = true
+        showsPanel = true
+    }
+
+    private func sendBMLKey(_ name: String) {
+        guard dataBroadcasting.isFeatureAvailable else { return }
+        dataBroadcasting.sendKey(name)
+    }
 
     private func startPlayback() {
         guard let client = model.client else { return }

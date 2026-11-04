@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import caption_injector
 import captures_mock
+import data_broadcasting_mock as data_broadcasting
 import maintenance_mock
 import offline_mock
 import reservations_mock
@@ -329,6 +330,14 @@ class MockServerState:
         self.last_offline_quality: str | None = None
         # 直近にリクエストされた品質・プレイリスト種別 (UI テストの検証用)
         self.last_live_quality: str | None = None
+        # データ放送 (BML) のモック
+        # POST /__mock/config {"data_component": true} で PMT にデータ放送の
+        # コンポーネントを足す (カルーセルは配信しないので、アプリは loading の
+        # ままになる)。既定はデータ放送なしのチャンネル。
+        self.data_component = False
+        self.psi_archived_data_count = 0
+        self.psi_archived_data_channels: list[str] = []
+        self.last_psi_archived_quality: str | None = None
         self.last_video_quality: str | None = None
         self.last_video_playlist_type: str | None = None
         self.last_video_media_playlist_type: str | None = None
@@ -435,6 +444,13 @@ class MockServerState:
             self.offline_stream_count += 1
             self.offline_stream_video_ids.append(video_id)
             self.last_offline_quality = quality
+
+    def record_psi_archived_data(self, display_channel_id: str, quality: str) -> None:
+        with self.lock:
+            self.psi_archived_data_count += 1
+            self.psi_archived_data_channels.append(display_channel_id)
+            self.last_psi_archived_quality = quality
+            self.last_live_quality = quality
 
     def record_video_quality(self, quality: str, playlist_type: str | None = None) -> None:
         with self.lock:
@@ -587,6 +603,10 @@ class MockServerState:
                 "video_delete_count": self.video_delete_count,
                 "deleted_video_ids": list(self.deleted_video_ids),
                 "last_live_quality": self.last_live_quality,
+                "data_component": self.data_component,
+                "psi_archived_data_count": self.psi_archived_data_count,
+                "psi_archived_data_channels": list(self.psi_archived_data_channels),
+                "last_psi_archived_quality": self.last_psi_archived_quality,
                 "last_video_quality": self.last_video_quality,
                 "last_video_playlist_type": self.last_video_playlist_type,
                 "offline_stream": self.offline_stream,
@@ -1816,12 +1836,15 @@ class MockHandler(BaseHTTPRequestHandler):
             state.offline_stream = bool(body["offline_stream"])
         if "offline_stream_truncate" in body:
             state.offline_stream_truncate = bool(body["offline_stream_truncate"])
+        if "data_component" in body:
+            state.data_component = bool(body["data_component"])
         self._send_json(
             {
                 "status": "ok",
                 "captures_library": state.captures_library,
                 "offline_stream": state.offline_stream,
                 "offline_stream_truncate": state.offline_stream_truncate,
+                "data_component": state.data_component,
             }
         )
 
@@ -2420,7 +2443,7 @@ class MockHandler(BaseHTTPRequestHandler):
             self._not_found()
             return
         display_channel_id, quality, action = parts[2], parts[3], parts[4]
-        if action not in ("mpegts", "events"):
+        if action not in ("mpegts", "events", "psi-archived-data"):
             self._not_found()
             return
 
@@ -2443,6 +2466,12 @@ class MockHandler(BaseHTTPRequestHandler):
             self._serve_live_events(state)
             return
 
+        if action == "psi-archived-data":
+            self._serve_psi_archived_data(
+                state, fixtures, display_channel_id, quality,
+            )
+            return
+
         sample = fixtures["sample_ts"]
         if not sample:
             self._send_json({"detail": "Live media is not available"}, 503)
@@ -2461,6 +2490,41 @@ class MockHandler(BaseHTTPRequestHandler):
             pass
         finally:
             state.live_disconnected()
+
+    # -- ライブ PSI/SI アーカイブデータ (データ放送) -------------------------
+
+    def _serve_psi_archived_data(self, state: MockServerState, fixtures: dict,
+                                 display_channel_id: str, quality: str) -> None:
+        """Live PSI/SI archived data stream (psisiarc).
+
+        Mirrors LiveStreamsRouter.LivePSIArchivedDataAPI: an endless
+        application/octet-stream response of psisiarc chunks with the
+        channel's PAT / PMT / SDT / EIT[p/f] / TOT. With the data_component
+        switch the PMT advertises a BML data component (there is no DSM-CC
+        carousel behind it, so the app stays in its loading state).
+        """
+        channel = find_channel(fixtures["channels"], display_channel_id)
+        if channel is None:
+            self._not_found()
+            return
+        state.record_psi_archived_data(display_channel_id, quality)
+        include_data_component = bool(state.snapshot()["data_component"])
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            for chunk in data_broadcasting.iter_psi_archived_data(
+                channel, include_data_component
+            ):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+                if self._client_disconnected():
+                    return
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     # -- ライブストリーム イベント (Server-Sent Events) ---------------------
 

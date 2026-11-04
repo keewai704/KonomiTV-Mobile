@@ -33,6 +33,13 @@ targets:
       - path: App/KonomiTV
         excludes:
           - "Info.plist"
+          - "Resources"
+      # Data broadcasting (BML): the prebuilt web-bml page, its script and fonts.
+      # A folder reference, so the page is bundled as KonomiTV.app/BML (it is
+      # built by BML/esbuild.config.mjs, which the iOS CI does not run).
+      - path: App/KonomiTV/Resources/BML
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: KonomiKit
         product: KonomiKit

@@ -199,6 +199,14 @@ enum PreferenceKeys {
     static let tvShowSuperimpose = "tv_show_superimpose"
     static let videoShowSuperimpose = "video_show_superimpose"
 
+    // Data broadcasting (データ放送) settings. The keys are the web client's own
+    // local-only settings (they are listed as 同期無効 in its SettingsStore), so
+    // they keep their names but never go into the synced ClientSettings.
+    static let tvShowDataBroadcasting = DataBroadcastingSettings.Key.isEnabled
+    static let enableInternetAccessFromDataBroadcasting = DataBroadcastingSettings.Key.allowsInternetAccess
+    static let dataBroadcastingZipCode = DataBroadcastingSettings.Key.zipCode
+    static let dataBroadcastingPrefecture = DataBroadcastingSettings.Key.prefecture
+
     /// Keys of the quality picker that older builds stored under different
     /// names. Migrated once by `QualityPreferences.migrate`.
     static let legacyLiveQuality = "liveQuality"

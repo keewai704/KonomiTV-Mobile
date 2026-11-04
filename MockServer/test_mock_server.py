@@ -22,6 +22,7 @@ from urllib.parse import quote, urljoin
 
 import caption_injector
 import captures_mock
+import data_broadcasting_mock
 import mock_server
 
 
@@ -3789,6 +3790,137 @@ class AccountMaintenanceMockTestCase(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(excluded["total"], 0)
+
+
+
+class DataBroadcastingMockTestCase(unittest.TestCase):
+    """データ放送 (BML) の PSI/SI アーカイブデータストリームのテスト。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = mock_server.create_server("127.0.0.1", 0)
+        cls.host, cls.port = cls.server.server_address[:2]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self) -> None:
+        self.configure(data_component=False)
+
+    def tearDown(self) -> None:
+        self.configure(data_component=False)
+
+    def request(self, method: str, path: str, body: bytes | None = None,
+                headers: dict | None = None):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            hdrs = {"Accept": "*/*"}
+            if headers:
+                hdrs.update(headers)
+            conn.request(method, path, body=body, headers=hdrs)
+            response = conn.getresponse()
+            data = response.read()
+            return response.status, dict(response.getheaders()), data
+        finally:
+            conn.close()
+
+    def get_json(self, path: str):
+        status, _, data = self.request("GET", path)
+        return status, json.loads(data.decode("utf-8"))
+
+    def configure(self, **values) -> dict:
+        body = json.dumps(values).encode("utf-8")
+        status, _, data = self.request(
+            "POST", "/__mock/config", body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 200)
+        return json.loads(data.decode("utf-8"))
+
+    def stats(self) -> dict:
+        status, payload = self.get_json("/__mock/stats")
+        self.assertEqual(status, 200)
+        return payload
+
+    def psi_archived_data(self, display_channel_id: str = "gr011",
+                          quality: str = "1080p", length: int = 2048):
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        response = None
+        try:
+            conn.request(
+                "GET",
+                f"/api/streams/live/{display_channel_id}/{quality}/psi-archived-data",
+            )
+            response = conn.getresponse()
+            status = response.status
+            headers = dict(response.getheaders())
+            data = response.read(length)
+            return status, headers, data
+        finally:
+            if response is not None:
+                response.close()
+            conn.close()
+
+    # -- エンドポイント -----------------------------------------------------
+
+    def test_psi_archived_data_streams_sections(self) -> None:
+        status, headers, data = self.psi_archived_data()
+        self.assertEqual(status, 200)
+        self.assertIn("application/octet-stream", headers.get("Content-Type", ""))
+        sections = data_broadcasting_mock.iter_sections(data)
+        pids = [pid for pid, _ in sections]
+        self.assertIn(0x0000, pids)  # PAT
+        self.assertIn(0x1000, pids)  # PMT
+        self.assertIn(0x0011, pids)  # SDT
+        for _, section in sections:
+            self.assertEqual(data_broadcasting_mock.crc32_mpeg(section), 0)
+
+        stats = self.stats()
+        self.assertGreaterEqual(stats["psi_archived_data_count"], 1)
+        self.assertIn("gr011", stats["psi_archived_data_channels"])
+        self.assertEqual(stats["last_psi_archived_quality"], "1080p")
+
+    def test_psi_archived_data_follows_the_data_component_switch(self) -> None:
+        self.configure(data_component=True)
+        status, _, data = self.psi_archived_data(length=1024)
+        self.assertEqual(status, 200)
+        pmt = next(
+            section
+            for pid, section in data_broadcasting_mock.iter_sections(data)
+            if pid == 0x1000
+        )
+        # データ符号化方式記述子 (タグ 0xFD) が付く
+        self.assertIn(bytes([0xFD]), pmt)
+        self.assertTrue(self.stats()["data_component"])
+
+        self.configure(data_component=False)
+        status, _, data = self.psi_archived_data(length=1024)
+        pmt = next(
+            section
+            for pid, section in data_broadcasting_mock.iter_sections(data)
+            if pid == 0x1000
+        )
+        self.assertNotIn(bytes([0xFD]), pmt)
+
+    def test_psi_archived_data_rejects_unknown_channel_and_quality(self) -> None:
+        status, _, _ = self.psi_archived_data(display_channel_id="gr999")
+        self.assertEqual(status, 404)
+        status, _, _ = self.psi_archived_data(quality="2160p")
+        self.assertEqual(status, 422)
+
+    def test_reset_clears_the_data_component_switch(self) -> None:
+        self.configure(data_component=True)
+        self.assertTrue(self.stats()["data_component"])
+        status, _, _ = self.request("POST", "/__mock/reset")
+        self.assertEqual(status, 200)
+        stats = self.stats()
+        self.assertFalse(stats["data_component"])
+        self.assertEqual(stats["psi_archived_data_count"], 0)
 
 
 if __name__ == "__main__":

@@ -51,6 +51,13 @@ struct AboutScreen: View {
 
                 LabeledContent("VLCKit 4 / libVLC", value: "LGPL-2.1（動的リンク）")
                     .accessibilityIdentifier("settings.about.license.vlckit")
+
+                // データ放送 (BML) のページとフォント
+                LabeledContent("web-bml", value: "MIT")
+                    .accessibilityIdentifier("settings.about.license.webbml")
+
+                LabeledContent("Kosugi / Kosugi Maru (Fontworks)", value: "Apache-2.0")
+                    .accessibilityIdentifier("settings.about.license.kosugi")
             }
 
             Section {

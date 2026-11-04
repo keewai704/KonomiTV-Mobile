@@ -118,6 +118,16 @@ final class PlaybackController {
     /// its animations when playback pauses.
     private(set) var isPlaying = false
 
+    /// Data broadcasting (BML) of the live player: the WKWebView page plus the
+    /// native state around it (remote keys, video plane).
+    let dataBroadcasting = DataBroadcastingController()
+
+    /// Current / next program reported by the live stream's EIT[p/f]. They
+    /// replace the values `GET /api/channels` returned while the stream runs
+    /// (the web client does the same through its ChannelsStore).
+    private(set) var liveProgramPresent: Program?
+    private(set) var liveProgramFollowing: Program?
+
     /// Danmaku overlay state, shared with the live / recorded comment sessions.
     /// Created once so a channel switch keeps using the same renderer.
     let comments = CommentOverlayModel()
@@ -198,6 +208,7 @@ final class PlaybackController {
     @ObservationIgnored private var liveAnchorPlaybackTime: Double = 0
 
     @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
+    @ObservationIgnored private var dataBroadcastingSettingsObserver: NSObjectProtocol?
     @ObservationIgnored private var backgroundObserver: NSObjectProtocol?
     @ObservationIgnored private var foregroundObserver: NSObjectProtocol?
     /// Delayed "no PiP is coming, stop decoding video" check.
@@ -215,7 +226,8 @@ final class PlaybackController {
         self.player = player
         self.hostViewController = PlayerHostViewController(
             captions: captions,
-            comments: comments
+            comments: comments,
+            dataBroadcasting: dataBroadcasting
         )
 
         delegateProxy.owner = self
@@ -255,6 +267,20 @@ final class PlaybackController {
         nowPlaying.onTogglePlayPause = { [weak self] in self?.togglePlayPause() }
         nowPlaying.onSkip = { [weak self] seconds in self?.seek(by: seconds) }
         nowPlaying.onChangePosition = { [weak self] position in self?.seek(to: position) }
+
+        dataBroadcasting.onProgramUpdate = { [weak self] kind, program in
+            guard let self else { return }
+            switch kind {
+            case .present:
+                if self.liveProgramPresent != program {
+                    self.liveProgramPresent = program
+                }
+            case .following:
+                if self.liveProgramFollowing != program {
+                    self.liveProgramFollowing = program
+                }
+            }
+        }
 
         capture.playback = self
         observeSystemNotifications()
@@ -397,6 +423,10 @@ final class PlaybackController {
 
     /// Tears down the live / proxy / offline pipeline of the current item.
     private func detachPipeline() {
+        dataBroadcasting.end()
+        liveProgramPresent = nil
+        liveProgramFollowing = nil
+
         liveSession?.onReady = nil
         liveSession?.onFailed = nil
         liveSession?.onAudioTrackChange = nil
@@ -450,6 +480,13 @@ final class PlaybackController {
             player.play()
         }
         invalidatePictureInPictureState()
+    }
+
+    /// Shows or hides the data broadcasting screen (the live player's d
+    /// button). The BML page keeps decoding while it is hidden, like the web
+    /// client's container is only hidden.
+    func toggleDataBroadcasting() {
+        dataBroadcasting.toggleVisibility()
     }
 
     /// Toggles mute (Q shortcut). iOS has no per-app volume control, but
@@ -530,6 +567,9 @@ final class PlaybackController {
 
     func viewAppeared(for playbackItem: PlaybackItem) {
         visibleItem = playbackItem
+        // Coming back from picture in picture (or the background) restarts the
+        // data broadcasting page.
+        dataBroadcasting.resume()
     }
 
     /// Called when the detail screen goes away.
@@ -610,6 +650,9 @@ final class PlaybackController {
         isPictureInPictureActive = true
         comments.isPictureInPictureActive = true
         captions.isPictureInPictureActive = true
+        // The BML page is not visible in the PiP window: stop feeding it and
+        // start it again when the player comes back.
+        dataBroadcasting.suspend()
         pictureInPictureStartCount += 1
         // A background transition may have disabled the video output before PiP
         // asked for it; give libVLC its video track back.
@@ -627,6 +670,7 @@ final class PlaybackController {
         isPictureInPictureActive = false
         comments.isPictureInPictureActive = false
         captions.isPictureInPictureActive = false
+        dataBroadcasting.resume()
 
         // Restoring brings the screen back; that must not stop playback.
         if isRestoringFromPictureInPicture {
@@ -876,6 +920,12 @@ final class PlaybackController {
         hasSecondaryAudio = session.hasSecondaryAudio
         liveAudioSelection = .primary
         session.start()
+
+        // The data broadcasting page is recreated for every channel / quality
+        // change (the web client restarts its BML browser the same way).
+        liveProgramPresent = nil
+        liveProgramFollowing = nil
+        dataBroadcasting.begin(channel: channel, client: client, profile: profile)
 
         let eventsURL = client.liveEventsURL(
             displayChannelID: channel.displayChannelID,
@@ -1223,6 +1273,18 @@ final class PlaybackController {
             }
         }
 
+        if dataBroadcastingSettingsObserver == nil {
+            dataBroadcastingSettingsObserver = center.addObserver(
+                forName: .dataBroadcastingSettingsDidChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.dataBroadcasting.reloadSettings()
+                }
+            }
+        }
+
         if backgroundObserver == nil {
             backgroundObserver = center.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification,
@@ -1267,6 +1329,9 @@ final class PlaybackController {
     /// did not start.
     private func applicationDidEnterBackground() {
         guard item != nil, isPlayerAttached else { return }
+        // Nothing of the BML page is visible in the background; restart it on
+        // return (the PSI stream would stall anyway).
+        dataBroadcasting.suspend()
         backgroundTask?.cancel()
         backgroundTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(2))
@@ -1282,6 +1347,9 @@ final class PlaybackController {
         backgroundTask?.cancel()
         backgroundTask = nil
         restoreVideoTracks()
+        if !isPictureInPictureActive {
+            dataBroadcasting.resume()
+        }
     }
 
     private func restoreVideoTracks() {

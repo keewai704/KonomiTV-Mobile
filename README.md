@@ -1,7 +1,13 @@
 # KonomiTV for iOS / iPadOS
 
 KonomiTV サーバーに接続して、テレビ放送のライブ視聴と録画ビデオの再生ができるネイティブクライアントです。
-SwiftUI と AVKit / VLCKit で構成し、WebView やサードパーティ製 UI ライブラリは使っていません。
+SwiftUI と AVKit / VLCKit で構成し、サードパーティ製の UI ライブラリは使っていません。
+
+唯一の例外がデータ放送 (BML) です。BML 文書は放送波のデータカルーセルから降ってくる
+マークアップで、それを解釈して描画するには受信機 (ブラウザ) の実装が必要なため、
+Web クライアントと同じ [web-bml](https://github.com/tsukumijima/web-bml) を WKWebView の
+中だけで動かしています。その外側 (リモコン・設定・映像の配置・映像プレーンの切り抜き) は
+すべてネイティブです。
 
 ## 主な機能
 
@@ -35,6 +41,13 @@ SwiftUI と AVKit / VLCKit で構成し、WebView やサードパーティ製 UI
   変更・削除にも対応（EDCB バックエンド選択時のみ）
 - **字幕**: ライブ・録画ビデオの ARIB 字幕と文字スーパー（`libaribcaption` で描画）。表示の切り替え（S）、
   フォント・縁取り・不透明度、テレビ／ビデオ別の文字スーパー表示設定
+- **データ放送**: ライブ視聴中に BML (データ放送) を表示。web-bml を WKWebView の中で動かし、
+  PSI/SI アーカイブデータ (EIT[p/f]・TOT など) をアプリ内でデコードして渡します。映像は
+  データ放送が指定する映像プレーンに置いたまま、その上に BML を重ねます。リモコン
+  (方向・決定・戻る・データ・青赤緑黄・1〜12、コンテンツが受け付けるキーだけ有効)、
+  受信機情報 (郵便番号・都道府県) と双方向 (インターネット接続) の設定、EIT[p/f] による
+  現在・次の番組のリアルタイム更新。ページはチャンネル切り替え・画質切り替え・PiP・
+  バックグラウンドで作り直します
 - **キャプチャ**: 再生中の映像を JPEG で保存（写真ライブラリ / KonomiTV サーバー / 両方）。字幕とニコニコ実況コメントの
   合成、ファイル名パターン、クリップボードへのコピー。番組情報は Web クライアントと同じ EXIF（XPComment）に書き込むため、
   サーバー側のキャプチャ一覧で放送回・お気に入り・タグと結び付く。キャプチャのタイムライン・放送回別アルバム・タグの
@@ -136,6 +149,7 @@ Xcode でスキーム `KonomiTV` を選択して実行します。初回起動�
 | `App/KonomiTVUITests/` | XCUITest による E2E テスト |
 | `Packages/KonomiKit` | API クライアント・モデルと MPEG-TS → HLS セグメンタ（SwiftPM） |
 | `Packages/ARIBCaption` | libaribcaption の Swift ラッパー（ARIB 字幕のデコードと描画、SwiftPM） |
+| `BML/` | データ放送のページ（web-bml の TypeScript バンドル。ビルド済みの出力を `App/KonomiTV/Resources/BML` に含めています） |
 | `MockServer/` | 開発・テスト用のモックサーバー（Python 標準ライブラリのみ。オフライン保存ストリームも配信） |
 | `scripts/fetch-vlckit.py` | VLCKit 4（`Vendor/VLCKit.xcframework`）の取得 |
 | `project.yml` | XcodeGen のプロジェクト定義 |
@@ -161,6 +175,18 @@ python3 MockServer/mock_server.py --port 7010
 ```sh
 cd MockServer
 python3 -m unittest -v
+```
+
+### データ放送のページ（Node）
+
+`BML/` の TypeScript は esbuild で 1 つのスクリプトにまとめてからアプリに同梱します。
+ビルド済みの出力はリポジトリに含めているので、通常のビルドに Node は要りません。
+
+```sh
+cd BML
+npm ci                 # web-bml と esbuild を package-lock.json のとおりに固定
+npm test               # psisiarc のパーサ・メッセージ・EIT[p/f]・モックのデータ
+npm run build          # App/KonomiTV/Resources/BML に出力（変更したら実行）
 ```
 
 ### UI テスト（XCUITest）
@@ -227,6 +253,12 @@ Apple の資格情報がないフォークでもリリース処理を確認で�
 
 - 字幕のデコードと描画には [libaribcaption](https://github.com/magicxqq/libaribcaption)（MIT License,
   Copyright (c) 2022 magicxqq）を `Packages/ARIBCaption` に同梱しています。
+- データ放送の描画には [web-bml](https://github.com/tsukumijima/web-bml)（MIT License,
+  Copyright (c) tsukumijima）を WKWebView 用のバンドルとして同梱しています。BML の描画に使う
+  [Kosugi / Kosugi Maru](https://github.com/tsukumijima/web-bml/tree/master/fonts)（Fontworks,
+  Apache License 2.0）も同梱しています。ライセンスの全文は
+  `App/KonomiTV/Resources/BML/fonts/` にあります。データ放送だけが WKWebView を使う理由は
+  冒頭のとおりです。
 - 再生エンジンには [VLCKit 4](https://code.videolan.org/videolan/VLCKit)（libVLC, LGPL-2.1-or-later,
   Copyright (c) VideoLAN and VLC authors）を動的フレームワークとして同梱しています。LGPL のため、
   アプリと静的にリンクせず `VLCKit.framework` をそのまま埋め込み・署名しています

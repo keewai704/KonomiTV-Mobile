@@ -1,0 +1,300 @@
+/**
+ * PSI/SI アーカイブデータ (psisiarc) の読み取り。
+ *
+ * KonomiTV のライブ PSI/SI アーカイブデータストリーミング API は、PSI/SI の
+ * セクションを EDCB の psisiarc 形式で流し続ける。ここでは Web クライアントの
+ * LivePSIArchivedDataDecoder.ts (EDCB Legacy WebUI の util.lua / script.js の
+ * 移植) と同じ手順で、届いたチャンクからヘッダなしの TS パケット列を作る。
+ *
+ * 形式:
+ *   32 バイトのヘッダ (マジック 0x50737363 / 0x0d0a9a0a、各リストの長さ)
+ *   タイムリスト (4 バイト × time_list_len): 絶対時刻 + (差分, コード数 - 1)
+ *   辞書 (新規セクションは 4 バイト、再利用は 2 バイト)
+ *   セクション本体 (偶数バイト境界までパディング)
+ *   コードリスト (辞書のインデックス + 4096)
+ *   4 バイト境界までのトレーラー
+ */
+
+const MAGIC_1 = 0x50737363
+const MAGIC_2 = 0x0d0a9a0a
+/** タイムリストの 1 秒あたりの単位 */
+export const TIME_UNITS_PER_SECOND = 11250
+
+type ParserContext = {
+  pids: number[]
+  /** セクションを並べた TS パケット列 (辞書のエントリごと) */
+  sections: (Uint8Array | null)[]
+  position: number
+  trailerSize: number
+  timeListCount: number
+  codeListPosition: number
+  codeCount: number
+  initTime: number
+  currTime: number
+}
+
+function createContext(): ParserContext {
+  return {
+    pids: [],
+    sections: [],
+    position: 0,
+    trailerSize: 0,
+    timeListCount: -1,
+    codeListPosition: 0,
+    codeCount: 0,
+    initTime: -1,
+    currTime: -1,
+  }
+}
+
+/** チャンクがまだ途中で切れている (続きの到着を待つ) */
+class IncompleteDataError extends Error {}
+
+export type PSISectionCallback = (second: number, packets: Uint8Array, pid: number) => void
+
+/**
+ * psisiarc のストリームを読み、届いた順にセクションの TS パケット列を返す。
+ *
+ * 1 回の push で複数のチャンク・不完全なチャンクのどちらが来てもよい。
+ */
+export class PSIArchivedDataParser {
+  private context: ParserContext = createContext()
+  private pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
+
+  /** 受信済みのデータをすべて捨てる。 */
+  reset(): void {
+    this.context = createContext()
+    this.pending = new Uint8Array(0)
+  }
+
+  /** 受信したチャンクを読み、完成したセクションを callback に渡す。 */
+  push(chunk: Uint8Array, callback: PSISectionCallback): void {
+    if (chunk.length === 0) {
+      return
+    }
+    const data = new Uint8Array(this.pending.length + chunk.length)
+    data.set(this.pending)
+    data.set(chunk, this.pending.length)
+    this.pending = this.read(data, callback)
+  }
+
+  private read(data: Uint8Array, callback: PSISectionCallback): Uint8Array<ArrayBufferLike> {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+
+    while (data.byteLength - this.context.position >= this.context.trailerSize + 32) {
+      // 途中で切れたチャンクは何も反映せずに持ち越す
+      const context = this.context
+      const snapshot: ParserContext = {
+        ...context,
+        pids: context.pids.slice(),
+        sections: context.sections.slice(),
+      }
+      try {
+        this.readChunk(view, data, callback)
+      } catch (error) {
+        this.context = snapshot
+        if (error instanceof IncompleteDataError) {
+          break
+        }
+        throw error
+      }
+    }
+
+    // まだ読めていない末尾 (前のチャンクのトレーラーを含む) は次回に持ち越す
+    const rest = new Uint8Array(data.subarray(this.context.position))
+    this.context.position = 0
+    return rest
+  }
+
+  /** 1 チャンクを読む。途中で切れていれば IncompleteDataError を投げる。 */
+  private readChunk(view: DataView, data: Uint8Array, callback: PSISectionCallback): void {
+    const context = this.context
+    let position = context.position + context.trailerSize
+
+    const timeListLen = readU16(view, data, position + 10)
+    const dictionaryLen = readU16(view, data, position + 12)
+    const dictionaryWindowLen = readU16(view, data, position + 14)
+    const dictionaryDataSize = readU32(view, data, position + 16)
+    const dictionaryBufferSize = readU32(view, data, position + 20)
+    const codeListLen = readU32(view, data, position + 24)
+
+    if (
+      readU32(view, data, position) !== MAGIC_1
+      || readU32(view, data, position + 4) !== MAGIC_2
+      || dictionaryWindowLen < dictionaryLen
+      || dictionaryBufferSize < dictionaryDataSize
+      || dictionaryWindowLen > 65536 - 4096
+    ) {
+      // 壊れたデータ: ここから先は読まない
+      context.position = data.byteLength
+      return
+    }
+
+    // 辞書と本体のぶん (新規エントリは PID の 2 バイトが増える)
+    const chunkSize = 32 + timeListLen * 4 + dictionaryLen * 2
+      + Math.ceil(dictionaryDataSize / 2) * 2 + codeListLen * 2
+    if (data.byteLength - position < chunkSize) {
+      throw new IncompleteDataError()
+    }
+
+    let timeListPosition = position + 32
+    position += 32 + timeListLen * 4
+
+    if (context.timeListCount < 0) {
+      // 辞書。辞書の先頭から dictionaryLen 件をこのチャンクのエントリで
+      // 上書きし、再利用するエントリは前のチャンクのセクションを指す
+      const pids = context.pids.slice()
+      const sections = context.sections.slice()
+      while (pids.length < dictionaryWindowLen) {
+        pids.push(-1)
+        sections.push(null)
+      }
+      let sectionListPosition = 0
+
+      for (let index = 0; index < dictionaryLen; index++, position += 2) {
+        const codeOrSize = readU16(view, data, position) - 4096
+        if (codeOrSize >= 0) {
+          if (codeOrSize >= pids.length || pids[codeOrSize] < 0) {
+            context.position = data.byteLength
+            return
+          }
+          pids[index] = pids[codeOrSize]
+          sections[index] = sections[codeOrSize]
+          pids[codeOrSize] = -1
+        } else {
+          pids[index] = codeOrSize
+          sections[index] = null
+          sectionListPosition += 2
+        }
+      }
+      sectionListPosition += position
+
+      for (let index = 0; index < dictionaryLen; index++) {
+        if (pids[index] >= 0) {
+          continue
+        }
+        const sectionLength = pids[index] + 4097
+        if (sectionListPosition + sectionLength > data.byteLength) {
+          throw new IncompleteDataError()
+        }
+        const section = data.subarray(sectionListPosition, sectionListPosition + sectionLength)
+        // セクションを TS パケットのペイロードに詰める
+        // (先頭パケットの最初のバイトはポインタフィールド 0)
+        const packets = new Uint8Array(Math.ceil((section.length + 1) / 184) * 188)
+        for (let j = 0, k = 0; k < section.length; j++, k++) {
+          if (!(j % 188)) {
+            j += 4
+            if (!k) {
+              packets[j++] = 0
+            }
+          }
+          packets[j] = section[k]
+        }
+        sections[index] = packets
+        sectionListPosition += sectionLength
+        pids[index] = readU16(view, data, position) & 0x1fff
+        position += 2
+      }
+
+      // 辞書ウィンドウの残りは前の辞書から引き継ぐ
+      let windowIndex = dictionaryLen
+      for (let previous = 0; previous < pids.length && windowIndex < dictionaryWindowLen; previous++) {
+        if (pids[previous] < 0) {
+          continue
+        }
+        pids[windowIndex] = pids[previous]
+        sections[windowIndex] = sections[previous]
+        windowIndex++
+      }
+
+      context.pids = pids
+      context.sections = sections
+      context.timeListCount = 0
+      position = sectionListPosition + (dictionaryDataSize % 2)
+    } else {
+      position += dictionaryLen * 2 + Math.ceil(dictionaryDataSize / 2) * 2
+    }
+
+    // コードリストまで届いていなければ、このチャンクはまだ処理しない
+    if (position + codeListLen * 2 > data.byteLength) {
+      throw new IncompleteDataError()
+    }
+
+    position += context.codeListPosition
+    timeListPosition += context.timeListCount * 4
+    for (; context.timeListCount < timeListLen; context.timeListCount++, timeListPosition += 4) {
+      const absTime = readU32(view, data, timeListPosition)
+      if (absTime === 0xffffffff) {
+        context.currTime = -1
+      } else if (absTime >= 0x80000000) {
+        context.currTime = absTime & 0x3fffffff
+        if (context.initTime < 0) {
+          context.initTime = context.currTime
+        }
+      } else {
+        const codeCount = readU16(view, data, timeListPosition + 2) + 1
+        if (context.currTime >= 0) {
+          context.currTime += readU16(view, data, timeListPosition)
+          const second = ((context.currTime + 0x40000000 - context.initTime) & 0x3fffffff)
+            / TIME_UNITS_PER_SECOND
+          for (; context.codeCount < codeCount; context.codeCount++, position += 2, context.codeListPosition += 2) {
+            const code = readU16(view, data, position) - 4096
+            const packets = context.sections[code]
+            const pid = context.pids[code]
+            if (packets == null || pid == null) {
+              throw new IncompleteDataError()
+            }
+            callback(second, packets, pid)
+          }
+          context.codeCount = 0
+        } else {
+          position += codeCount * 2
+          context.codeListPosition += codeCount * 2
+        }
+      }
+    }
+
+    context.position = position
+    context.trailerSize = 2 + (2 + chunkSize) % 4
+    context.timeListCount = -1
+    context.codeListPosition = 0
+    context.currTime = -1
+  }
+}
+
+function readU16(view: DataView, data: Uint8Array, position: number): number {
+  if (position + 2 > data.byteLength) {
+    throw new IncompleteDataError()
+  }
+  return view.getUint16(position, true)
+}
+
+function readU32(view: DataView, data: Uint8Array, position: number): number {
+  if (position + 4 > data.byteLength) {
+    throw new IncompleteDataError()
+  }
+  return view.getUint32(position, true)
+}
+
+/** ヘッダなしの TS パケットにヘッダ (PID と CC) を付ける。 */
+export class TSPacketWriter {
+  private counters: { [pid: number]: number } = {}
+
+  reset(): void {
+    this.counters = {}
+  }
+
+  /** packets をその場で書き換える。 */
+  setHeader(packets: Uint8Array, pid: number): void {
+    if (this.counters[pid] === undefined) {
+      this.counters[pid] = 0
+    }
+    for (let index = 0; index < packets.length; index += 188) {
+      packets[index] = 0x47
+      packets[index + 1] = (index > 0 ? 0 : 0x40) | (pid >> 8)
+      packets[index + 2] = pid & 0xff
+      packets[index + 3] = 0x10 | this.counters[pid]
+      this.counters[pid] = (this.counters[pid] + 1) & 0x0f
+    }
+  }
+}

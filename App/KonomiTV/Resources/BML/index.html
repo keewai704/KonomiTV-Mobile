@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>データ放送</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    /* 映像プレーン (ネイティブの映像) を透かすため、ページ自体は透明にする */
+    background: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  #bml-root {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    background: transparent;
+  }
+  /* web-bml は 960x540 (または 720x480) の固定サイズなので、
+     コンテナを transform: scale() で画面に合わせる (Web 版と同じ) */
+  #bml-scale {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 960px;
+    height: 540px;
+    transform-origin: center center;
+    transform: translate(-50%, -50%) scale(1, 1);
+    background: transparent;
+  }
+  #bml-container {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+  }
+</style>
+</head>
+<body>
+<div id="bml-root"><div id="bml-scale"><div id="bml-container"></div></div></div>
+<script src="bml.js"></script>
+</body>
+</html>
