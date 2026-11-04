@@ -29,6 +29,7 @@ import threading
 import time
 
 import caption_injector
+import ts_timestamps
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HLS_DIR = os.path.join(BASE_DIR, "media", "hls")
@@ -52,17 +53,24 @@ _CACHE_LOCK = threading.Lock()
 
 
 def segment_bytes(sequence: int) -> bytes:
-    """Fixture segment (captions injected), cached per source segment."""
-    index = sequence % HLS_SEGMENT_COUNT
+    """Fixture segment (captions injected), cached per source segment.
+
+    The injector numbers each file's caption packets from 0; they are moved
+    past the caption packets of the files before, so the caption PID's
+    continuity counter runs on from one segment into the next.
+    """
     with _CACHE_LOCK:
-        cached = _CAPTIONED_SEGMENT_CACHE.get(index)
-    if cached is not None:
-        return cached
-    with open(os.path.join(HLS_DIR, f"segment{index}.ts"), "rb") as f:
-        data = caption_injector.inject_captions(f.read())
-    with _CACHE_LOCK:
-        _CAPTIONED_SEGMENT_CACHE[index] = data
-    return data
+        if not _CAPTIONED_SEGMENT_CACHE:
+            captions_before = 0
+            for index in range(HLS_SEGMENT_COUNT):
+                with open(os.path.join(HLS_DIR, f"segment{index}.ts"), "rb") as f:
+                    data = caption_injector.inject_captions(f.read())
+                pid = caption_injector.CAPTION_PID
+                captions = ts_timestamps.continuity_counts(data).get(pid, 0)
+                data = ts_timestamps.shift_continuity(data, {pid: captions_before})
+                _CAPTIONED_SEGMENT_CACHE[index] = data
+                captions_before += captions
+        return _CAPTIONED_SEGMENT_CACHE[sequence % HLS_SEGMENT_COUNT]
 
 
 def build_stream(program: dict, quality: str, segment_count: int,

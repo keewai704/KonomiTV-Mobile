@@ -6,7 +6,9 @@ over at the same PTS, which a real KonomiTV stream never does: libVLC resets
 its clock at each repetition (to a bogus value and then back to the start),
 and the app's position, comments and captions follow that clock. Adding the
 loop length times the repetition index to every PCR, PTS and DTS makes the
-repetitions continue each other instead.
+repetitions continue each other instead. The continuity counters are moved
+the same way (`repeat`), so the demuxer reports no TS discontinuity at the
+seam either.
 """
 
 from __future__ import annotations
@@ -141,3 +143,48 @@ def loop_length_ticks(data: bytes) -> int:
     steps = [b - a for a, b in zip(busiest, busiest[1:]) if b > a]
     step = min(steps) if steps else 0
     return max(everything) - min(everything) + step
+
+
+def continuity_counts(data: bytes) -> dict[int, int]:
+    """Packets that advance the continuity counter, per PID.
+
+    The counter goes up by one for every packet that carries a payload
+    (adaptation_field_control 1 or 3); null packets are left out.
+    """
+    counts: dict[int, int] = {}
+    for packet in range(0, len(data) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
+        pid = ((data[packet + 1] & 0x1F) << 8) | data[packet + 2]
+        if pid == 0x1FFF:
+            continue
+        if (data[packet + 3] >> 4) & 0x01:
+            counts[pid] = counts.get(pid, 0) + 1
+    return counts
+
+
+def shift_continuity(data: bytes, steps: dict[int, int]) -> bytes:
+    """Returns `data` with each PID's continuity counter advanced by `steps`.
+
+    A repetition of a looped sample advanced by the counts of the whole loop
+    (`continuity_counts`) times its index continues the counters of the one
+    before, so a demuxer sees no TS discontinuity at the seam.
+    """
+    if not any(step % 16 for step in steps.values()):
+        return data
+    out = bytearray(data)
+    for packet in range(0, len(out) - TS_PACKET_SIZE + 1, TS_PACKET_SIZE):
+        pid = ((out[packet + 1] & 0x1F) << 8) | out[packet + 2]
+        step = steps.get(pid, 0) % 16
+        if step == 0:
+            continue
+        counter = out[packet + 3] & 0x0F
+        out[packet + 3] = (out[packet + 3] & 0xF0) | ((counter + step) & 0x0F)
+    return bytes(out)
+
+
+def repeat(data: bytes, repetition: int, ticks: int, counts: dict[int, int]) -> bytes:
+    """`data` as repetition `repetition` of a loop: timestamps moved by
+    `repetition * ticks`, continuity counters by `repetition * counts`."""
+    if repetition == 0:
+        return data
+    shifted = shift_timestamps(data, repetition * ticks)
+    return shift_continuity(shifted, {pid: repetition * count for pid, count in counts.items()})

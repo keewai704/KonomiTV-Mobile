@@ -777,38 +777,32 @@ def load_fixtures() -> dict:
     }
 
 
-_CAPTIONED_SEGMENT_CACHE: dict[str, bytes] = {}
 _SEGMENT_CACHE: dict[int, bytes] = {}
-_SEGMENT_LOOP_TICKS: int | None = None
+_SEGMENT_LOOP: tuple[int, dict[int, int]] | None = None
 
 
 def _captioned_source_segment(index: int) -> bytes:
     """One of the six fixture segment files with the ARIB caption stream injected."""
-    path = os.path.join(HLS_DIR, f"segment{index}.ts")
-    cached = _CAPTIONED_SEGMENT_CACHE.get(path)
-    if cached is not None:
-        return cached
-    with open(path, "rb") as f:
-        data = caption_injector.inject_captions(f.read())
-    _CAPTIONED_SEGMENT_CACHE[path] = data
-    return data
+    return offline_mock.segment_bytes(index)
 
 
-def _segment_loop_ticks() -> int:
-    """90 kHz length of one pass over the six source segments."""
-    global _SEGMENT_LOOP_TICKS
-    if _SEGMENT_LOOP_TICKS is None:
+def _segment_loop() -> tuple[int, dict[int, int]]:
+    """90 kHz length and per-PID continuity counts of one pass over the six
+    source segments."""
+    global _SEGMENT_LOOP
+    if _SEGMENT_LOOP is None:
         joined = b"".join(_captioned_source_segment(i) for i in range(HLS_SEGMENT_COUNT))
-        _SEGMENT_LOOP_TICKS = ts_timestamps.loop_length_ticks(joined)
-    return _SEGMENT_LOOP_TICKS
+        _SEGMENT_LOOP = (ts_timestamps.loop_length_ticks(joined), ts_timestamps.continuity_counts(joined))
+    return _SEGMENT_LOOP
 
 
 def caption_injected_segment(sequence: int) -> bytes:
     """Return a fixture HLS segment with the ARIB caption stream injected.
 
     The playlist repeats the six source files; each repetition has its
-    timestamps moved past the previous one, so the 120 s recording is one
-    continuous stream like a real recording (no #EXT-X-DISCONTINUITY).
+    timestamps and continuity counters moved past the previous one, so the
+    120 s recording is one continuous stream like a real recording (no
+    #EXT-X-DISCONTINUITY).
     Results are cached per sequence.
     """
     cached = _SEGMENT_CACHE.get(sequence)
@@ -816,7 +810,8 @@ def caption_injected_segment(sequence: int) -> bytes:
         return cached
     data = _captioned_source_segment(sequence % HLS_SEGMENT_COUNT)
     repetition = sequence // HLS_SEGMENT_COUNT
-    data = ts_timestamps.shift_timestamps(data, repetition * _segment_loop_ticks())
+    ticks, counts = _segment_loop()
+    data = ts_timestamps.repeat(data, repetition, ticks, counts)
     _SEGMENT_CACHE[sequence] = data
     return data
 
@@ -2662,12 +2657,13 @@ class MockHandler(BaseHTTPRequestHandler):
     def _stream_sample_loop(self, sample: bytes) -> None:
         """Stream the sample over and over as one live broadcast.
 
-        Each repetition has its PCR / PTS / DTS moved past the previous one,
-        so the stream's clock keeps running like a real broadcast instead of
-        jumping back every 12 s.
+        Each repetition has its PCR / PTS / DTS and continuity counters moved
+        past the previous one, so the stream's clock keeps running like a
+        real broadcast instead of jumping back every 12 s.
         """
         bytes_per_second = max(len(sample) / LIVE_DURATION_SECONDS, 1.0)
         loop_ticks = ts_timestamps.loop_length_ticks(sample)
+        loop_counts = ts_timestamps.continuity_counts(sample)
         repetition = 0
         current = sample
         offset = 0
@@ -2680,7 +2676,7 @@ class MockHandler(BaseHTTPRequestHandler):
             if not chunk:
                 offset = 0
                 repetition += 1
-                current = ts_timestamps.shift_timestamps(sample, repetition * loop_ticks)
+                current = ts_timestamps.repeat(sample, repetition, loop_ticks, loop_counts)
                 continue
             offset += len(chunk)
             self.wfile.write(chunk)

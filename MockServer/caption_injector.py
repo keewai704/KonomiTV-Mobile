@@ -379,7 +379,8 @@ def inject_captions(
     last_index = pts_entries[-1][0]
 
     insertions: dict[int, list[bytes]] = {}
-    for sequence, (offset_seconds, text) in enumerate(captions):
+    continuity = 0
+    for offset_seconds, text in captions:
         target = (first_pts + round(offset_seconds * 90_000)) & ((1 << 33) - 1)
         insertion_index = None
         for packet_index, pts in pts_entries:
@@ -389,9 +390,9 @@ def inject_captions(
         if insertion_index is None:
             insertion_index = last_index + 1
         pes = make_caption_pes(text, target)
-        insertions.setdefault(insertion_index, []).extend(
-            _packetize_pes(CAPTION_PID, pes, sequence & 0x0F)
-        )
+        packets = _packetize_pes(CAPTION_PID, pes, continuity)
+        continuity = (continuity + len(packets)) & 0x0F
+        insertions.setdefault(insertion_index, []).extend(packets)
 
     out = bytearray()
     packet_count = len(rewritten) // TS_PACKET_SIZE

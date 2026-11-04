@@ -377,15 +377,31 @@ class MockServerTestCase(unittest.TestCase):
         start = ts_timestamps.pts_values(mock_server.caption_injected_segment(0))
         self.assertGreater(min(first), max(last) - 90_000)
         self.assertGreater(min(first), min(start) + 11 * 90_000)
+        loop = b"".join(mock_server.caption_injected_segment(i) for i in range(6))
         self.assertEqual(
             mock_server.caption_injected_segment(6),
-            ts_timestamps.shift_timestamps(
+            ts_timestamps.repeat(
                 mock_server.caption_injected_segment(0),
-                ts_timestamps.loop_length_ticks(
-                    b"".join(mock_server.caption_injected_segment(i) for i in range(6))
-                ),
+                1,
+                ts_timestamps.loop_length_ticks(loop),
+                ts_timestamps.continuity_counts(loop),
             ),
         )
+
+    def test_video_segments_keep_continuity_counters(self) -> None:
+        # No PID's continuity counter jumps between packets, across segment
+        # files and across repetitions, so a demuxer sees no discontinuity.
+        joined = b"".join(mock_server.caption_injected_segment(i) for i in range(13))
+        last: dict[int, int] = {}
+        for offset in range(0, len(joined), 188):
+            packet = joined[offset:offset + 188]
+            pid = ((packet[1] & 0x1F) << 8) | packet[2]
+            if pid == 0x1FFF or not (packet[3] >> 4) & 0x01:
+                continue
+            counter = packet[3] & 0x0F
+            if pid in last:
+                self.assertEqual(counter, (last[pid] + 1) % 16, f"PID {pid} at packet {offset // 188}")
+            last[pid] = counter
 
     def test_video_segment_contains_arib_caption_stream(self) -> None:
         session_id = "abc12345"
