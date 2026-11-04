@@ -18,6 +18,15 @@ enum PlaybackItem: Hashable, Sendable {
     /// A saved video played from local storage (no server involved).
     case offline(RecordedProgram)
 
+    /// Short name for the log ("video 1", "live gr011").
+    var logName: String {
+        switch self {
+        case .video(let video): "video \(video.id)"
+        case .live(let channel): "live \(channel.id)"
+        case .offline(let video): "offline \(video.id)"
+        }
+    }
+
     /// Title shown in the Now Playing / lock screen info.
     var title: String {
         switch self {
@@ -223,8 +232,15 @@ final class PlaybackController {
     /// Set between a PiP restore request and the resulting PiP stop, so the
     /// stop does not tear down the playback that was just restored.
     @ObservationIgnored private var isRestoringFromPictureInPicture = false
+    /// Last libVLC time seen by `logTime(_:)`.
+    @ObservationIgnored private var lastLoggedTime: Double?
+    @ObservationIgnored private var lastTimeLogSecond = 0
+
+    /// See `LaunchOptions.controlsAutoHideDelay`.
+    let controlsAutoHideDelay: Duration
 
     init(options: LaunchOptions = LaunchOptions()) {
+        controlsAutoHideDelay = options.controlsAutoHideDelay
         let player = VLCMediaPlayer(library: Self.library)
         self.player = player
         self.hostViewController = PlayerHostViewController(
@@ -369,6 +385,7 @@ final class PlaybackController {
 
     /// Stops playback and releases every task and session.
     func stop() {
+        AppLog.playback.notice("stop \(self.item?.logName ?? "-", privacy: .public) at \(self.positionSeconds, privacy: .public)s")
         // Store the final position of the recorded program that is stopping.
         switch item {
         case .video(let video)?, .offline(let video)?:
@@ -510,6 +527,7 @@ final class PlaybackController {
     func seek(to seconds: Double) {
         guard item != nil, player.isSeekable else { return }
         let target = max(seconds, 0)
+        AppLog.playback.notice("seek \(self.clock.currentTime, privacy: .public)s -> \(target, privacy: .public)s")
         player.time = VLCTime(int: Int32(clamping: Int((target * 1000).rounded())))
         clock.noteSeek(to: target)
         captions.seek(to: target)
@@ -656,6 +674,7 @@ final class PlaybackController {
 
     /// Called from libVLC's PiP window controller when PiP starts.
     private func pictureInPictureDidStart() {
+        AppLog.playback.notice("pip started")
         isPictureInPictureActive = true
         comments.isPictureInPictureActive = true
         captions.isPictureInPictureActive = true
@@ -676,6 +695,7 @@ final class PlaybackController {
     /// back by the restore button, a backgrounded one just had its window
     /// closed.
     private func pictureInPictureDidStop() {
+        AppLog.playback.notice("pip stopped (restoring=\(self.isRestoringFromPictureInPicture, privacy: .public) screenVisible=\(self.isPlayerScreenVisible, privacy: .public))")
         isPictureInPictureActive = false
         comments.isPictureInPictureActive = false
         captions.isPictureInPictureActive = false
@@ -1052,6 +1072,8 @@ final class PlaybackController {
         updatePictureInPictureSnapshot()
         hostViewController.invalidatePictureInPictureState()
 
+        AppLog.playback.notice("attach \(expected.logName, privacy: .public) startAt=\(startAt, privacy: .public) url=\(url.absoluteString, privacy: .public)")
+        lastLoggedTime = nil
         player.media = media
         player.play()
 
@@ -1101,6 +1123,7 @@ final class PlaybackController {
     /// libVLC changed its playback state.
     func playerStateChanged(_ newState: VLCMediaPlayerState) {
         guard item != nil else { return }
+        AppLog.playback.notice("vlc state \(newState.rawValue, privacy: .public) at \(self.clock.settledTime, privacy: .public)s")
 
         switch newState {
         case .error:
@@ -1135,6 +1158,7 @@ final class PlaybackController {
         guard item != nil else { return }
         if progress < 1, state != "paused", state != "error" {
             if state != "buffering" {
+                AppLog.playback.notice("buffering \(progress, privacy: .public) (was \(self.state, privacy: .public))")
                 state = "buffering"
             }
             updatePlaying(false)
@@ -1176,6 +1200,7 @@ final class PlaybackController {
     func playerTimeChanged(milliseconds: Double) {
         guard item != nil, player.media != nil else { return }
         let seconds = milliseconds / 1000
+        logTime(seconds)
         let playing = player.state == .playing
         // A moving clock is playback, whatever the last buffering report said:
         // libVLC does not always send a final 100 % after a channel switch.
@@ -1189,7 +1214,9 @@ final class PlaybackController {
         // reports the time four times a second, and a toolbar Menu rebuilt by
         // that closes while it is open.
         setDuration(clock.length)
-        let position = max(Int(monotonicPosition(seconds)), 0)
+        // The clock, not the raw time: right after a seek libVLC still reports
+        // the old position for a moment, and the label would jump back.
+        let position = max(Int(monotonicPosition(clock.settledTime)), 0)
         if positionSeconds != position {
             positionSeconds = position
         }
@@ -1204,6 +1231,25 @@ final class PlaybackController {
         updateVideoSize()
         updatePictureInPictureSnapshot()
         updateNowPlaying(force: false)
+    }
+
+    /// Logs a jump of the libVLC clock (callbacks come every 250 ms, so more
+    /// than 2 s between two is a seek, a loop or a reset) and the clock every
+    /// 10 s otherwise.
+    private func logTime(_ seconds: Double) {
+        defer { lastLoggedTime = seconds }
+        guard let last = lastLoggedTime else {
+            AppLog.playback.notice("time first \(seconds, privacy: .public)s")
+            lastTimeLogSecond = Int(seconds) / 10
+            return
+        }
+        if abs(seconds - last) > 2 {
+            AppLog.playback.notice("time jump \(last, privacy: .public)s -> \(seconds, privacy: .public)s state=\(self.state, privacy: .public)")
+        }
+        if Int(seconds) / 10 != lastTimeLogSecond {
+            lastTimeLogSecond = Int(seconds) / 10
+            AppLog.playback.notice("time \(seconds, privacy: .public)s position=\(self.positionSeconds, privacy: .public) length=\(self.clock.length, privacy: .public) state=\(self.state, privacy: .public)")
+        }
     }
 
     /// libVLC wrote the snapshot requested by saveSnapshot(to:).
@@ -1227,6 +1273,7 @@ final class PlaybackController {
         guard player.state == .playing || player.state == .paused else { return }
         let target = pendingStartPosition
         pendingStartPosition = 0
+        AppLog.playback.notice("resume at \(target, privacy: .public)s")
         player.time = VLCTime(int: Int32(clamping: Int((target * 1000).rounded())))
         clock.noteSeek(to: target)
         captions.seek(to: target)
@@ -1370,6 +1417,7 @@ final class PlaybackController {
     /// did not start.
     private func applicationDidEnterBackground() {
         guard item != nil, isPlayerAttached else { return }
+        AppLog.playback.notice("background (pip=\(self.isPictureInPictureActive, privacy: .public))")
         // Nothing of the BML page is visible in the background; restart it on
         // return (the PSI stream would stall anyway).
         dataBroadcasting.suspend()
@@ -1385,6 +1433,7 @@ final class PlaybackController {
     }
 
     private func applicationWillEnterForeground() {
+        AppLog.playback.notice("foreground")
         backgroundTask?.cancel()
         backgroundTask = nil
         restoreVideoTracks()

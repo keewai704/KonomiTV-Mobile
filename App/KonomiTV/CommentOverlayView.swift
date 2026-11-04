@@ -31,7 +31,10 @@ final class CommentOverlayModel {
     /// Queues a comment for the renderer. Comments that arrive while the
     /// overlay is hidden are not drawn (DPlayer behaves the same way).
     func emit(_ danmaku: CommentDanmaku) {
-        guard isVisible, !isPictureInPictureActive else { return }
+        guard isVisible, !isPictureInPictureActive else {
+            AppLog.comments.debug("dropped (visible=\(self.isVisible, privacy: .public) pip=\(self.isPictureInPictureActive, privacy: .public))")
+            return
+        }
         pending.append(danmaku)
     }
 

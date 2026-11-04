@@ -131,6 +131,7 @@ final class RecordedCommentSession {
         visibleCount = nextIndex
         visibleComments = Array(allRows.prefix(visibleCount))
         overlay.clear()
+        AppLog.comments.notice("past log loaded \(rows.count, privacy: .public) comments (first at \(rows.first?.danmaku.time ?? -1, privacy: .public)s) from \(position, privacy: .public)s")
     }
 
     // MARK: - Playback position
@@ -145,6 +146,7 @@ final class RecordedCommentSession {
         if jump < Self.backwardSeekThreshold || jump > Self.forwardSeekThreshold {
             // Seek: move the cursor, drop what is on screen and do not draw the
             // comments of the skipped range.
+            AppLog.comments.notice("past log seek \(position - jump, privacy: .public)s -> \(position, privacy: .public)s")
             nextIndex = upperBound(position)
             overlay.clear()
             refreshVisibleComments(position)
@@ -156,6 +158,7 @@ final class RecordedCommentSession {
                 let danmaku = allRows[nextIndex].danmaku
                 if !model.settings.mutedNiconicoUserIDs.contains(danmaku.authorID) {
                     overlay.emit(danmaku)
+                    AppLog.comments.debug("past log emit \(danmaku.time, privacy: .public)s")
                 }
                 nextIndex += 1
             }

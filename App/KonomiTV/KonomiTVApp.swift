@@ -17,6 +17,10 @@ struct LaunchOptions: Sendable {
     /// Replaces the Niconico `ASWebAuthenticationSession` sheet with a plain
     /// URLSession round trip, so the link flow runs on CI without a system sheet.
     let disablesASWebAuthentication: Bool
+    /// How long the player controls stay on screen while playing. UI tests get
+    /// longer than the 3 s users see: each query and tap of a test can take a
+    /// second or more on CI, and the controls would hide between them.
+    var controlsAutoHideDelay: Duration { isUITesting ? .seconds(8) : .seconds(3) }
 
     init(
         arguments: [String] = ProcessInfo.processInfo.arguments,

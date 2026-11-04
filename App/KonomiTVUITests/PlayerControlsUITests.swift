@@ -12,9 +12,10 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         openVideo(in: app)
 
         let controls = uiElement(app, "player.controls")
-        // The controls hide themselves three seconds after playback starts.
+        // The controls hide themselves a few seconds after playback starts
+        // (8 s under UI testing).
         XCTAssertTrue(
-            waitUntil(timeout: 10) { !controls.exists },
+            waitUntil(timeout: 15) { !controls.exists },
             "再生中にコントロールが自動的に隠れない"
         )
 
@@ -25,7 +26,7 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         )
 
         XCTAssertTrue(
-            waitUntil(timeout: 10) { !controls.exists },
+            waitUntil(timeout: 15) { !controls.exists },
             "表示したコントロールが自動的に隠れない"
         )
     }
@@ -42,7 +43,7 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
             waitForLabel(state, equals: "paused", timeout: TestTimeout.ui),
             "一時停止しても状態が paused にならない (状態: \(state.label))"
         )
-        waitSeconds(5)
+        waitSeconds(10)
         XCTAssertTrue(
             uiElement(app, "player.controls").exists,
             "一時停止中にコントロールが隠れた"
@@ -188,9 +189,8 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         XCTAssertTrue(controls.exists, "再生コントロールが表示されない")
     }
 
-    /// Shows the controls and taps one of them straight away. The controls hide
-    /// three seconds after the last tap while playing, which is shorter than
-    /// `tapWhenHittable`'s polling and scrolling.
+    /// Shows the controls and taps one of them straight away, before they hide
+    /// themselves again.
     private func tapControl(_ identifier: String, in app: XCUIApplication) {
         let control = uiElement(app, identifier)
         for _ in 0..<3 {

@@ -1,3 +1,4 @@
+import OSLog
 import UIKit
 import XCTest
 
@@ -219,6 +220,9 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
     override func setUp() async throws {
         try await super.setUp()
         continueAfterFailure = false
+        // Marks where this test's lines start in the app log CI streams from
+        // the simulator (scripts/report-ui-tests.py splits the log on it).
+        Self.log.notice("test-start \(self.testIdentifier, privacy: .public)")
         // Every test starts from the mock server's initial state (settings,
         // deleted recordings and counters).
         XCTAssertEqual(MockServerControl.reset(), 200, "モックサーバーをリセットできない")
@@ -228,6 +232,30 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
         attachFailureScreenshot()
         app = nil
         try await super.tearDown()
+    }
+
+    private static let log = Logger(subsystem: "com.github.keewai704.KonomiTV", category: "test")
+
+    /// "CommentUITests/testPastLogCommentsAppearForRecordedVideo", from the
+    /// XCTest name "-[KonomiTVUITests.CommentUITests testPast…]".
+    private var testIdentifier: String {
+        let parts = name.trimmingCharacters(in: CharacterSet(charactersIn: "-[]")).split(separator: " ")
+        let type = parts.first?.split(separator: ".").last ?? ""
+        return "\(type)/\(parts.last ?? "")"
+    }
+
+    /// Prints what was on screen when the test failed, so the CI log alone
+    /// shows it (the screenshot is only in the result bundle). The status
+    /// labels (`player.state`, `playback.position`, ...) are part of it.
+    private func printAccessibilityHierarchy(of app: XCUIApplication) {
+        guard app.state == .runningForeground else {
+            print("=== UI hierarchy at failure: app state \(app.state.rawValue) ===")
+            return
+        }
+        let lines = app.debugDescription.split(separator: "\n", omittingEmptySubsequences: false)
+        print("=== UI hierarchy at failure (\(lines.count) lines) ===")
+        print(lines.prefix(300).joined(separator: "\n"))
+        print("=== end of UI hierarchy ===")
     }
 
     /// Launches the app and remembers it so `tearDown` can capture failures.
@@ -275,6 +303,8 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
               !testRun.hasBeenSkipped else {
             return
         }
+
+        printAccessibilityHierarchy(of: app)
 
         let screenshot: XCUIScreenshot
         if app.state == .notRunning || app.state == .unknown {

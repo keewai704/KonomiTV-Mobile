@@ -125,7 +125,7 @@ struct PlayerView: View {
         autoHideTask?.cancel()
         guard playback.isPlaying else { return }
         autoHideTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: playback.controlsAutoHideDelay)
             guard !Task.isCancelled else { return }
             areControlsVisible = false
         }
