@@ -1595,7 +1595,12 @@ class JikkyoMockTestCase(unittest.TestCase):
             client.send_json({"type": "keepSeat"})
             client.send_json({"type": "pong"})
 
+            # The server handles the frames on its own thread: wait for it.
+            deadline = time.monotonic() + 5
             stats = self.stats()
+            while stats["jikkyo_keep_seat_count"] < 1 and time.monotonic() < deadline:
+                time.sleep(0.05)
+                stats = self.stats()
             self.assertGreaterEqual(stats["jikkyo_watch_total"], 1)
             self.assertGreaterEqual(stats["jikkyo_watch_active"], 1)
             self.assertGreaterEqual(stats["jikkyo_keep_seat_count"], 1)
