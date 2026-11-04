@@ -49,6 +49,14 @@ final class ModelsTests: XCTestCase {
         XCTAssertTrue(channels.channels(for: .bs4k).isEmpty)
     }
 
+    func testDisplayedChannelsLeaveOutHiddenOnes() throws {
+        var channels = try JSONCoding.decode(LiveChannels.self, from: Fixtures.channelsJSON)
+        channels.gr[1].isDisplay = false
+        XCTAssertEqual(channels.displayedChannels(for: .gr).map(\.id), ["gr011"])
+        XCTAssertEqual(channels.channels(for: .gr).count, 2)
+        XCTAssertEqual(channels.displayedChannels(for: .bs).count, 1)
+    }
+
     func testProgramProgress() throws {
         let channels = try JSONCoding.decode(LiveChannels.self, from: Fixtures.channelsJSON)
         let program = try XCTUnwrap(channels.gr.first?.programPresent)

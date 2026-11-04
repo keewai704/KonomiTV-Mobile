@@ -91,6 +91,12 @@ class MockServerTestCase(unittest.TestCase):
             self.assertEqual(payload[key], [])
 
         self.assertEqual(payload["GR"][0]["display_channel_id"], "gr011")
+        # An off-air subchannel, like KonomiTV sends one: hidden, no programs.
+        subchannel = payload["GR"][1]
+        self.assertEqual(subchannel["display_channel_id"], "gr012")
+        self.assertTrue(subchannel["is_subchannel"])
+        self.assertFalse(subchannel["is_display"])
+        self.assertIsNone(subchannel["program_present"])
         self.assertEqual(payload["BS"][0]["display_channel_id"], "bs101")
         self.assertEqual(payload["BS"][1]["display_channel_id"], "bs103")
 

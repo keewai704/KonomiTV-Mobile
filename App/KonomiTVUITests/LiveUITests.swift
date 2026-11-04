@@ -11,6 +11,8 @@ final class LiveUITests: KonomiTVUITestCase {
 
         let grChannel = uiElement(app, "live.channel.gr011")
         XCTAssertTrue(grChannel.waitForExistence(timeout: TestTimeout.ui), "地上波チャンネルが表示されない")
+        // gr012 is a subchannel with nothing on air (is_display: false).
+        XCTAssertFalse(uiElement(app, "live.channel.gr012").exists, "放送していないサブチャンネルが表示されている")
 
         selectChannelType("BS", in: app)
 

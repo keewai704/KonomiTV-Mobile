@@ -23,6 +23,28 @@
       "program_following": null
     },
     {
+      "id": "NID32736-SID1025",
+      "display_channel_id": "gr012",
+      "network_id": 32736,
+      "service_id": 1025,
+      "transport_stream_id": 32736,
+      "remocon_id": 1,
+      "channel_number": "011-1",
+      "type": "GR",
+      "name": "NHK総合2",
+      "terrestrial_regions": [
+        "関東広域圏"
+      ],
+      "jikkyo_force": null,
+      "is_subchannel": true,
+      "is_radiochannel": false,
+      "is_watchable": true,
+      "is_display": false,
+      "viewer_count": 0,
+      "program_present": null,
+      "program_following": null
+    },
+    {
       "id": "NID32737-SID1024",
       "display_channel_id": "gr021",
       "network_id": 32737,

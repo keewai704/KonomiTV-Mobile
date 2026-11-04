@@ -87,7 +87,7 @@ struct LiveChannelsView: View {
 
     private var availableTypes: [ChannelType] {
         guard let channels else { return [] }
-        return ChannelType.allCases.filter { !channels.channels(for: $0).isEmpty }
+        return ChannelType.allCases.filter { !channels.displayedChannels(for: $0).isEmpty }
     }
 
     private var pinnedChannels: [LiveChannel] {
@@ -116,7 +116,7 @@ struct LiveChannelsView: View {
         case .pinned:
             return pinnedChannels
         case .type(let type):
-            return model.sortedChannels(channels?.channels(for: type) ?? [])
+            return model.sortedChannels(channels?.displayedChannels(for: type) ?? [])
         }
     }
 
@@ -168,7 +168,7 @@ struct LiveChannelsView: View {
 
             ScrollView {
                 LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 300), spacing: 16)],
+                    columns: [GridItem(.adaptive(minimum: 300), spacing: 16, alignment: .top)],
                     alignment: .leading,
                     spacing: 16
                 ) {
@@ -384,9 +384,10 @@ struct ChannelCard: View {
 
             if let program = channel.programPresent {
                 VStack(alignment: .leading, spacing: 6) {
+                    // Two lines either way, so the cards of a row line up.
                     Text(program.title)
                         .font(.subheadline.weight(.semibold))
-                        .lineLimit(2)
+                        .lineLimit(2, reservesSpace: true)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
 

@@ -954,8 +954,12 @@ def iter_channels(channels: dict) -> list[dict]:
 
 
 def all_channels(fixtures: dict) -> list[dict]:
-    """Channels that are watchable (the ones the timetable API returns)."""
-    return [channel for channel in iter_channels(fixtures["channels"]) if channel.get("is_watchable", True)]
+    """Channels the timetable API returns a column for: the watchable ones,
+    without subchannels (KonomiTV nests those under their main channel)."""
+    return [
+        channel for channel in iter_channels(fixtures["channels"])
+        if channel.get("is_watchable", True) and not channel.get("is_subchannel", False)
+    ]
 
 
 def build_day_programs(channel: dict, day_start: datetime, channel_index: int) -> list[dict]:
@@ -1029,6 +1033,9 @@ def build_channels(channels: dict) -> dict:
 
     for channel_type, channel_list in result.items():
         for index, channel in enumerate(channel_list):
+            # 放送していないサブチャンネル (is_display: false) には番組がない
+            if channel.get("is_display", True) is False:
+                continue
             # 実況勢い (tv_channel_sort_by_jikkyo_force の並び替え用)
             channel["jikkyo_force"] = (index * 37 + 11) % 60 if channel.get("is_watchable", True) else None
             title_present = f"{channel['name']} ニュース・情報"

@@ -157,7 +157,7 @@ struct TimeTableScreen: View {
 
     private var availableTypes: [ChannelType] {
         guard let channels else { return [] }
-        return ChannelType.allCases.filter { !channels.channels(for: $0).isEmpty }
+        return ChannelType.allCases.filter { !channels.displayedChannels(for: $0).isEmpty }
     }
 
     private var pinnedChannels: [LiveChannel] {
@@ -420,6 +420,9 @@ struct TimeTableScreen: View {
                             height: geometry.height,
                             alignment: .topLeading
                         )
+                        // A short program shows what fits of its title; the
+                        // rest must not spill over the next program.
+                        .clipped()
                         .offset(x: 1.5, y: geometry.offsetY + 1)
                 }
             }
@@ -469,7 +472,9 @@ struct TimeTableScreen: View {
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 3)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            // minHeight 0: without it the frame grows to the text's height
+            // instead of staying as tall as the program.
+            .frame(maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
             .background(
                 isDimmed
                     ? Color.secondary.opacity(0.08)
@@ -582,7 +587,9 @@ struct TimeTableScreen: View {
 
         let offset = CGFloat(start.timeIntervalSince(dayStart) / 3600) * hourHeight
         let height = CGFloat(end.timeIntervalSince(start) / 3600) * hourHeight
-        return CellGeometry(offsetY: offset, height: max(height - 2, 16))
+        // Two points between programs; a program of a minute or two stays a
+        // thin strip rather than growing over the next one.
+        return CellGeometry(offsetY: offset, height: max(height - 2, 1))
     }
 
     private func channel(for item: TimeTableProgram) -> Channel? {

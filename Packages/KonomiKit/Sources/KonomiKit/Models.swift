@@ -425,6 +425,13 @@ public struct LiveChannels: Codable, Sendable, Hashable {
         self[type]
     }
 
+    /// The channels of `type` the lists show. KonomiTV sends a subchannel
+    /// with nothing on air as `is_display: false`, and the web client leaves
+    /// those out of its lists.
+    public func displayedChannels(for type: ChannelType) -> [LiveChannel] {
+        self[type].filter(\.isDisplay)
+    }
+
     public var allChannels: [LiveChannel] {
         gr + bs + cs + catv + sky + bs4k
     }

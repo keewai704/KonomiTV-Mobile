@@ -57,7 +57,7 @@ struct LivePlayerView: View {
     }
 
     private var typeChannels: [LiveChannel] {
-        channels?.channels(for: channel.type) ?? []
+        channels?.displayedChannels(for: channel.type) ?? []
     }
 
     var body: some View {
@@ -907,9 +907,13 @@ struct LivePlayerView: View {
         }
     }
 
+    /// Moves to the next / previous channel shown in the list, skipping the
+    /// hidden ones; a hidden channel (opened from the pinned tab) steps from
+    /// its own place in the list.
     private func stepChannel(_ offset: Int) {
+        let all = channels?.channels(for: channel.type) ?? []
         guard !typeChannels.isEmpty else { return }
-        guard let index = typeChannels.firstIndex(where: {
+        guard var index = all.firstIndex(where: {
             $0.displayChannelID == channel.displayChannelID
         }) else {
             if let first = typeChannels.first {
@@ -917,9 +921,14 @@ struct LivePlayerView: View {
             }
             return
         }
-        let count = typeChannels.count
-        let next = ((index + offset) % count + count) % count
-        switchChannel(typeChannels[next])
+        let count = all.count
+        for _ in 0..<count {
+            index = ((index + offset) % count + count) % count
+            if all[index].isDisplay {
+                switchChannel(all[index])
+                return
+            }
+        }
     }
 
     private func switchToRemocon(type: ChannelType, remoconID: Int) {
