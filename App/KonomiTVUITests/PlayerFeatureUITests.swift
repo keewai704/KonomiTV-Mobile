@@ -73,12 +73,8 @@ final class PlayerFeatureUITests: KonomiTVUITestCase {
 
         let dataSaver = uiElement(app, "settings.tvDataSaver")
         XCTAssertTrue(dataSaver.waitForExistence(timeout: TestTimeout.ui), "データ節約モードが表示されない")
-        // Tapping the middle of a SwiftUI Toggle row does not flip it; tap the
-        // switch itself.
-        let toggleSwitch = dataSaver.switches.firstMatch
-        tapWhenHittable(toggleSwitch.exists ? toggleSwitch : dataSaver, in: app)
         XCTAssertTrue(
-            waitUntil(timeout: TestTimeout.ui) { (dataSaver.value as? String) == "1" },
+            flipSwitch(dataSaver, in: app) && (dataSaver.value as? String) == "1",
             "データ節約モードがオンにならない (\(dataSaver.value ?? "nil"))"
         )
 

@@ -125,12 +125,8 @@ final class DataBroadcastingUITests: KonomiTVUITestCase {
 
         let isEnabled = uiElement(app, "settings.dataBroadcasting.enabled")
         XCTAssertTrue(isEnabled.waitForExistence(timeout: TestTimeout.ui), "データ放送の設定が表示されない")
-        // Tapping the middle of a SwiftUI Toggle row does not flip it; tap the
-        // switch itself.
-        let toggleSwitch = isEnabled.switches.firstMatch
-        tapWhenHittable(toggleSwitch.exists ? toggleSwitch : isEnabled, in: app)
         XCTAssertTrue(
-            waitUntil(timeout: TestTimeout.ui) { (isEnabled.value as? String) == "0" },
+            flipSwitch(isEnabled, in: app) && (isEnabled.value as? String) == "0",
             "データ放送の設定をオフにできない (\(isEnabled.value ?? "nil"))"
         )
 

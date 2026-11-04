@@ -92,9 +92,12 @@ final class PlayerPictureInPictureMediaController: NSObject, @unchecked Sendable
     /// video output there).
     func attach(pictureInPictureController controller: AnyObject) {
         guard let window = controller as? any VLCPictureInPictureWindowControlling else {
+            AppLog.playback.error("pip ready with an unexpected controller \(String(describing: type(of: controller)), privacy: .public)")
             return
         }
+        AppLog.playback.notice("pip window controller ready (auto=\(self.allowsAutomaticPictureInPicture, privacy: .public))")
         window.stateChangeEventHandler = { [weak self] started in
+            AppLog.playback.notice("pip state change \(started, privacy: .public)")
             self?.onStateChange?(started)
         }
         lock.lock()

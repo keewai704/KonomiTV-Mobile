@@ -194,7 +194,8 @@ func launchApp(
     showSetup: Bool = false,
     disableAutoPiP: Bool = false,
     shortHistoryThreshold: Bool = false,
-    disableASWebAuth: Bool = false
+    disableASWebAuth: Bool = false,
+    keepControls: Bool = false
 ) -> XCUIApplication {
     let app = XCUIApplication()
     app.launchArguments = ["-UITesting"]
@@ -214,6 +215,12 @@ func launchApp(
         // Links the Niconico account with URLSession instead of showing the
         // system ASWebAuthenticationSession sheet (CI has no user to tap it).
         app.launchArguments.append("-UITestingDisableASWebAuth")
+    }
+    if keepControls {
+        // The player controls stay until the picture is tapped, so a test can
+        // query a control and then operate it without the controls hiding in
+        // between (a query alone can take seconds on CI).
+        app.launchArguments.append("-UITestingKeepControls")
     }
     app.launchEnvironment["KONOMITV_SERVER_URL"] = TestEnvironment.serverURL
     app.launch()
@@ -276,7 +283,8 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
         showSetup: Bool = false,
         disableAutoPiP: Bool = false,
         shortHistoryThreshold: Bool = false,
-        disableASWebAuth: Bool = false
+        disableASWebAuth: Bool = false,
+        keepControls: Bool = false
     ) -> XCUIApplication {
         // Also set here so fast-fail behavior does not depend on the
         // test runner invoking the async setUp override.
@@ -285,7 +293,8 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
             showSetup: showSetup,
             disableAutoPiP: disableAutoPiP,
             shortHistoryThreshold: shortHistoryThreshold,
-            disableASWebAuth: disableASWebAuth
+            disableASWebAuth: disableASWebAuth,
+            keepControls: keepControls
         )
         app = application
         return application
@@ -605,6 +614,25 @@ func tapMenuItem(_ element: XCUIElement, timeout: TimeInterval = 3) {
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
     }
     element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+}
+
+/// Flips a SwiftUI Toggle and returns whether its value changed.
+///
+/// Tapping the middle of a Toggle row does not flip it, so the switch inside
+/// is tapped. A tap right after the screen appears can be dropped (the value
+/// stays as it was), so the tap is repeated until the value changes.
+@MainActor
+func flipSwitch(_ toggle: XCUIElement, in app: XCUIApplication) -> Bool {
+    XCTAssertTrue(toggle.waitForExistence(timeout: TestTimeout.ui), "スイッチが表示されない")
+    let before = toggle.value as? String
+    let inner = toggle.switches.firstMatch
+    for _ in 0..<3 {
+        tapWhenHittable(inner.exists ? inner : toggle, in: app)
+        if waitUntil(timeout: 3, { (toggle.value as? String) != before }) {
+            return true
+        }
+    }
+    return false
 }
 
 /// Taps an element once it is hittable. Scrolls the content or dismisses the

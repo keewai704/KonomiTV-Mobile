@@ -24,7 +24,8 @@ struct PlayerRepresentable: UIViewControllerRepresentable {
 /// tests can read.
 ///
 /// Tapping the picture shows and hides the controls; they hide themselves
-/// after three seconds while playback runs, and stay on screen while paused.
+/// after a few seconds while playback runs (`LaunchOptions.controlsAutoHideDelay`),
+/// and stay on screen while paused.
 struct PlayerView: View {
     let playback: PlaybackController
 
@@ -123,9 +124,9 @@ struct PlayerView: View {
 
     private func scheduleAutoHide() {
         autoHideTask?.cancel()
-        guard playback.isPlaying else { return }
+        guard playback.isPlaying, let delay = playback.controlsAutoHideDelay else { return }
         autoHideTask = Task { @MainActor in
-            try? await Task.sleep(for: playback.controlsAutoHideDelay)
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             areControlsVisible = false
         }

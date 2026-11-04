@@ -53,7 +53,7 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
     // MARK: - Transport
 
     func testPlayPauseTogglesPlaybackState() {
-        let app = startApp()
+        let app = startApp(keepControls: true)
         openVideo(in: app)
         revealControls(in: app)
 
@@ -73,7 +73,7 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
     }
 
     func testSeekBarMovesPlaybackPosition() {
-        let app = startApp()
+        let app = startApp(keepControls: true)
         openVideo(in: app)
 
         // The seek bar spans the whole recording, so its length has to be known
@@ -100,7 +100,7 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
     }
 
     func testSkipButtonsMoveRecordedVideo() {
-        let app = startApp()
+        let app = startApp(keepControls: true)
         openVideo(in: app)
         revealControls(in: app)
 
@@ -127,7 +127,7 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
     // MARK: - Live
 
     func testLiveShowsLiveEdgeButtonInsteadOfSeekBar() {
-        let app = startApp()
+        let app = startApp(keepControls: true)
         openLive(in: app)
         revealControls(in: app)
 

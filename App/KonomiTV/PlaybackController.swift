@@ -245,7 +245,7 @@ final class PlaybackController {
     @ObservationIgnored private var lastTimeLogSecond = 0
 
     /// See `LaunchOptions.controlsAutoHideDelay`.
-    let controlsAutoHideDelay: Duration
+    let controlsAutoHideDelay: Duration?
 
     init(options: LaunchOptions = LaunchOptions()) {
         controlsAutoHideDelay = options.controlsAutoHideDelay
@@ -1458,7 +1458,8 @@ final class PlaybackController {
     /// did not start.
     private func applicationDidEnterBackground() {
         guard item != nil, isPlayerAttached else { return }
-        AppLog.playback.notice("background (pip=\(self.isPictureInPictureActive, privacy: .public))")
+        let media = hostViewController.videoView.pipMedia
+        AppLog.playback.notice("background (pip=\(self.isPictureInPictureActive, privacy: .public) window=\(media.hasWindowController, privacy: .public) auto=\(media.allowsAutomaticPictureInPicture, privacy: .public) playing=\(self.isPlaying, privacy: .public))")
         // Nothing of the BML page is visible in the background; restart it on
         // return (the PSI stream would stall anyway).
         dataBroadcasting.suspend()

@@ -71,10 +71,7 @@ final class ReservationUITests: KonomiTVUITestCase {
 
         let enabled = uiElement(app, "reservation.enabled")
         XCTAssertTrue(scrollTo(enabled, in: app), "有効スイッチが表示されない")
-        // Tapping the middle of a SwiftUI Toggle row does not flip it; tap the
-        // switch itself.
-        let toggle = enabled.switches.firstMatch
-        tapWhenHittable(toggle.exists ? toggle : enabled, in: app)
+        XCTAssertTrue(flipSwitch(enabled, in: app), "有効スイッチを切り替えられない")
 
         let save = uiElement(app, "reservation.save")
         XCTAssertTrue(
