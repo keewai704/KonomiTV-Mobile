@@ -404,7 +404,7 @@ final class BMLSchemeHandler: NSObject, WKURLSchemeHandler, URLSessionDataDelega
         }
     }
 
-    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: any Error?) {
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         MainActor.assumeIsolated {
             guard let proxy = self.finish(task) else { return }
             if let error, !proxy.isStopped {
