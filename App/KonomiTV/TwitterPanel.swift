@@ -53,6 +53,8 @@ struct TwitterPanelView: View {
                 }
             }
         }
+        // Without .contain the container's identifier replaces the sub tabs'.
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("twitter.panel")
         .task {
             await session.load()

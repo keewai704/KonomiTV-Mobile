@@ -86,6 +86,9 @@ final class PlaybackController {
     private(set) var errorDetail: String?
     /// Current playback position in whole seconds.
     private(set) var positionSeconds = 0
+    /// See `monotonicPosition(_:)`.
+    @ObservationIgnored private var liveTimeOffset: Double = 0
+    @ObservationIgnored private var lastLiveTime: Double?
     /// Length of the current media in seconds (0 for live and while unknown).
     private(set) var durationSeconds: Double = 0
     private(set) var isPictureInPictureActive = false
@@ -312,6 +315,8 @@ final class PlaybackController {
         state = "buffering"
         errorDetail = nil
         positionSeconds = 0
+        liveTimeOffset = 0
+        lastLiveTime = nil
         durationSeconds = 0
         liveErrorMessage = nil
         isMuted = false
@@ -340,6 +345,8 @@ final class PlaybackController {
         state = "buffering"
         errorDetail = nil
         positionSeconds = 0
+        liveTimeOffset = 0
+        lastLiveTime = nil
         durationSeconds = 0
         liveErrorMessage = nil
         isMuted = false
@@ -385,6 +392,8 @@ final class PlaybackController {
         state = "idle"
         errorDetail = nil
         positionSeconds = 0
+        liveTimeOffset = 0
+        lastLiveTime = nil
         durationSeconds = 0
         liveErrorMessage = nil
         liveStatus = ""
@@ -1113,7 +1122,7 @@ final class PlaybackController {
         let playing = newState == .playing
         updatePlaying(playing)
         clock.update(position: clock.settledTime, length: currentLength(), isPlaying: playing)
-        durationSeconds = clock.length
+        setDuration(clock.length)
         applyPendingStartPositionIfNeeded()
         updateVideoSize()
         invalidatePictureInPictureState()
@@ -1125,7 +1134,9 @@ final class PlaybackController {
     func playerBufferingChanged(_ progress: Float) {
         guard item != nil else { return }
         if progress < 1, state != "paused", state != "error" {
-            state = "buffering"
+            if state != "buffering" {
+                state = "buffering"
+            }
             updatePlaying(false)
         } else if progress >= 1, state == "buffering", player.state == .playing {
             state = "playing"
@@ -1139,8 +1150,26 @@ final class PlaybackController {
             position: clock.settledTime,
             length: Double(milliseconds) / 1000
         )
-        durationSeconds = clock.length
+        setDuration(clock.length)
         invalidatePictureInPictureState()
+    }
+
+    /// libVLC's time restarts at a live stream discontinuity (a PCR jump or an
+    /// encoder restart; the mock loops a 12 second sample). The position shown
+    /// and reported for live keeps counting across those instead.
+    private func monotonicPosition(_ seconds: Double) -> Double {
+        guard case .live? = item else { return seconds }
+        if let last = lastLiveTime, seconds + 1 < last {
+            liveTimeOffset += last - seconds
+        }
+        lastLiveTime = seconds
+        return liveTimeOffset + seconds
+    }
+
+    private func setDuration(_ seconds: Double) {
+        if durationSeconds != seconds {
+            durationSeconds = seconds
+        }
     }
 
     /// libVLC reported a new position in milliseconds.
@@ -1148,10 +1177,22 @@ final class PlaybackController {
         guard item != nil, player.media != nil else { return }
         let seconds = milliseconds / 1000
         let playing = player.state == .playing
+        // A moving clock is playback, whatever the last buffering report said:
+        // libVLC does not always send a final 100 % after a channel switch.
+        if playing, state == "buffering" {
+            errorDetail = nil
+            state = "playing"
+        }
         clock.update(position: seconds, length: currentLength(), isPlaying: playing)
         updatePlaying(playing)
-        durationSeconds = clock.length
-        positionSeconds = max(Int(seconds), 0)
+        // @Observable notifies on every assignment, equal or not; libVLC
+        // reports the time four times a second, and a toolbar Menu rebuilt by
+        // that closes while it is open.
+        setDuration(clock.length)
+        let position = max(Int(monotonicPosition(seconds)), 0)
+        if positionSeconds != position {
+            positionSeconds = position
+        }
 
         switch item {
         case .video(let video)?, .offline(let video)?:

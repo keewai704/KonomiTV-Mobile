@@ -67,17 +67,10 @@ struct VideoDetailView: View {
             commentSession = nil
             model.playback.viewDisappeared(for: playbackItem)
         }
-        .onChange(of: model.playback.positionSeconds) { _, newValue in
-            commentSession?.update(
-                position: Double(newValue),
-                isPlaying: model.playback.isPlaying
-            )
-        }
-        .onChange(of: model.playback.isPlaying) { _, newValue in
-            commentSession?.update(
-                position: Double(model.playback.positionSeconds),
-                isPlaying: newValue
-            )
+        .background {
+            PlaybackProgressObserver(playback: model.playback) { position, isPlaying in
+                commentSession?.update(position: position, isPlaying: isPlaying)
+            }
         }
         .onChange(of: model.settings) { _, newValue in
             model.playback.comments.apply(settings: newValue)
@@ -760,5 +753,26 @@ struct RecordedFileInfoSheet: View {
     private func samplingRate(_ rate: Int?) -> String {
         guard let rate, rate > 0 else { return "不明" }
         return String(format: "%.1fkHz", Double(rate) / 1000)
+    }
+}
+
+/// Forwards the playback position and play state from a view of its own.
+///
+/// Reading `positionSeconds` in a screen's body re-evaluates the whole screen
+/// every second while playing, toolbar included, and a toolbar Menu that is
+/// rebuilt closes under the user's finger.
+struct PlaybackProgressObserver: View {
+    let playback: PlaybackController
+    let onChange: (_ position: Double, _ isPlaying: Bool) -> Void
+
+    var body: some View {
+        Color.clear
+            .accessibilityHidden(true)
+            .onChange(of: playback.positionSeconds) { _, position in
+                onChange(Double(position), playback.isPlaying)
+            }
+            .onChange(of: playback.isPlaying) { _, isPlaying in
+                onChange(Double(playback.positionSeconds), isPlaying)
+            }
     }
 }

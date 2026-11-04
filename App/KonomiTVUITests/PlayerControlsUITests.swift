@@ -35,7 +35,7 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         openVideo(in: app)
         revealControls(in: app)
 
-        tapWhenHittable(uiElement(app, "player.playPause"), in: app)
+        tapControl("player.playPause", in: app)
 
         let state = uiElement(app, "player.state")
         XCTAssertTrue(
@@ -56,17 +56,16 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         openVideo(in: app)
         revealControls(in: app)
 
-        let playPause = uiElement(app, "player.playPause")
         let state = uiElement(app, "player.state")
 
-        tapWhenHittable(playPause, in: app)
+        tapControl("player.playPause", in: app)
         XCTAssertTrue(
             waitForLabel(state, equals: "paused", timeout: TestTimeout.ui),
             "再生／一時停止ボタンで paused にならない (状態: \(state.label))"
         )
 
         revealControls(in: app)
-        tapWhenHittable(uiElement(app, "player.playPause"), in: app)
+        tapControl("player.playPause", in: app)
         XCTAssertTrue(
             waitForLabel(state, equals: "playing", timeout: TestTimeout.playback),
             "再生／一時停止ボタンで playing に戻らない (状態: \(state.label))"
@@ -113,9 +112,7 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         )
         let before = intLabel(of: "playback.position", in: app) ?? 0
 
-        let skipForward = uiElement(app, "player.skipForward")
-        XCTAssertTrue(skipForward.waitForExistence(timeout: TestTimeout.ui), "10秒進むボタンが表示されない")
-        tapWhenHittable(skipForward, in: app)
+        tapControl("player.skipForward", in: app)
 
         XCTAssertTrue(
             waitUntil(timeout: TestTimeout.ui) {
@@ -189,6 +186,21 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
             }
         }
         XCTAssertTrue(controls.exists, "再生コントロールが表示されない")
+    }
+
+    /// Shows the controls and taps one of them straight away. The controls hide
+    /// three seconds after the last tap while playing, which is shorter than
+    /// `tapWhenHittable`'s polling and scrolling.
+    private func tapControl(_ identifier: String, in app: XCUIApplication) {
+        let control = uiElement(app, identifier)
+        for _ in 0..<3 {
+            revealControls(in: app)
+            if control.waitForExistence(timeout: 1), control.isHittable {
+                control.tap()
+                return
+            }
+        }
+        XCTFail("\(identifier) をタップできない")
     }
 
     /// Taps the middle of the picture; the controls only occupy the top and the

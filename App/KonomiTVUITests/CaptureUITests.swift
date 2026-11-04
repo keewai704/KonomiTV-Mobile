@@ -156,6 +156,9 @@ final class CaptureUITests: KonomiTVUITestCase {
     func testLiveCaptureIsOfferedForTelevisionChannels() {
         let app = startApp(disableAutoPiP: true)
         openLive(in: app)
+        // libVLC can only snapshot a decoded picture; a live stream takes longer
+        // to show its first one than a recorded video.
+        waitForPlaying(in: app)
 
         tapCapture("player.capture", in: app)
 

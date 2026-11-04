@@ -267,17 +267,10 @@ struct OfflineVideoPlayerView: View {
             commentSession = nil
             model.playback.viewDisappeared(for: playbackItem)
         }
-        .onChange(of: model.playback.positionSeconds) { _, value in
-            commentSession?.update(
-                position: Double(value),
-                isPlaying: model.playback.isPlaying
-            )
-        }
-        .onChange(of: model.playback.isPlaying) { _, value in
-            commentSession?.update(
-                position: Double(model.playback.positionSeconds),
-                isPlaying: value
-            )
+        .background {
+            PlaybackProgressObserver(playback: model.playback) { position, isPlaying in
+                commentSession?.update(position: position, isPlaying: isPlaying)
+            }
         }
     }
 

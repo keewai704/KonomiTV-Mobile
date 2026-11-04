@@ -259,7 +259,7 @@ final class CaptureController {
         guard let playback else { return nil }
 
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("konomitv-snapshot-(UUID().uuidString).png")
+            .appendingPathComponent("konomitv-snapshot-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: url) }
 
         guard await playback.saveSnapshot(to: url) else { return nil }
