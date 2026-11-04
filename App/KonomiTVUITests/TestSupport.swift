@@ -554,6 +554,14 @@ func dismissKeyboard(in app: XCUIApplication) {
     let keyboard = app.keyboards.firstMatch
     guard keyboard.exists else { return }
 
+    // Screens with a multi-line field put a 完了 button above the keyboard.
+    let done = app.buttons["keyboard.done"]
+    if done.exists, done.isHittable {
+        done.tap()
+        _ = waitUntil(timeout: 3) { !app.keyboards.firstMatch.exists }
+        return
+    }
+
     let returnKeys: Set<String> = ["return", "go", "done", "next", "改行", "完了", "次へ"]
     let keys = keyboard.buttons
     for index in 0..<keys.count {

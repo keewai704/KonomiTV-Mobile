@@ -173,15 +173,19 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         )
     }
 
-    /// Taps the picture until the controls are on screen (they hide themselves
-    /// while playback runs).
+    /// Brings the controls up with a fresh auto-hide timer. Controls already
+    /// on screen may be about to hide (the timer started when playback began),
+    /// so they are hidden first; a tap on the picture toggles them.
     private func revealControls(in app: XCUIApplication) {
         let controls = uiElement(app, "player.controls")
-        for _ in 0..<3 {
-            if controls.exists {
-                return
-            }
+        if controls.exists {
             tapSurface(in: app)
+            _ = waitUntil(timeout: 2) { !controls.exists }
+        }
+        for _ in 0..<3 {
+            if !controls.exists {
+                tapSurface(in: app)
+            }
             if controls.waitForExistence(timeout: 2) {
                 return
             }
@@ -195,7 +199,7 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         let control = uiElement(app, identifier)
         for _ in 0..<3 {
             revealControls(in: app)
-            if control.waitForExistence(timeout: 1), control.isHittable {
+            if control.exists, control.isHittable {
                 control.tap()
                 return
             }

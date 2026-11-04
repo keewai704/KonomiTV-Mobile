@@ -1178,9 +1178,10 @@ final class PlaybackController {
         invalidatePictureInPictureState()
     }
 
-    /// libVLC's time restarts at a live stream discontinuity (a PCR jump or an
-    /// encoder restart; the mock loops a 12 second sample). The position shown
-    /// and reported for live keeps counting across those instead.
+    /// libVLC's time of a live stream restarts as the sliding playlist window
+    /// moves on and at a discontinuity (a PCR jump or an encoder restart). The
+    /// position shown and reported for live keeps counting across those
+    /// instead.
     private func monotonicPosition(_ seconds: Double) -> Double {
         guard case .live? = item else { return seconds }
         if let last = lastLiveTime, seconds + 1 < last {
@@ -1196,10 +1197,29 @@ final class PlaybackController {
         }
     }
 
+    /// libVLC 4 sometimes reports a bogus time of about 6100 s for a moment,
+    /// when a stream starts and at a discontinuity, before the real one. A time
+    /// past the media length (the window length for live) cannot be played.
+    private func isImplausibleTime(_ seconds: Double) -> Bool {
+        if clock.length > 0 {
+            return seconds > clock.length + 5
+        }
+        // Length not known yet: a live window is seconds long, while a video
+        // can resume anywhere.
+        if case .live? = item {
+            return seconds > 600
+        }
+        return false
+    }
+
     /// libVLC reported a new position in milliseconds.
     func playerTimeChanged(milliseconds: Double) {
         guard item != nil, player.media != nil else { return }
         let seconds = milliseconds / 1000
+        guard !isImplausibleTime(seconds) else {
+            AppLog.playback.debug("ignored time \(seconds, privacy: .public)s (length \(self.clock.length, privacy: .public)s)")
+            return
+        }
         logTime(seconds)
         let playing = player.state == .playing
         // A moving clock is playback, whatever the last buffering report said:
@@ -1214,9 +1234,12 @@ final class PlaybackController {
         // reports the time four times a second, and a toolbar Menu rebuilt by
         // that closes while it is open.
         setDuration(clock.length)
-        // The clock, not the raw time: right after a seek libVLC still reports
-        // the old position for a moment, and the label would jump back.
-        let position = max(Int(monotonicPosition(clock.settledTime)), 0)
+        // Videos show the clock, not the raw time: right after a seek libVLC
+        // still reports the old position for a moment, and the label would
+        // jump back. Live has no seeking, and its clock stops at the window
+        // length, so it counts the raw time across window restarts.
+        let shown = item?.isVideo == true ? clock.settledTime : seconds
+        let position = max(Int(monotonicPosition(shown)), 0)
         if positionSeconds != position {
             positionSeconds = position
         }

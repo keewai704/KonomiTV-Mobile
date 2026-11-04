@@ -107,6 +107,9 @@ struct TwitterFeedView: View {
                 .accessibilityIdentifier("twitter.search.refresh")
                 .accessibilityLabel("検索結果を更新")
             }
+            // Without a container the identifier replaces the field's and
+            // the button's own.
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("twitter.search")
         case .timeline:
             HStack(spacing: 8) {

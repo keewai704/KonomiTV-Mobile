@@ -89,6 +89,15 @@ struct TwitterPanelView: View {
         .sheet(item: $previewImage) { image in
             TweetImagePreview(image: image)
         }
+        .toolbar {
+            // The body is multi-line, so return adds a line; on compact
+            // widths the keyboard also covers the send button.
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("完了") { focusedField = nil }
+                    .accessibilityIdentifier("keyboard.done")
+            }
+        }
     }
 
     // MARK: - Accounts
