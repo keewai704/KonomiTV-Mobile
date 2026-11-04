@@ -1391,8 +1391,12 @@ class MockHandler(BaseHTTPRequestHandler):
     # -- ログ (stdout へ) --------------------------------------------------
 
     def log_message(self, fmt: str, *args) -> None:
+        # The time lines the log up with the app log CI streams from the
+        # simulator (same clock, millisecond precision).
         try:
-            print(f"[mock] {self.address_string()} {fmt % args}", flush=True)
+            now = datetime.now()
+            stamp = now.strftime("%H:%M:%S.") + f"{now.microsecond // 1000:03d}"
+            print(f"[mock] {stamp} {self.address_string()} {fmt % args}", flush=True)
         except Exception:
             pass
 

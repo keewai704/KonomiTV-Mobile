@@ -59,13 +59,21 @@ final class PlayerPictureInPictureMediaController: NSObject, @unchecked Sendable
 
     // MARK: - State (main actor)
 
-    func update(time: Double, length: Double, isPlaying: Bool, isSeekable: Bool) {
+    /// Returns whether the playing state, seekability or length changed:
+    /// AVKit only reads those again after `invalidatePlaybackState`.
+    @discardableResult
+    func update(time: Double, length: Double, isPlaying: Bool, isSeekable: Bool) -> Bool {
         lock.lock()
+        defer { lock.unlock() }
+        let length = length.isFinite ? max(length, 0) : 0
+        let changed = snapshot.isPlaying != isPlaying
+            || snapshot.isSeekable != isSeekable
+            || snapshot.length != length
         snapshot.time = time.isFinite ? max(time, 0) : 0
-        snapshot.length = length.isFinite ? max(length, 0) : 0
+        snapshot.length = length
         snapshot.isPlaying = isPlaying
         snapshot.isSeekable = isSeekable
-        lock.unlock()
+        return changed
     }
 
     func setAllowsAutomaticPictureInPicture(_ allowed: Bool) {
@@ -103,6 +111,12 @@ final class PlayerPictureInPictureMediaController: NSObject, @unchecked Sendable
         lock.lock()
         windowController = window
         lock.unlock()
+        // AVKit read the playback state when libVLC created the controller,
+        // often while buffering. It does not ask again by itself, and
+        // automatic PiP only starts for media it believes is playing.
+        Task { @MainActor [weak self] in
+            self?.invalidatePlaybackState()
+        }
     }
 
     @MainActor

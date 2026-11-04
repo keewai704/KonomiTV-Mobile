@@ -91,6 +91,8 @@ enum TestEnvironment {
 
 /// Blocking access to the mock server's test endpoints.
 enum MockServerControl {
+    private static let log = Logger(subsystem: "com.github.keewai704.KonomiTV", category: "test")
+
     static var baseURL: URL {
         URL(string: TestEnvironment.serverURL)
             ?? URL(string: TestEnvironment.defaultServerURL)!
@@ -104,16 +106,19 @@ enum MockServerControl {
         request.httpMethod = "POST"
         request.timeoutInterval = 10
         // The first request from a simulator that has just booted can fail
-        // before its network is up, so retry a few times.
+        // before its network is up, and a loaded CI host has let new
+        // connections wait for most of a minute, so retry for a while.
+        let deadline = Date().addingTimeInterval(90)
         var status = -1
-        for attempt in 0..<4 {
-            if attempt > 0 {
-                Thread.sleep(forTimeInterval: 2)
-            }
+        var attempt = 0
+        while true {
+            attempt += 1
             status = perform(request).status
-            if status == 200 {
+            if status == 200 || Date() >= deadline {
                 break
             }
+            log.notice("mock reset attempt \(attempt, privacy: .public) failed (\(status, privacy: .public))")
+            Thread.sleep(forTimeInterval: 2)
         }
         return status
     }

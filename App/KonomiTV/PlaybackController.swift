@@ -745,14 +745,18 @@ final class PlaybackController {
         hostViewController.invalidatePictureInPictureState()
     }
 
-    /// Copies the live state into the lock protected snapshot AVKit reads.
+    /// Copies the live state into the lock protected snapshot AVKit reads,
+    /// and has AVKit read it again when more than the time changed.
     private func updatePictureInPictureSnapshot() {
-        hostViewController.videoView.pipMedia.update(
+        let changed = hostViewController.videoView.pipMedia.update(
             time: clock.currentTime,
             length: clock.length,
             isPlaying: clock.isPlaying,
             isSeekable: canSeek
         )
+        if changed {
+            hostViewController.invalidatePictureInPictureState()
+        }
     }
 
     // MARK: - Item lifecycle
