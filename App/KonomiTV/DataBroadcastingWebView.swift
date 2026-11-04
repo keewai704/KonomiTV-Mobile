@@ -207,26 +207,23 @@ extension DataBroadcastingWebView: WKNavigationDelegate {
 ///
 /// WebKit delivers script messages on the main thread, so the handler can hop
 /// onto the main actor synchronously.
-final class BMLMessageRouter: NSObject, WKScriptMessageHandler, @unchecked Sendable {
+@MainActor
+final class BMLMessageRouter: NSObject, @preconcurrency WKScriptMessageHandler {
     static let name = "bml"
 
     private weak var controller: DataBroadcastingController?
 
-    @MainActor
     init(controller: DataBroadcastingController?) {
         self.controller = controller
         super.init()
     }
 
-    nonisolated func userContentController(
+    func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        let body = message.body
-        MainActor.assumeIsolated {
-            guard let body = body as? [String: Any] else { return }
-            controller?.handle(message: body)
-        }
+        guard let body = message.body as? [String: Any] else { return }
+        controller?.handle(message: body)
     }
 }
 
@@ -241,7 +238,13 @@ final class BMLMessageRouter: NSObject, WKScriptMessageHandler, @unchecked Senda
 /// calls both scheme handler methods on the main thread, and a task must never
 /// be used after it was stopped (that raises an Objective-C exception), so
 /// every callback checks the task's state first.
-final class BMLSchemeHandler: NSObject, WKURLSchemeHandler, URLSessionDataDelegate, @unchecked Sendable {
+///
+/// Main-actor isolated: WebKit calls the scheme handler on the main thread and
+/// the session delivers its delegate callbacks on the main queue, so the
+/// `@preconcurrency` conformances' runtime checks always hold.
+@MainActor
+final class BMLSchemeHandler: NSObject, @preconcurrency WKURLSchemeHandler,
+                              @preconcurrency URLSessionDataDelegate {
     private let bundleDirectory: URL
     private let serverBaseURL: URL
     private let token: String?
@@ -269,16 +272,12 @@ final class BMLSchemeHandler: NSObject, WKURLSchemeHandler, URLSessionDataDelega
 
     // MARK: WKURLSchemeHandler
 
-    nonisolated func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
-        MainActor.assumeIsolated {
-            self.start(urlSchemeTask)
-        }
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        start(urlSchemeTask)
     }
 
-    nonisolated func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-        MainActor.assumeIsolated {
-            self.stop(urlSchemeTask)
-        }
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+        stop(urlSchemeTask)
     }
 
     /// Cancels every request and drops the session (the whole page is going
@@ -384,34 +383,28 @@ final class BMLSchemeHandler: NSObject, WKURLSchemeHandler, URLSessionDataDelega
 
     // MARK: URLSessionDataDelegate
 
-    nonisolated func urlSession(
+    func urlSession(
         _ session: URLSession,
         dataTask: URLSessionDataTask,
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
-        MainActor.assumeIsolated {
-            if let proxy = self.requests[dataTask.taskIdentifier] {
-                proxy.receive(response: response)
-            }
-            completionHandler(.allow)
+        if let proxy = requests[dataTask.taskIdentifier] {
+            proxy.receive(response: response)
         }
+        completionHandler(.allow)
     }
 
-    nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        MainActor.assumeIsolated {
-            self.requests[dataTask.taskIdentifier]?.receive(data: data)
-        }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        requests[dataTask.taskIdentifier]?.receive(data: data)
     }
 
-    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
-        MainActor.assumeIsolated {
-            guard let proxy = self.finish(task) else { return }
-            if let error, !proxy.isStopped {
-                proxy.fail(error)
-            } else {
-                proxy.complete()
-            }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        guard let proxy = finish(task) else { return }
+        if let error, !proxy.isStopped {
+            proxy.fail(error)
+        } else {
+            proxy.complete()
         }
     }
 
