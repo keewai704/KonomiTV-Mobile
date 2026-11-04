@@ -39,6 +39,15 @@ enum TestSection: String, CaseIterable {
     }
 
     /// Compact width tab that contains the section.
+    /// Title of the compact tab the section lives in.
+    var compactTabTitle: String {
+        switch self {
+        case .live: return "テレビ"
+        case .videos: return "ビデオ"
+        case .timetable, .mylist, .history, .captures, .reservations, .offline, .settings: return "マイページ"
+        }
+    }
+
     var compactTab: String {
         switch self {
         case .live: return "live"
@@ -456,12 +465,16 @@ func openSection(
         return
     }
 
+    // The tab bar does not always carry the label's identifier over to its
+    // buttons (seen on the first launch in a fresh simulator), so the button
+    // is also looked up by its title.
     let tab = uiElement(app, "tab.\(section.compactTab)")
+    let titled = app.tabBars.buttons[section.compactTabTitle]
     XCTAssertTrue(
-        tab.waitForExistence(timeout: timeout),
+        waitUntil(timeout: timeout) { tab.exists || titled.exists },
         "タブ「\(section.compactTab)」が見つからない"
     )
-    tab.tap()
+    (tab.exists ? tab : titled).tap()
 
     guard let rowIdentifier = section.mypageRowIdentifier else { return }
 
