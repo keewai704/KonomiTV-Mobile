@@ -187,6 +187,12 @@ final class PlaybackController {
             "--no-snapshot-preview",
         ])
         library.setHumanReadableName("KonomiTV", withHTTPUserAgent: "KonomiTV")
+        // libVLC's own messages (the HLS module's playlist updates, buffering
+        // and errors) go to the app log under UI testing, where CI prints them
+        // next to a failed test.
+        if LaunchOptions().isUITesting {
+            library.loggers = [UnifiedLogVLCLogger()]
+        }
         return library
     }()
 
@@ -1545,5 +1551,17 @@ final class SnapshotWaiter: @unchecked Sendable {
         self.continuation = nil
         lock.unlock()
         continuation?.resume(returning: saved)
+    }
+}
+
+/// Forwards libVLC's log messages (info and above) to the unified log.
+/// Called on libVLC's threads.
+private final class UnifiedLogVLCLogger: NSObject, VLCLogging, @unchecked Sendable {
+    /// kVLCLogLevelInfo: errors, warnings and infos.
+    var level = VLCLogLevel(rawValue: 2) ?? VLCLogLevel(rawValue: 0)!
+
+    func handleMessage(_ message: String, logLevel: VLCLogLevel, context: VLCLogContext?) {
+        let module = context?.module ?? "-"
+        AppLog.vlc.notice("[\(logLevel.rawValue, privacy: .public)] \(module, privacy: .public): \(message, privacy: .public)")
     }
 }

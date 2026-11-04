@@ -7,4 +7,6 @@ enum AppLog {
     static let subsystem = "com.github.keewai704.KonomiTV"
     static let playback = Logger(subsystem: subsystem, category: "playback")
     static let comments = Logger(subsystem: subsystem, category: "comments")
+    static let hls = Logger(subsystem: subsystem, category: "hls")
+    static let vlc = Logger(subsystem: subsystem, category: "vlc")
 }

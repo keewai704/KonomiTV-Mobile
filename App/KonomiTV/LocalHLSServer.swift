@@ -316,6 +316,11 @@ final class LocalHLSServer: @unchecked Sendable {
 
         if path == "/live.m3u8", let store {
             let playlist = await store.playlist()
+            let firstSequence = playlist.split(separator: "\n")
+                .first { $0.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") }?
+                .dropFirst("#EXT-X-MEDIA-SEQUENCE:".count) ?? "-"
+            let segmentCount = playlist.split(separator: "\n").filter { $0.hasPrefix("seg/") }.count
+            AppLog.hls.debug("live.m3u8 media-sequence=\(String(firstSequence), privacy: .public) segments=\(segmentCount, privacy: .public)")
             return httpResponse(
                 status: 200,
                 reason: "OK",
@@ -328,6 +333,7 @@ final class LocalHLSServer: @unchecked Sendable {
             let number = path.dropFirst("/seg/".count).dropLast(".ts".count)
             if let sequence = Int(number),
                let segment = await store?.segment(sequence: sequence, audio: audio) {
+                AppLog.hls.debug("segment \(sequence, privacy: .public) (\(segment.duration, privacy: .public)s)")
                 onSegmentServed?(sequence)
                 return httpResponse(
                     status: 200,
@@ -345,6 +351,7 @@ final class LocalHLSServer: @unchecked Sendable {
             }
         }
 
+        AppLog.hls.debug("not found \(path, privacy: .public)")
         return notFound()
     }
 

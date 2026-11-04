@@ -7,6 +7,11 @@ on:
   pull_request:
     paths-ignore: ['**/*.md', 'LICENSE', '.gitignore']
   workflow_dispatch:
+    inputs:
+      tests:
+        description: UI tests to run instead of the full suites, space separated (e.g. PlaybackUITests/testLiveKeepsPlayingInBackground)
+        type: string
+        default: ""
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -182,9 +187,16 @@ jobs:
         env:
           TEST_RUNNER_KONOMITV_SERVER_URL: http://127.0.0.1:7010
           ONLY_TESTING: ${{ matrix.only-testing }}
+          SELECTED_TESTS: ${{ inputs.tests }}
           RESULT_BUNDLE: ${{ runner.temp }}/TestResults-${{ matrix.slug }}.xcresult
         run: |
           status=0
+          if [ -n "${SELECTED_TESTS:-}" ]; then
+            ONLY_TESTING=""
+            for test in $SELECTED_TESTS; do
+              ONLY_TESTING="$ONLY_TESTING -only-testing:KonomiTVUITests/$test"
+            done
+          fi
           # shellcheck disable=SC2086 # ONLY_TESTING holds separate flags
           xcodebuild test-without-building \
             -xctestrun "$XCTESTRUN" \
