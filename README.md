@@ -220,10 +220,12 @@ Markdown などドキュメントだけの変更では起動しません。
 
 - `package-linux`: Swift 6.2 コンテナ上で KonomiKit の `swift test`
 - `mock-server`: モックサーバーの `unittest`
-- `ios`: 上記 2 つが成功したあとに動く唯一の macOS ジョブ。macOS 26 + Xcode 26.6 でプロジェクトを 1 回だけ生成・ビルドし、
-  "iPhone 17" ですべての UI テストを実行したあと、"iPad Pro 13-inch (M5)" ではレイアウト・再生（PiP）・番組表のテストだけを実行します（iPhone のテストが失敗しても iPad は実行）。
-  ドラフトの pull request ではスキップします。xcresult とモックサーバーのログは 7 日間 artifact として保存します
-- 署名なしの `.ipa`（artifact `KonomiTV-unsigned-ipa`）は push と手動実行のときだけビルド・保存し、pull request では作りません。
+- `build`: 上記 2 つが成功したあとに macOS 26 + Xcode 26.6 でアプリと UI テストを 1 回だけビルド（build-for-testing）し、
+  成果物を後続の E2E ジョブへ渡します。ドラフトの pull request ではスキップします
+- `e2e`: `build` の成果物を使い、"iPhone 17" と "iPad Pro 13-inch (M5)" の 2 ジョブを並列に実行します。
+  iPhone ではすべての UI テスト、iPad ではレイアウト・再生（PiP）・番組表のテストだけを実行します（片方が失敗しても、もう片方は最後まで実行）。
+  xcresult とモックサーバーのログは 7 日間 artifact として保存します
+- `ipa`: 署名なしの `.ipa`（artifact `KonomiTV-unsigned-ipa`）を `build` と並列にビルドします。push と手動実行のときだけ動き、pull request では作りません。
   署名なしのため、インストールには Xcode、AltStore、Sideloadly などで自分の証明書による再署名が必要
 
 ### リリース（`.github/workflows/release.yml`）

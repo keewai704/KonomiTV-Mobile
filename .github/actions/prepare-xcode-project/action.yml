@@ -1,0 +1,73 @@
+name: Prepare Xcode project
+description: >-
+  Selects Xcode, fetches VLCKit, generates the project with XcodeGen and
+  restores Xcode's compilation cache for one kind of build.
+
+inputs:
+  cache-name:
+    description: Which compilation cache to restore (one per kind of build, e.g. simulator or device).
+    required: true
+
+outputs:
+  cache-key:
+    description: Key to save the compilation cache under after the build.
+    value: ${{ steps.compilation_cache.outputs.cache-primary-key }}
+  cache-hit:
+    description: Whether the exact key was restored (nothing new to save then).
+    value: ${{ steps.compilation_cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select Xcode 26.6
+      shell: bash
+      run: |
+        sudo xcode-select -s /Applications/Xcode_26.6.app
+        xcodebuild -version
+
+    - name: Install XcodeGen
+      shell: bash
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+        HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      run: brew install xcodegen
+
+    - name: Cache VLCKit
+      uses: actions/cache@v4
+      with:
+        path: Vendor/VLCKit.xcframework
+        key: vlckit-${{ hashFiles('scripts/fetch-vlckit.py') }}
+
+    # No-op when the cache restored the pinned version.
+    - name: Fetch VLCKit
+      shell: bash
+      run: python3 scripts/fetch-vlckit.py
+
+    - name: Generate Xcode project
+      shell: bash
+      run: xcodegen generate
+
+    # Xcode 26 compilation caching keys every compile job by its inputs, not
+    # by file dates (which each checkout resets), so a restored store lets an
+    # empty DerivedData reuse earlier compiler outputs. The xcconfig reaches
+    # every xcodebuild call, including the one in build-unsigned-ipa.sh.
+    - name: Enable compilation caching
+      shell: bash
+      run: |
+        cat > "$RUNNER_TEMP/compilation-cache.xcconfig" <<EOF
+        COMPILATION_CACHE_ENABLE_CACHING = YES
+        COMPILATION_CACHE_CAS_PATH = $RUNNER_TEMP/CompilationCache
+        COMPILATION_CACHE_LIMIT_SIZE = 3G
+        EOF
+        echo "XCODE_XCCONFIG_FILE=$RUNNER_TEMP/compilation-cache.xcconfig" >> "$GITHUB_ENV"
+
+    - name: Restore compilation cache
+      id: compilation_cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/CompilationCache
+        key: xcode-cas-26.6-${{ inputs.cache-name }}-${{ github.ref_name }}-${{ github.sha }}
+        restore-keys: |
+          xcode-cas-26.6-${{ inputs.cache-name }}-${{ github.ref_name }}-
+          xcode-cas-26.6-${{ inputs.cache-name }}-feat/ios-client-
+          xcode-cas-26.6-${{ inputs.cache-name }}-

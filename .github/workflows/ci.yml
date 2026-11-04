@@ -46,64 +46,92 @@ jobs:
         working-directory: MockServer
         run: python3 -m unittest discover -v
 
-  # One macOS job instead of separate IPA / E2E jobs: the project is generated
-  # and built once, and both simulators are used by the same build.
-  ios:
-    name: iOS (E2E + IPA)
+  # Builds the app and the UI test runner once; the E2E jobs only install
+  # and run them.
+  build:
+    name: Build for testing
     runs-on: macos-26
-    timeout-minutes: 120
+    timeout-minutes: 60
     needs: [package-linux, mock-server]
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare Xcode project
+        id: prepare
+        uses: ./.github/actions/prepare-xcode-project
+        with:
+          cache-name: simulator
+
+      - name: Build for testing
+        run: |
+          xcodebuild build-for-testing \
+            -project KonomiTV.xcodeproj \
+            -scheme KonomiTV \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Save compilation cache
+        if: steps.prepare.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/CompilationCache
+          key: ${{ steps.prepare.outputs.cache-key }}
+
+      # upload-artifact drops file modes (the app and runner executables), so
+      # the products travel as a tar. The .xctestrun refers to them relative
+      # to its own directory.
+      - name: Package test products
+        run: |
+          tar -C "$RUNNER_TEMP/DerivedData/Build" -cf "$RUNNER_TEMP/test-products.tar" Products
+          ls -lh "$RUNNER_TEMP/test-products.tar"
+
+      - name: Upload test products
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-products
+          path: ${{ runner.temp }}/test-products.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  e2e:
+    name: E2E (${{ matrix.device }})
+    runs-on: macos-26
+    timeout-minutes: 75
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: iPhone 17
+            slug: iphone-17
+            only-testing: ""
+          # Only the suites whose behavior depends on the regular width layout
+          # (and PiP, which the iPhone simulator lacks).
+          - device: iPad Pro 13-inch (M5)
+            slug: ipad-pro-13-inch-m5
+            only-testing: >-
+              -only-testing:KonomiTVUITests/LayoutUITests
+              -only-testing:KonomiTVUITests/PlaybackUITests
+              -only-testing:KonomiTVUITests/TimeTableUITests
     steps:
       - uses: actions/checkout@v4
 
       - name: Select Xcode 26.6
         run: sudo xcode-select -s /Applications/Xcode_26.6.app
 
-      - name: Show Xcode version
-        run: xcodebuild -version
-
-      - name: Install XcodeGen
+      # Booting before the download overlaps the slow first boot with it, and
+      # avoids "Timed out while launching application" on the first UI test.
+      - name: Boot simulator
         env:
-          HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: brew install xcodegen
-
-      - name: Cache VLCKit
-        uses: actions/cache@v4
-        with:
-          path: Vendor/VLCKit.xcframework
-          key: vlckit-${{ hashFiles('scripts/fetch-vlckit.py') }}
-
-      # No-op when the cache restored the pinned version.
-      - name: Fetch VLCKit
-        run: python3 scripts/fetch-vlckit.py
-
-      # Xcode 26 compilation caching keys every compile job by its inputs, not
-      # by file dates (which each checkout resets), so a restored store lets an
-      # empty DerivedData reuse earlier compiler outputs. The xcconfig reaches
-      # every xcodebuild call, including the one in build-unsigned-ipa.sh.
-      - name: Enable compilation caching
+          DEVICE: ${{ matrix.device }}
         run: |
-          cat > "$RUNNER_TEMP/compilation-cache.xcconfig" <<EOF
-          COMPILATION_CACHE_ENABLE_CACHING = YES
-          COMPILATION_CACHE_CAS_PATH = $RUNNER_TEMP/CompilationCache
-          COMPILATION_CACHE_LIMIT_SIZE = 3G
-          EOF
-          echo "XCODE_XCCONFIG_FILE=$RUNNER_TEMP/compilation-cache.xcconfig" >> "$GITHUB_ENV"
-
-      - name: Restore compilation cache
-        id: compilation_cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/CompilationCache
-          key: xcode-cas-26.6-${{ github.ref_name }}-${{ github.sha }}
-          restore-keys: |
-            xcode-cas-26.6-${{ github.ref_name }}-
-            xcode-cas-26.6-
-
-      - name: Generate Xcode project
-        run: xcodegen generate
+          set -euo pipefail
+          udid=$(xcrun simctl list devices available -j \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in d.items() if k.endswith("iOS-26-5") for x in v if x["name"]==sys.argv[1]))' "$DEVICE")
+          xcrun simctl boot "$udid" || true
+          echo "SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
 
       - name: Start mock server
         run: |
@@ -120,124 +148,43 @@ jobs:
           echo "Mock server did not become ready" >&2
           exit 1
 
-      # Booting here (without waiting) overlaps the simulator boot with the
-      # build. Booting ahead of xcodebuild also avoids "Timed out while
-      # launching application" on the first UI test of a cold simulator.
-      - name: Boot simulators
+      - name: Download test products
+        uses: actions/download-artifact@v4
+        with:
+          name: test-products
+          path: ${{ runner.temp }}
+
+      - name: Unpack test products
         run: |
           set -euo pipefail
-          resolve_udid() {
-            xcrun simctl list devices available -j \
-              | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for k,v in d.items() if k.endswith("iOS-26-5") for x in v if x["name"]==sys.argv[1]))' "$1"
-          }
-          iphone_udid=$(resolve_udid "iPhone 17")
-          ipad_udid=$(resolve_udid "iPad Pro 13-inch (M5)")
-          xcrun simctl boot "$iphone_udid" || true
-          xcrun simctl boot "$ipad_udid" || true
-          {
-            echo "IPHONE_UDID=$iphone_udid"
-            echo "IPAD_UDID=$ipad_udid"
-          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/TestProducts"
+          tar -C "$RUNNER_TEMP/TestProducts" -xf "$RUNNER_TEMP/test-products.tar"
+          xctestrun=$(find "$RUNNER_TEMP/TestProducts/Products" -maxdepth 1 -name '*.xctestrun' | head -n 1)
+          test -n "$xctestrun"
+          echo "XCTESTRUN=$xctestrun" >> "$GITHUB_ENV"
 
-      - name: Build for testing
-        id: build
-        run: |
-          xcodebuild build-for-testing \
-            -project KonomiTV.xcodeproj \
-            -scheme KonomiTV \
-            -destination "generic/platform=iOS Simulator" \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO
+      - name: Wait for simulator
+        run: xcrun simctl bootstatus "$SIMULATOR_UDID" -b
 
-      # The first (slow) boot of both happens during the build; the iPad is
-      # then shut down so only one simulator runs during each test pass.
-      - name: Wait for simulators
-        run: |
-          xcrun simctl bootstatus "$IPHONE_UDID" -b
-          xcrun simctl bootstatus "$IPAD_UDID" -b
-          xcrun simctl shutdown "$IPAD_UDID"
-
-      - name: Test on iPhone 17
-        id: test_iphone
+      - name: Run UI tests
         env:
           TEST_RUNNER_KONOMITV_SERVER_URL: http://127.0.0.1:7010
+          ONLY_TESTING: ${{ matrix.only-testing }}
         run: |
+          # shellcheck disable=SC2086 # ONLY_TESTING holds separate flags
           xcodebuild test-without-building \
-            -project KonomiTV.xcodeproj \
-            -scheme KonomiTV \
-            -destination "id=$IPHONE_UDID" \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            -resultBundlePath "$RUNNER_TEMP/TestResults-iphone-17.xcresult" \
-            -parallel-testing-enabled NO
-
-      - name: Switch to iPad simulator
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: |
-          xcrun simctl shutdown "$IPHONE_UDID" || true
-          xcrun simctl boot "$IPAD_UDID" || true
-          xcrun simctl bootstatus "$IPAD_UDID" -b
-
-      # Runs even when the iPhone tests failed, as long as the build succeeded.
-      # Only the suites whose behavior depends on the regular width layout (and
-      # PiP, which the iPhone simulator lacks) run here, to save macOS minutes.
-      - name: Test on iPad Pro 13-inch (M5)
-        id: test_ipad
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        env:
-          TEST_RUNNER_KONOMITV_SERVER_URL: http://127.0.0.1:7010
-        run: |
-          xcodebuild test-without-building \
-            -project KonomiTV.xcodeproj \
-            -scheme KonomiTV \
-            -destination "id=$IPAD_UDID" \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            -resultBundlePath "$RUNNER_TEMP/TestResults-ipad-pro-13-inch-m5.xcresult" \
+            -xctestrun "$XCTESTRUN" \
+            -destination "id=$SIMULATOR_UDID" \
+            -resultBundlePath "$RUNNER_TEMP/TestResults-${{ matrix.slug }}.xcresult" \
             -parallel-testing-enabled NO \
-            -only-testing:KonomiTVUITests/LayoutUITests \
-            -only-testing:KonomiTVUITests/PlaybackUITests \
-            -only-testing:KonomiTVUITests/TimeTableUITests
+            $ONLY_TESTING
 
-      # Not gated on the test results: the IPA is still useful from a red run.
-      - name: Build unsigned IPA
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-        run: |
-          scripts/build-unsigned-ipa.sh \
-            "$RUNNER_TEMP/KonomiTV-unsigned.ipa" \
-            "0.0.${{ github.run_number }}" \
-            "${{ github.run_number }}"
-
-      # After the IPA build, so the store also holds the Release device compile.
-      - name: Save compilation cache
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.compilation_cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/CompilationCache
-          key: ${{ steps.compilation_cache.outputs.cache-primary-key }}
-
-      - name: Upload unsigned IPA
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: KonomiTV-unsigned-ipa
-          path: ${{ runner.temp }}/KonomiTV-unsigned.ipa
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload iPhone test results
+      - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: xcresult-iphone-17
-          path: ${{ runner.temp }}/TestResults-iphone-17.xcresult
-          if-no-files-found: warn
-          retention-days: 7
-
-      - name: Upload iPad test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xcresult-ipad-pro-13-inch-m5
-          path: ${{ runner.temp }}/TestResults-ipad-pro-13-inch-m5.xcresult
+          name: xcresult-${{ matrix.slug }}
+          path: ${{ runner.temp }}/TestResults-${{ matrix.slug }}.xcresult
           if-no-files-found: warn
           retention-days: 7
 
@@ -245,7 +192,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mock-server-log
+          name: mock-server-log-${{ matrix.slug }}
           path: ${{ runner.temp }}/mock-server.log
           if-no-files-found: warn
           retention-days: 7
@@ -256,3 +203,42 @@ jobs:
           if [ -f "$RUNNER_TEMP/mock-server.pid" ]; then
             kill "$(cat "$RUNNER_TEMP/mock-server.pid")" 2>/dev/null || true
           fi
+
+  # Runs beside the build, not after the tests: the IPA is useful from a red
+  # run too. Release device builds keep their own compilation cache.
+  ipa:
+    name: Unsigned IPA
+    runs-on: macos-26
+    timeout-minutes: 60
+    needs: [package-linux, mock-server]
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare Xcode project
+        id: prepare
+        uses: ./.github/actions/prepare-xcode-project
+        with:
+          cache-name: device
+
+      - name: Build unsigned IPA
+        run: |
+          scripts/build-unsigned-ipa.sh \
+            "$RUNNER_TEMP/KonomiTV-unsigned.ipa" \
+            "0.0.${{ github.run_number }}" \
+            "${{ github.run_number }}"
+
+      - name: Save compilation cache
+        if: steps.prepare.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/CompilationCache
+          key: ${{ steps.prepare.outputs.cache-key }}
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: KonomiTV-unsigned-ipa
+          path: ${{ runner.temp }}/KonomiTV-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
