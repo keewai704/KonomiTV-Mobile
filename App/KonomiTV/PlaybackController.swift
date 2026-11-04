@@ -580,7 +580,7 @@ final class PlaybackController {
         }
         let waiter = SnapshotWaiter()
         snapshotWaiter = waiter
-        player.saveVideoSnapshotAt(url.path, withWidth: 0, andHeight: 0)
+        player.saveVideoSnapshot(at: url.path, withWidth: 0, andHeight: 0)
         let saved = await waiter.wait(timeout: .seconds(3))
         if snapshotWaiter === waiter {
             snapshotWaiter = nil
@@ -1056,6 +1056,8 @@ final class PlaybackController {
             state = "paused"
         case .stopped, .stopping, .nothingSpecial:
             state = clock.settledTime > 0 ? "paused" : "buffering"
+        @unknown default:
+            break
         }
 
         let playing = newState == .playing
