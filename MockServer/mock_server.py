@@ -35,6 +35,7 @@ import maintenance_mock
 import offline_mock
 import reservations_mock
 import settings_mock
+import ts_timestamps
 import twitter_mock
 import users_mock
 
@@ -772,15 +773,12 @@ def load_fixtures() -> dict:
 
 
 _CAPTIONED_SEGMENT_CACHE: dict[str, bytes] = {}
+_SEGMENT_CACHE: dict[int, bytes] = {}
+_SEGMENT_LOOP_TICKS: int | None = None
 
 
-def caption_injected_segment(sequence: int) -> bytes:
-    """Return a fixture HLS segment with the ARIB caption stream injected.
-
-    Results are cached per source segment so the 60-segment playlist does not
-    regenerate the same six files over and over.
-    """
-    index = sequence % HLS_SEGMENT_COUNT
+def _captioned_source_segment(index: int) -> bytes:
+    """One of the six fixture segment files with the ARIB caption stream injected."""
     path = os.path.join(HLS_DIR, f"segment{index}.ts")
     cached = _CAPTIONED_SEGMENT_CACHE.get(path)
     if cached is not None:
@@ -788,6 +786,33 @@ def caption_injected_segment(sequence: int) -> bytes:
     with open(path, "rb") as f:
         data = caption_injector.inject_captions(f.read())
     _CAPTIONED_SEGMENT_CACHE[path] = data
+    return data
+
+
+def _segment_loop_ticks() -> int:
+    """90 kHz length of one pass over the six source segments."""
+    global _SEGMENT_LOOP_TICKS
+    if _SEGMENT_LOOP_TICKS is None:
+        joined = b"".join(_captioned_source_segment(i) for i in range(HLS_SEGMENT_COUNT))
+        _SEGMENT_LOOP_TICKS = ts_timestamps.loop_length_ticks(joined)
+    return _SEGMENT_LOOP_TICKS
+
+
+def caption_injected_segment(sequence: int) -> bytes:
+    """Return a fixture HLS segment with the ARIB caption stream injected.
+
+    The playlist repeats the six source files; each repetition has its
+    timestamps moved past the previous one, so the 120 s recording is one
+    continuous stream like a real recording (no #EXT-X-DISCONTINUITY).
+    Results are cached per sequence.
+    """
+    cached = _SEGMENT_CACHE.get(sequence)
+    if cached is not None:
+        return cached
+    data = _captioned_source_segment(sequence % HLS_SEGMENT_COUNT)
+    repetition = sequence // HLS_SEGMENT_COUNT
+    data = ts_timestamps.shift_timestamps(data, repetition * _segment_loop_ticks())
+    _SEGMENT_CACHE[sequence] = data
     return data
 
 
@@ -2410,9 +2435,10 @@ class MockHandler(BaseHTTPRequestHandler):
     def _build_media_playlist(cls, session_id: str, fixtures: dict) -> str:
         """Build a 120 s VOD playlist by repeating the source segments.
 
-        6 本のセグメント (各 2 秒) を 10 回繰り返し、繰り返しの境目に
-        #EXT-X-DISCONTINUITY を挿入する。録画ビデオの再生時間を
-        バックグラウンド再生・PiP を観察できる長さにするため。
+        6 本のセグメント (各 2 秒) を 10 回繰り返す。録画ビデオの再生時間を
+        バックグラウンド再生・PiP を観察できる長さにするため。繰り返しごとに
+        セグメントのタイムスタンプをずらして連続させる
+        (caption_injected_segment) ので、#EXT-X-DISCONTINUITY は入れない。
         """
         entries = cls._source_playlist_entries(fixtures)
         if not entries:
@@ -2427,8 +2453,6 @@ class MockHandler(BaseHTTPRequestHandler):
             "#EXT-X-PLAYLIST-TYPE:VOD",
         ]
         for sequence in range(len(entries) * HLS_PLAYLIST_REPEATS):
-            if sequence > 0 and sequence % len(entries) == 0:
-                lines.append("#EXT-X-DISCONTINUITY")
             lines.append(entries[sequence % len(entries)])
             lines.append(
                 f"segment?session_id={escaped_session}&sequence={sequence}"
@@ -2631,16 +2655,27 @@ class MockHandler(BaseHTTPRequestHandler):
             return True
 
     def _stream_sample_loop(self, sample: bytes) -> None:
+        """Stream the sample over and over as one live broadcast.
+
+        Each repetition has its PCR / PTS / DTS moved past the previous one,
+        so the stream's clock keeps running like a real broadcast instead of
+        jumping back every 12 s.
+        """
         bytes_per_second = max(len(sample) / LIVE_DURATION_SECONDS, 1.0)
+        loop_ticks = ts_timestamps.loop_length_ticks(sample)
+        repetition = 0
+        current = sample
         offset = 0
         started = time.monotonic()
         bytes_sent = 0
         while True:
             if self._client_disconnected():
                 return
-            chunk = sample[offset:offset + STREAM_CHUNK_SIZE]
+            chunk = current[offset:offset + STREAM_CHUNK_SIZE]
             if not chunk:
                 offset = 0
+                repetition += 1
+                current = ts_timestamps.shift_timestamps(sample, repetition * loop_ticks)
                 continue
             offset += len(chunk)
             self.wfile.write(chunk)

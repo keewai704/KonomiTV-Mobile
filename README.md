@@ -225,7 +225,8 @@ Markdown などドキュメントだけの変更では起動しません。
 - `e2e`: `build` の成果物を使い、"iPhone 17" と "iPad Pro 13-inch (M5)" の 2 ジョブを並列に実行します。
   iPhone ではすべての UI テスト、iPad ではレイアウト・再生（PiP）・番組表のテストだけを実行します（片方が失敗しても、もう片方は最後まで実行）。
   xcresult、アプリのログ、モックサーバーのログは 7 日間 artifact として保存します。
-  失敗したテストのメッセージ、そのテスト中のアプリのログ、失敗時の画面構造は `gh run view <run-id> --log-failed` で確認できます
+  失敗したテストのメッセージ、そのテスト中のアプリのログ、失敗時の画面構造は `gh run view <run-id> --log-failed` で確認できます。
+  同じ内容を artifact `logs-<端末>` の `ui-test-report.txt` にも保存します（長いジョブのログを GitHub が保存できなかったとき用）
 - `ipa`: 署名なしの `.ipa`（artifact `KonomiTV-unsigned-ipa`）を `build` と並列にビルドします。push と手動実行のときだけ動き、pull request では作りません。
   署名なしのため、インストールには Xcode、AltStore、Sideloadly などで自分の証明書による再署名が必要
 

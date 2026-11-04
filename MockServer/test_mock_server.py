@@ -24,6 +24,7 @@ import caption_injector
 import captures_mock
 import data_broadcasting_mock
 import mock_server
+import ts_timestamps
 
 
 class MockServerTestCase(unittest.TestCase):
@@ -344,17 +345,11 @@ class MockServerTestCase(unittest.TestCase):
                 uri, f"segment?session_id={session_id}&sequence={sequence}"
             )
 
-        # 繰り返しの境目 (6, 12, ..., 54) にだけ不連続点を置く
-        self.assertEqual(media.count("#EXT-X-DISCONTINUITY"), 9)
+        # 繰り返しごとにタイムスタンプをずらすので不連続点は置かない
+        self.assertNotIn("#EXT-X-DISCONTINUITY", media)
         lines = media.splitlines()
         first_segment = lines.index(segments[0])
         self.assertTrue(lines[first_segment - 1].startswith("#EXTINF:"))
-        for index, line in enumerate(lines):
-            if line != "#EXT-X-DISCONTINUITY":
-                continue
-            self.assertTrue(lines[index + 1].startswith("#EXTINF:"))
-            number = int(lines[index + 2].rsplit("sequence=", 1)[1])
-            self.assertEqual(number % 6, 0)
 
         durations = [
             float(line[len("#EXTINF:"):].rstrip(","))
@@ -367,12 +362,30 @@ class MockServerTestCase(unittest.TestCase):
         self.assertIn("#EXT-X-PLAYLIST-TYPE:VOD", media)
         self.assertTrue(media.rstrip().endswith("#EXT-X-ENDLIST"))
 
-        # sequence=59 は segment5.ts を返す
+        # sequence=59 は segment5.ts を 9 回分ずらしたもの
         segment_url = urljoin(playlist_path, segments[-1])
         status, headers, data = self.request("GET", segment_url)
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("Content-Type"), "video/mp2t")
-        self.assertEqual(data, mock_server.caption_injected_segment(5))
+        self.assertEqual(data, mock_server.caption_injected_segment(59))
+
+    def test_video_segments_continue_across_repetitions(self) -> None:
+        # The first PTS of a repetition follows the last of the previous one
+        # within a frame, as in one continuous recording.
+        last = ts_timestamps.pts_values(mock_server.caption_injected_segment(5))
+        first = ts_timestamps.pts_values(mock_server.caption_injected_segment(6))
+        start = ts_timestamps.pts_values(mock_server.caption_injected_segment(0))
+        self.assertGreater(min(first), max(last) - 90_000)
+        self.assertGreater(min(first), min(start) + 11 * 90_000)
+        self.assertEqual(
+            mock_server.caption_injected_segment(6),
+            ts_timestamps.shift_timestamps(
+                mock_server.caption_injected_segment(0),
+                ts_timestamps.loop_length_ticks(
+                    b"".join(mock_server.caption_injected_segment(i) for i in range(6))
+                ),
+            ),
+        )
 
     def test_video_segment_contains_arib_caption_stream(self) -> None:
         session_id = "abc12345"

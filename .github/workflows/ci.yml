@@ -192,7 +192,7 @@ jobs:
             -resultBundlePath "$RESULT_BUNDLE" \
             -parallel-testing-enabled NO \
             $ONLY_TESTING || status=$?
-          python3 scripts/report-ui-tests.py "$RESULT_BUNDLE" "$RUNNER_TEMP/app.log"
+          python3 scripts/report-ui-tests.py "$RESULT_BUNDLE" "$RUNNER_TEMP/app.log" "$RUNNER_TEMP/ui-test-report.txt"
           exit "$status"
 
       - name: Upload test results
@@ -212,6 +212,7 @@ jobs:
           path: |
             ${{ runner.temp }}/mock-server.log
             ${{ runner.temp }}/app.log
+            ${{ runner.temp }}/ui-test-report.txt
           if-no-files-found: warn
           retention-days: 7
 

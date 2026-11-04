@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print the failed UI tests of a result bundle with their app log lines.
 
-Usage: scripts/report-ui-tests.py <result.xcresult> <app.log>
+Usage: scripts/report-ui-tests.py <result.xcresult> <app.log> [report.txt]
 
 Runs on the CI E2E jobs after xcodebuild, so `gh run view --log-failed` shows
 for each failed test its failure messages and what the app logged while the
@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 MARKER = re.compile(r"test-start (\S+)")
-MAX_LOG_LINES = 400
+MAX_LOG_LINES = 800
 
 
 def load_summary(bundle: str) -> dict | None:
@@ -56,16 +56,33 @@ def split_log(path: str) -> dict[str, list[str]]:
     return sections
 
 
+class Tee:
+    def __init__(self, *streams) -> None:
+        self.streams = streams
+
+    def write(self, text: str) -> None:
+        for stream in self.streams:
+            stream.write(text)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+
 def identifier(failure: dict) -> str:
     raw = failure.get("testIdentifierString") or failure.get("testName") or "?"
     return raw.removesuffix("()")
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         print(__doc__)
         return
     bundle, log_path = sys.argv[1], sys.argv[2]
+    if len(sys.argv) == 4:
+        # Also keep a copy: the CI logs artifact survives when GitHub fails
+        # to store a long job's log.
+        sys.stdout = Tee(sys.stdout, open(sys.argv[3], "w", encoding="utf-8"))
 
     summary = load_summary(bundle)
     if summary is None:

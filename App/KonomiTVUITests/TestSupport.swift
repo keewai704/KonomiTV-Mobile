@@ -244,18 +244,21 @@ class KonomiTVUITestCase: XCTestCase, @unchecked Sendable {
         return "\(type)/\(parts.last ?? "")"
     }
 
-    /// Prints what was on screen when the test failed, so the CI log alone
-    /// shows it (the screenshot is only in the result bundle). The status
-    /// labels (`player.state`, `playback.position`, ...) are part of it.
+    /// Logs what was on screen when the test failed, so the CI report shows
+    /// it with the test's app log (the screenshot is only in the result
+    /// bundle). The status labels (`player.state`, `playback.position`, ...)
+    /// are part of it. One log line per hierarchy line: a unified log message
+    /// is cut off at about 1 KB.
     private func printAccessibilityHierarchy(of app: XCUIApplication) {
         guard app.state == .runningForeground else {
-            print("=== UI hierarchy at failure: app state \(app.state.rawValue) ===")
+            Self.log.notice("ui at failure: app state \(app.state.rawValue, privacy: .public)")
             return
         }
         let lines = app.debugDescription.split(separator: "\n", omittingEmptySubsequences: false)
-        print("=== UI hierarchy at failure (\(lines.count) lines) ===")
-        print(lines.prefix(300).joined(separator: "\n"))
-        print("=== end of UI hierarchy ===")
+        Self.log.notice("ui at failure (\(lines.count, privacy: .public) lines)")
+        for line in lines.prefix(300) {
+            Self.log.notice("ui | \(String(line), privacy: .public)")
+        }
     }
 
     /// Launches the app and remembers it so `tearDown` can capture failures.
