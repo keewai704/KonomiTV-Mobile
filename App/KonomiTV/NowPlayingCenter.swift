@@ -126,8 +126,15 @@ final class NowPlayingCenter {
                 return
             }
             guard let self, self.artworkURL == url else { return }
-            self.artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+            self.artwork = Self.makeArtwork(image)
         }
+    }
+
+    /// MediaPlayer calls the artwork's request handler on its own queue. A
+    /// closure written in this main-actor class would be main-actor isolated
+    /// and trap there, so it is made in a nonisolated context.
+    private nonisolated static func makeArtwork(_ image: UIImage) -> MPMediaItemArtwork {
+        MPMediaItemArtwork(boundsSize: image.size) { @Sendable _ in image }
     }
 
     // MARK: - Remote commands
@@ -148,29 +155,31 @@ final class NowPlayingCenter {
         center.nextTrackCommand.isEnabled = false
         center.previousTrackCommand.isEnabled = false
 
-        center.playCommand.addTarget { [weak self] _ in
+        // @Sendable keeps the handlers nonisolated: MediaPlayer may call them
+        // off the main thread, where a main-actor closure would trap.
+        center.playCommand.addTarget { @Sendable [weak self] _ in
             self?.hop { $0.onPlay?() }
             return .success
         }
-        center.pauseCommand.addTarget { [weak self] _ in
+        center.pauseCommand.addTarget { @Sendable [weak self] _ in
             self?.hop { $0.onPause?() }
             return .success
         }
-        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+        center.togglePlayPauseCommand.addTarget { @Sendable [weak self] _ in
             self?.hop { $0.onTogglePlayPause?() }
             return .success
         }
-        center.skipBackwardCommand.addTarget { [weak self] event in
+        center.skipBackwardCommand.addTarget { @Sendable [weak self] event in
             let interval = (event as? MPSkipIntervalCommandEvent)?.interval ?? 10
             self?.hop { $0.onSkip?(-abs(interval)) }
             return .success
         }
-        center.skipForwardCommand.addTarget { [weak self] event in
+        center.skipForwardCommand.addTarget { @Sendable [weak self] event in
             let interval = (event as? MPSkipIntervalCommandEvent)?.interval ?? 10
             self?.hop { $0.onSkip?(abs(interval)) }
             return .success
         }
-        center.changePlaybackPositionCommand.addTarget { [weak self] event in
+        center.changePlaybackPositionCommand.addTarget { @Sendable [weak self] event in
             guard let position = (event as? MPChangePlaybackPositionCommandEvent)?.positionTime else {
                 return .commandFailed
             }
