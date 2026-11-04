@@ -186,15 +186,12 @@ struct NiconicoJikkyoSettingsView: View {
 
                     HStack(spacing: 12) {
                         Menu {
-                            ForEach(MutedCommentKeyword.MatchType.allCases, id: \.self) { match in
-                                Button {
-                                    setKeywordMatch(match, at: index)
-                                } label: {
-                                    if keyword.match == match {
-                                        Label(match.displayName, systemImage: "checkmark")
-                                    } else {
-                                        Text(match.displayName)
-                                    }
+                            Picker("一致条件", selection: Binding(
+                                get: { keyword.match },
+                                set: { setKeywordMatch($0, at: index) }
+                            )) {
+                                ForEach(MutedCommentKeyword.MatchType.allCases, id: \.self) { match in
+                                    Text(match.displayName).tag(match)
                                 }
                             }
                         } label: {

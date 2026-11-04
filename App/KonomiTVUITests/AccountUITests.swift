@@ -218,7 +218,7 @@ final class AccountUITests: KonomiTVUITestCase {
         let app = startApp()
         openSection(.live, in: app)
 
-        let searchField = app.searchFields.firstMatch
+        let searchField = findSearchField(in: app)
         XCTAssertTrue(
             searchField.waitForExistence(timeout: TestTimeout.ui),
             "番組検索欄が表示されない"

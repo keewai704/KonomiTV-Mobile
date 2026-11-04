@@ -192,15 +192,12 @@ struct VideoDetailView: View {
     /// new base quality and resumes at the current position.
     private var qualityMenu: some View {
         Menu {
-            ForEach(StreamQuality.videoQualities, id: \.self) { quality in
-                Button {
-                    model.playback.switchQuality(quality)
-                } label: {
-                    if model.playback.profile.quality == quality {
-                        Label(quality.displayName, systemImage: "checkmark")
-                    } else {
-                        Text(quality.displayName)
-                    }
+            Picker("画質", selection: Binding(
+                get: { model.playback.profile.quality },
+                set: { model.playback.switchQuality($0) }
+            )) {
+                ForEach(StreamQuality.videoQualities, id: \.self) { quality in
+                    Text(quality.displayName).tag(quality)
                 }
             }
         } label: {
@@ -717,11 +714,7 @@ struct RecordedFileInfoSheet: View {
             .navigationTitle("録画ファイル情報")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("閉じる") {
-                        dismiss()
-                    }
-                }
+                SheetCloseButton { dismiss() }
             }
         }
     }

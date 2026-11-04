@@ -43,11 +43,7 @@ struct LiveChannelsView: View {
     var body: some View {
         content
             .navigationTitle("テレビ")
-            .searchable(
-                text: $query,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "番組を検索"
-            )
+            .adaptiveSearchable(text: $query, prompt: "番組を検索")
             .task { await load() }
             .task(id: "\(trimmedQuery)-\(filterRevision)") { await search() }
             .toolbar {
@@ -155,16 +151,19 @@ struct LiveChannelsView: View {
 
     private var channelList: some View {
         VStack(spacing: 0) {
-            Picker("チャンネル種別", selection: selectionBinding) {
-                ForEach(segments, id: \.self) { segment in
-                    Text(segment.title).tag(segment)
+            // With a single type there is nothing to choose.
+            if segments.count > 1 {
+                Picker("チャンネル種別", selection: selectionBinding) {
+                    ForEach(segments, id: \.self) { segment in
+                        Text(segment.title).tag(segment)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .accessibilityIdentifier("live.typePicker")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .accessibilityIdentifier("live.typePicker")
 
             ScrollView {
                 LazyVGrid(

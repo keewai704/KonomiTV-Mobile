@@ -72,18 +72,20 @@ struct ProgramSearchFilterSheet: View {
                 dateSection
                 durationSection
                 broadcastTypeSection
+
+                Section {
+                    Button("条件をリセット", role: .destructive) {
+                        reset()
+                    }
+                    .accessibilityIdentifier("search.filter.reset")
+                }
             }
             .navigationTitle("検索条件")
             .navigationBarTitleDisplayMode(.inline)
             .accessibilityIdentifier("search.filter.sheet")
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("リセット") {
-                        reset()
-                    }
-                    .accessibilityIdentifier("search.filter.reset")
-                }
-                ToolbarItem(placement: .topBarTrailing) {
+                SheetCloseButton { dismiss() }
+                ToolbarItem(placement: .confirmationAction) {
                     Button("検索") {
                         onApply(composedCondition())
                         dismiss()

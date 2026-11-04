@@ -573,6 +573,24 @@ func replaceText(
     element.typeText(text)
 }
 
+/// The screen's search field. On iPad it sits in the toolbar and can be
+/// collapsed into a search button when the toolbar is short of room.
+@MainActor
+func findSearchField(in app: XCUIApplication, timeout: TimeInterval = TestTimeout.ui) -> XCUIElement {
+    let field = app.searchFields.firstMatch
+    let names = ["Search", "検索"]
+    let button = app.navigationBars.buttons
+        .matching(NSPredicate(format: "label IN %@ OR identifier IN %@", names, names))
+        .firstMatch
+
+    _ = waitUntil(timeout: timeout) { field.exists || button.exists }
+    if !field.exists, button.exists {
+        button.tap()
+        _ = field.waitForExistence(timeout: timeout)
+    }
+    return field
+}
+
 /// Dismisses the software keyboard (return-style key first, then a neutral
 /// tap). The return key's label changes with the field's submit label (for
 /// example "Go" for the setup URL field).

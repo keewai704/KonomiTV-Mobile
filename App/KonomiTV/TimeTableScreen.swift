@@ -255,14 +255,16 @@ struct TimeTableScreen: View {
 
     private var controls: some View {
         VStack(spacing: 6) {
-            Picker("チャンネル種別", selection: selectionBinding) {
-                ForEach(segments, id: \.self) { segment in
-                    Text(segment.title).tag(segment)
+            if segments.count > 1 {
+                Picker("チャンネル種別", selection: selectionBinding) {
+                    ForEach(segments, id: \.self) { segment in
+                        Text(segment.title).tag(segment)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityIdentifier("timetable.typePicker")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .accessibilityIdentifier("timetable.typePicker")
 
             HStack(spacing: 12) {
                 Button {
@@ -821,11 +823,7 @@ private struct TimeTableProgramDetail: View {
             .navigationTitle("番組詳細")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("閉じる") {
-                        dismiss()
-                    }
-                }
+                SheetCloseButton { dismiss() }
             }
             .task {
                 await model.loadDefaultRecordSettings()

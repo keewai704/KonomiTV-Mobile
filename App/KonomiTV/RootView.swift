@@ -137,7 +137,6 @@ struct RootView: View {
                         .tag(section)
                 }
             }
-            .navigationTitle("KonomiTV")
             .accessibilityIdentifier("sidebar")
         } detail: {
             sectionStack(model.section)

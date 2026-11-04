@@ -436,11 +436,7 @@ struct OfflineSaveSheet: View {
             .navigationTitle("オフライン保存")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("閉じる") {
-                        dismiss()
-                    }
-                }
+                SheetCloseButton { dismiss() }
             }
             .task {
                 guard !hasAppliedDefaults else { return }

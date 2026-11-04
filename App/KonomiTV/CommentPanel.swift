@@ -206,15 +206,9 @@ struct CommentPostingForm: View {
 
     private var colorMenu: some View {
         Menu {
-            ForEach(JikkyoPostComment.palette, id: \.self) { hex in
-                Button {
-                    color = hex
-                } label: {
-                    if color == hex {
-                        Label(Self.colorName(hex), systemImage: "checkmark")
-                    } else {
-                        Text(Self.colorName(hex))
-                    }
+            Picker("コメントの色", selection: $color) {
+                ForEach(JikkyoPostComment.palette, id: \.self) { hex in
+                    Text(Self.colorName(hex)).tag(hex)
                 }
             }
         } label: {
@@ -229,15 +223,9 @@ struct CommentPostingForm: View {
 
     private var positionMenu: some View {
         Menu {
-            ForEach(CommentDanmaku.Position.allCases, id: \.self) { item in
-                Button {
-                    position = item
-                } label: {
-                    if position == item {
-                        Label(Self.positionName(item), systemImage: "checkmark")
-                    } else {
-                        Text(Self.positionName(item))
-                    }
+            Picker("コメントの位置", selection: $position) {
+                ForEach(CommentDanmaku.Position.allCases, id: \.self) { item in
+                    Text(Self.positionName(item)).tag(item)
                 }
             }
         } label: {
@@ -250,15 +238,9 @@ struct CommentPostingForm: View {
 
     private var sizeMenu: some View {
         Menu {
-            ForEach(CommentDanmaku.Size.allCases, id: \.self) { item in
-                Button {
-                    size = item
-                } label: {
-                    if size == item {
-                        Label(Self.sizeName(item), systemImage: "checkmark")
-                    } else {
-                        Text(Self.sizeName(item))
-                    }
+            Picker("コメントのサイズ", selection: $size) {
+                ForEach(CommentDanmaku.Size.allCases, id: \.self) { item in
+                    Text(Self.sizeName(item)).tag(item)
                 }
             }
         } label: {

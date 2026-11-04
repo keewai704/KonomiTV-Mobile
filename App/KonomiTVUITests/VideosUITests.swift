@@ -28,7 +28,7 @@ final class VideosUITests: KonomiTVUITestCase {
         XCTAssertTrue(match.waitForExistence(timeout: TestTimeout.ui), "検索対象のビデオが表示されない")
         XCTAssertTrue(nonMatch.waitForExistence(timeout: TestTimeout.ui), "検索対象外のビデオが表示されない")
 
-        let searchField = app.searchFields.firstMatch
+        let searchField = findSearchField(in: app)
         XCTAssertTrue(searchField.waitForExistence(timeout: TestTimeout.ui), "検索フィールドが表示されない")
         searchField.tap()
         // ASCII query keeps the test independent of the simulator keyboard

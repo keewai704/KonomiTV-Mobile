@@ -125,15 +125,10 @@ struct TwitterPanelView: View {
                         .disabled(true)
                 } else {
                     ForEach(session.accountItems) { item in
-                        Button {
-                            session.select(item)
-                        } label: {
-                            if item.account == session.selectedItem?.account {
-                                Label(accountMenuTitle(item), systemImage: "checkmark")
-                            } else {
-                                Text(accountMenuTitle(item))
-                            }
-                        }
+                        Toggle(accountMenuTitle(item), isOn: Binding(
+                            get: { item.account == session.selectedItem?.account },
+                            set: { if $0 { session.select(item) } }
+                        ))
                         .accessibilityIdentifier("twitter.account.option.\(item.id)")
                     }
                 }
@@ -500,11 +495,7 @@ struct TweetImagePreview: View {
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("閉じる") {
-                        dismiss()
-                    }
-                }
+                SheetCloseButton { dismiss() }
             }
         }
     }

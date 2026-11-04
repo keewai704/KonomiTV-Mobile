@@ -170,9 +170,9 @@ struct CaptureTimelineScreen: View {
                 Text(actionMessage ?? "")
             }
             .toolbar { toolbar }
-            .safeAreaInset(edge: .bottom) {
-                selectionBar
-            }
+            .toolbar { selectionToolbar }
+            .toolbar(isSelecting ? .visible : .hidden, for: .bottomBar)
+            .toolbar(isSelecting ? .hidden : .automatic, for: .tabBar)
             .fullScreenCover(item: $viewerTarget) { target in
                 CaptureViewer(
                     model: model,
@@ -300,47 +300,45 @@ struct CaptureTimelineScreen: View {
         }
     }
 
-    @ViewBuilder
-    private var selectionBar: some View {
-        if isSelecting {
-            HStack(spacing: 20) {
-                Button {
-                    favoriteSelection()
-                } label: {
-                    Label("お気に入り", systemImage: "heart")
-                }
-                .disabled(!isLoggedIn || selection.isEmpty)
-
-                Menu {
-                    ForEach(tags) { tag in
-                        Button(tag.name) {
-                            applyTag(tag, to: Array(selection))
-                        }
-                    }
-                } label: {
-                    Label("タグ", systemImage: "tag")
-                }
-                .disabled(!isLoggedIn || selection.isEmpty || tags.isEmpty)
-                .accessibilityIdentifier("capture.tag.add")
-
-                Button(role: .destructive) {
-                    delete(Array(selection))
-                } label: {
-                    Label("削除", systemImage: "trash")
-                }
-                .disabled(!isAdmin || selection.isEmpty)
-                .accessibilityIdentifier("capture.delete")
-
-                Spacer(minLength: 0)
-
-                Text("\(selection.count)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+    /// Actions on the selected captures, in the standard bottom toolbar (shown
+    /// only while selecting, with the tab bar out of the way).
+    @ToolbarContentBuilder
+    private var selectionToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .bottomBar) {
+            Button {
+                favoriteSelection()
+            } label: {
+                Label("お気に入り", systemImage: "heart")
             }
-            .font(.footnote)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(.bar)
+            .disabled(!isLoggedIn || selection.isEmpty)
+
+            Menu {
+                ForEach(tags) { tag in
+                    Button(tag.name) {
+                        applyTag(tag, to: Array(selection))
+                    }
+                }
+            } label: {
+                Label("タグ", systemImage: "tag")
+            }
+            .disabled(!isLoggedIn || selection.isEmpty || tags.isEmpty)
+            .accessibilityIdentifier("capture.tag.add")
+
+            Spacer()
+
+            Text("\(selection.count)件")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Button(role: .destructive) {
+                delete(Array(selection))
+            } label: {
+                Label("削除", systemImage: "trash")
+            }
+            .disabled(!isAdmin || selection.isEmpty)
+            .accessibilityIdentifier("capture.delete")
         }
     }
 
@@ -356,15 +354,9 @@ struct CaptureTimelineScreen: View {
             .accessibilityIdentifier("captures.select")
 
             Menu {
-                ForEach(CaptureSortOrder.allCases, id: \.self) { value in
-                    Button {
-                        order = value
-                    } label: {
-                        if order == value {
-                            Label(sortTitle(value), systemImage: "checkmark")
-                        } else {
-                            Text(sortTitle(value))
-                        }
+                Picker("並び順", selection: $order) {
+                    ForEach(CaptureSortOrder.allCases, id: \.self) { value in
+                        Text(sortTitle(value)).tag(value)
                     }
                 }
             } label: {
@@ -373,86 +365,36 @@ struct CaptureTimelineScreen: View {
             .accessibilityIdentifier("captures.sort")
 
             Menu {
-                Button {
-                    filters.isFavorite = filters.isFavorite == true ? nil : true
-                } label: {
-                    if filters.isFavorite == true {
-                        Label("お気に入りのみ", systemImage: "checkmark")
-                    } else {
-                        Text("お気に入り")
-                    }
-                }
-                .disabled(!isLoggedIn)
+                Toggle("お気に入り", isOn: filterFlag(\.isFavorite))
+                    .disabled(!isLoggedIn)
 
                 Menu("タグ") {
                     ForEach(tags) { tag in
-                        Button {
-                            toggleFilterTag(tag.id)
-                        } label: {
-                            if filters.tagIDs.contains(tag.id) {
-                                Label(tag.name, systemImage: "checkmark")
-                            } else {
-                                Text(tag.name)
-                            }
-                        }
+                        Toggle(tag.name, isOn: Binding(
+                            get: { filters.tagIDs.contains(tag.id) },
+                            set: { _ in toggleFilterTag(tag.id) }
+                        ))
                     }
                 }
                 .disabled(!isLoggedIn || tags.isEmpty)
 
                 Menu("チャンネル") {
                     ForEach(channels) { channel in
-                        Button {
-                            toggleFilterChannel(channel.id)
-                        } label: {
-                            if filters.channelIDs.contains(channel.id) {
-                                Label(channel.name, systemImage: "checkmark")
-                            } else {
-                                Text(channel.name)
-                            }
-                        }
+                        Toggle(channel.name, isOn: Binding(
+                            get: { filters.channelIDs.contains(channel.id) },
+                            set: { _ in toggleFilterChannel(channel.id) }
+                        ))
                     }
                 }
                 .disabled(channels.isEmpty)
 
-                Button {
-                    filters.isCaptionComposited = filters.isCaptionComposited == true ? nil : true
-                } label: {
-                    if filters.isCaptionComposited == true {
-                        Label("字幕付きのみ", systemImage: "checkmark")
-                    } else {
-                        Text("字幕付き")
-                    }
-                }
+                Toggle("字幕付き", isOn: filterFlag(\.isCaptionComposited))
 
-                Button {
-                    filters.hasCaptionText = filters.hasCaptionText == true ? nil : true
-                } label: {
-                    if filters.hasCaptionText == true {
-                        Label("字幕テキストあり", systemImage: "checkmark")
-                    } else {
-                        Text("字幕テキストあり")
-                    }
-                }
+                Toggle("字幕テキストあり", isOn: filterFlag(\.hasCaptionText))
 
-                Button {
-                    filters.isCommentComposited = filters.isCommentComposited == true ? nil : true
-                } label: {
-                    if filters.isCommentComposited == true {
-                        Label("コメント付きのみ", systemImage: "checkmark")
-                    } else {
-                        Text("コメント付き")
-                    }
-                }
+                Toggle("コメント付き", isOn: filterFlag(\.isCommentComposited))
 
-                Button {
-                    filters.hasMetadata = filters.hasMetadata == true ? nil : true
-                } label: {
-                    if filters.hasMetadata == true {
-                        Label("番組情報ありのみ", systemImage: "checkmark")
-                    } else {
-                        Text("番組情報あり")
-                    }
-                }
+                Toggle("番組情報あり", isOn: filterFlag(\.hasMetadata))
 
                 Divider()
 
@@ -570,6 +512,14 @@ struct CaptureTimelineScreen: View {
         } else {
             selection.insert(id)
         }
+    }
+
+    /// A filter that is either required (true) or not applied (nil).
+    private func filterFlag(_ keyPath: WritableKeyPath<CaptureFilters, Bool?>) -> Binding<Bool> {
+        Binding(
+            get: { filters[keyPath: keyPath] == true },
+            set: { filters[keyPath: keyPath] = $0 ? true : nil }
+        )
     }
 
     private func toggleFilterTag(_ id: Int) {
@@ -710,15 +660,9 @@ struct CaptureProgramsScreen: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        ForEach(CaptureProgramSortOrder.allCases, id: \.self) { value in
-                            Button {
-                                order = value
-                            } label: {
-                                if order == value {
-                                    Label(title(value), systemImage: "checkmark")
-                                } else {
-                                    Text(title(value))
-                                }
+                        Picker("並び順", selection: $order) {
+                            ForEach(CaptureProgramSortOrder.allCases, id: \.self) { value in
+                                Text(title(value)).tag(value)
                             }
                         }
                     } label: {
@@ -1194,12 +1138,7 @@ struct CaptureViewer: View {
             .navigationTitle(capture.map { Formatters.dateTime($0.capturedAt) } ?? "キャプチャ")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("閉じる") {
-                        dismiss()
-                    }
-                    .accessibilityIdentifier("capture.viewer.close")
-                }
+                SheetCloseButton(accessibilityIdentifier: "capture.viewer.close") { dismiss() }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     favoriteButton
                     tagMenu
@@ -1346,15 +1285,10 @@ struct CaptureViewer: View {
     private var tagMenu: some View {
         Menu {
             ForEach(tags) { tag in
-                Button {
-                    toggleTag(tag)
-                } label: {
-                    if (capture?.tagIDs ?? []).contains(tag.id) {
-                        Label(tag.name, systemImage: "checkmark")
-                    } else {
-                        Text(tag.name)
-                    }
-                }
+                Toggle(tag.name, isOn: Binding(
+                    get: { (capture?.tagIDs ?? []).contains(tag.id) },
+                    set: { _ in toggleTag(tag) }
+                ))
             }
         } label: {
             Image(systemName: "tag")

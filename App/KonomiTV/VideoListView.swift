@@ -38,11 +38,7 @@ struct VideoListView: View {
     var body: some View {
         content
             .navigationTitle("録画番組")
-            .searchable(
-                text: $query,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "ビデオを検索"
-            )
+            .adaptiveSearchable(text: $query, prompt: "ビデオを検索")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     sortMenu
@@ -60,15 +56,9 @@ struct VideoListView: View {
 
     private var sortMenu: some View {
         Menu {
-            ForEach(SortOrder.allCases, id: \.self) { candidate in
-                Button {
-                    order = candidate
-                } label: {
-                    if candidate == order {
-                        Label(candidate.title, systemImage: "checkmark")
-                    } else {
-                        Text(candidate.title)
-                    }
+            Picker("並び順", selection: $order) {
+                ForEach(SortOrder.allCases, id: \.self) { candidate in
+                    Text(candidate.title).tag(candidate)
                 }
             }
         } label: {

@@ -39,7 +39,7 @@ struct SetupView: View {
                     .disabled(isConnecting || trimmedURL.isEmpty)
                     .accessibilityIdentifier("setup.connectButton")
                 } header: {
-                    Text("サーバー")
+                    Text("URL")
                 }
 
                 if let errorMessage {
@@ -65,7 +65,7 @@ struct SetupView: View {
                     }
                 }
             }
-            .navigationTitle("KonomiTV")
+            .navigationTitle("サーバーに接続")
             .navigationDestination(for: SectionRoute.self) { route in
                 switch route {
                 case .offline(let video):

@@ -85,11 +85,7 @@ struct SeriesListScreen: View {
     var body: some View {
         content
             .navigationTitle("シリーズ")
-            .searchable(
-                text: $query,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "シリーズを検索"
-            )
+            .adaptiveSearchable(text: $query, prompt: "シリーズを検索")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     sortMenu
@@ -105,24 +101,9 @@ struct SeriesListScreen: View {
 
     private var sortMenu: some View {
         Menu {
-            Button {
-                order = .desc
-            } label: {
-                if order == .desc {
-                    Label("新しい順", systemImage: "checkmark")
-                } else {
-                    Text("新しい順")
-                }
-            }
-
-            Button {
-                order = .asc
-            } label: {
-                if order == .asc {
-                    Label("古い順", systemImage: "checkmark")
-                } else {
-                    Text("古い順")
-                }
+            Picker("並び順", selection: $order) {
+                Text("新しい順").tag(VideoListOrder.desc)
+                Text("古い順").tag(VideoListOrder.asc)
             }
         } label: {
             Label(order == .desc ? "新しい順" : "古い順", systemImage: "arrow.up.arrow.down")

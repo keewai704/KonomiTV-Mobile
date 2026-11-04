@@ -166,15 +166,12 @@ struct LivePlayerView: View {
     private var qualityMenu: some View {
         Menu {
             Section("画質") {
-                ForEach(StreamQuality.liveQualities, id: \.self) { quality in
-                    Button {
-                        playback.switchQuality(quality)
-                    } label: {
-                        if playback.profile.quality == quality {
-                            Label(quality.displayName, systemImage: "checkmark")
-                        } else {
-                            Text(quality.displayName)
-                        }
+                Picker("画質", selection: Binding(
+                    get: { playback.profile.quality },
+                    set: { playback.switchQuality($0) }
+                )) {
+                    ForEach(StreamQuality.liveQualities, id: \.self) { quality in
+                        Text(quality.displayName).tag(quality)
                     }
                 }
             }
@@ -183,7 +180,13 @@ struct LivePlayerView: View {
             // every control on a compact width.
             if playback.hasSecondaryAudio {
                 Section("音声") {
-                    audioButtons
+                    Picker("音声", selection: Binding(
+                        get: { playback.liveAudioSelection },
+                        set: { playback.selectLiveAudio($0) }
+                    )) {
+                        Text("主音声").tag(AudioSelection.primary)
+                        Text("副音声").tag(AudioSelection.secondary)
+                    }
                 }
             }
         } label: {
@@ -191,29 +194,6 @@ struct LivePlayerView: View {
         }
         .accessibilityIdentifier("player.quality")
         .accessibilityLabel("画質")
-    }
-
-    @ViewBuilder
-    private var audioButtons: some View {
-        Button {
-            playback.selectLiveAudio(.primary)
-        } label: {
-            if playback.liveAudioSelection == .primary {
-                Label("主音声", systemImage: "checkmark")
-            } else {
-                Text("主音声")
-            }
-        }
-
-        Button {
-            playback.selectLiveAudio(.secondary)
-        } label: {
-            if playback.liveAudioSelection == .secondary {
-                Label("副音声", systemImage: "checkmark")
-            } else {
-                Text("副音声")
-            }
-        }
     }
 
     // MARK: - Player
@@ -1004,11 +984,7 @@ private struct RemoconSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .accessibilityIdentifier("remocon.sheet")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("閉じる") {
-                        dismiss()
-                    }
-                }
+                SheetCloseButton { dismiss() }
             }
         }
         .presentationDetents([.medium, .large])
