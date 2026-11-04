@@ -146,11 +146,11 @@ final class DataBroadcastingWebView: UIView {
     }
 
     /// Evaluates a `KonomiBML` call in the page.
+    /// The completion-handler form: the async overload's non-optional `Any`
+    /// result traps when the script evaluates to undefined, which most of these
+    /// calls do.
     func call(_ javascript: String) {
-        guard let webView else { return }
-        Task { @MainActor in
-            _ = try? await webView.evaluateJavaScript(javascript)
-        }
+        webView?.evaluateJavaScript(javascript, completionHandler: nil)
     }
 
     // MARK: - Configuration
@@ -504,7 +504,7 @@ final class BMLProxyRequest {
         ) ?? URLResponse(
             url: url,
             mimeType: http.mimeType,
-            expectedContentLength: http.expectedContentLength,
+            expectedContentLength: Int(http.expectedContentLength),
             textEncodingName: nil
         )
     }
