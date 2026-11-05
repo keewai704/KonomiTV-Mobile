@@ -251,10 +251,12 @@ struct OfflineVideoPlayerView: View {
 
     var body: some View {
         AdaptivePlayerLayout(
+            isFullscreen: model.playback.isFullscreen,
             player: { playerArea },
             belowPlayer: { EmptyView() },
             info: { info }
         )
+        .playerFullscreen(model.playback)
         .navigationTitle(program.title)
         .navigationBarTitleDisplayMode(.inline)
         .task { startPlayback() }

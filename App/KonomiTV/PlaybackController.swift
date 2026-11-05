@@ -133,6 +133,9 @@ final class PlaybackController {
     /// True while the player is actually advancing. The comment overlay freezes
     /// its animations when playback pauses.
     private(set) var isPlaying = false
+    /// Whether the player fills the screen (the player screens hide their bars
+    /// and panels, and an iPhone turns to landscape).
+    var isFullscreen = false
 
     /// Data broadcasting (BML) of the live player: the WKWebView page plus the
     /// native state around it (remote keys, video plane).
@@ -179,6 +182,12 @@ final class PlaybackController {
     /// milliseconds: the web client's live buffer (4 s). libVLC still buffers
     /// at least 6 s before playing then.
     private static let liveDelay = 4000
+    /// Live TV is watched as it airs: playback that has collected more delay
+    /// than this (seconds) behind the broadcast jumps back to the live edge.
+    private static let liveLagLimit: Double = 5
+    /// At most one automatic jump in this many seconds, so a connection that
+    /// cannot keep up does not restart the picture over and over.
+    private static let liveCatchUpInterval: CFTimeInterval = 30
     /// Recorded video goes through the loopback proxy; a deeper buffer makes
     /// seeking smoother and costs nothing but memory.
     private static let videoNetworkCaching = 3000
@@ -231,10 +240,24 @@ final class PlaybackController {
     /// current position after a live-edge seek.
     @ObservationIgnored private var liveAnchorPlaybackTime: Double = 0
 
+    /// Live only: host time and position at which playback was last on time
+    /// with the broadcast (see `checkLiveLag`).
+    @ObservationIgnored private var liveLagBaseline: (hostTime: CFTimeInterval, position: Double)?
+    /// Host time of the last automatic jump to the live edge.
+    @ObservationIgnored private var lastLiveCatchUp: CFTimeInterval = 0
+    /// True while live playback is paused from the app's own controls. Any
+    /// other pause (picture in picture, another app's audio, the PiP window
+    /// closed) is resumed when the app comes back.
+    @ObservationIgnored private var isLivePausedInApp = false
+    /// An audio session interruption (another app's audio) began and has not
+    /// ended with a resume yet.
+    @ObservationIgnored private var isInterrupted = false
+
     @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
     @ObservationIgnored private var dataBroadcastingSettingsObserver: NSObjectProtocol?
     @ObservationIgnored private var backgroundObserver: NSObjectProtocol?
     @ObservationIgnored private var foregroundObserver: NSObjectProtocol?
+    @ObservationIgnored private var activeObserver: NSObjectProtocol?
     /// Delayed "no PiP is coming, stop decoding video" check.
     @ObservationIgnored private var backgroundTask: Task<Void, Never>?
     @ObservationIgnored private var didDisableVideoTracks = false
@@ -295,7 +318,14 @@ final class PlaybackController {
 
         nowPlaying.onPlay = { [weak self] in self?.play() }
         nowPlaying.onPause = { [weak self] in self?.pause() }
-        nowPlaying.onTogglePlayPause = { [weak self] in self?.togglePlayPause() }
+        nowPlaying.onTogglePlayPause = { [weak self] in
+            guard let self else { return }
+            if self.player.isPlaying {
+                self.pause()
+            } else {
+                self.play()
+            }
+        }
         nowPlaying.onSkip = { [weak self] seconds in self?.seek(by: seconds) }
         nowPlaying.onChangePosition = { [weak self] position in self?.seek(to: position) }
 
@@ -442,6 +472,10 @@ final class PlaybackController {
         isRestoringFromPictureInPicture = false
         didDisableVideoTracks = false
         liveAnchorRequested = false
+        liveLagBaseline = nil
+        isLivePausedInApp = false
+        isInterrupted = false
+        isFullscreen = false
         comments.isPlaying = false
         comments.isPictureInPictureActive = false
         comments.reset()
@@ -501,29 +535,41 @@ final class PlaybackController {
 
     // MARK: - Player controls
 
-    /// Plays or resumes (Space shortcut, Now Playing, picture in picture).
+    /// Plays or resumes (Now Playing, picture in picture). Live resumes at the
+    /// live edge, not where it was paused.
     private func play() {
-        guard item != nil else { return }
+        guard let current = item else { return }
+        isLivePausedInApp = false
+        if case .live = current {
+            resumeLive()
+            return
+        }
         player.play()
         invalidatePictureInPictureState()
     }
 
-    /// Pauses (Space shortcut, Now Playing, picture in picture).
+    /// Pauses (Now Playing, picture in picture).
     private func pause() {
         guard item != nil else { return }
         player.pause()
         invalidatePictureInPictureState()
     }
 
-    /// Toggles play / pause (Space shortcut).
+    /// Toggles play / pause (the player's button, Space shortcut).
     func togglePlayPause() {
         guard item != nil else { return }
         if player.isPlaying {
             player.pause()
+            isLivePausedInApp = isLivePlayback
+            invalidatePictureInPictureState()
         } else {
-            player.play()
+            play()
         }
-        invalidatePictureInPictureState()
+    }
+
+    /// Enters or leaves fullscreen (the player's button).
+    func toggleFullscreen() {
+        isFullscreen.toggle()
     }
 
     /// Shows or hides the data broadcasting screen (the live player's d
@@ -560,21 +606,84 @@ final class PlaybackController {
     }
 
     /// Jumps to the live edge (W shortcut, ライブ button).
-    ///
-    /// A live HLS window is usually not seekable in libVLC, so this restarts
-    /// the stream: a fresh load starts at the live edge again.
     func seekToLiveEdge() {
         guard case .live? = item else { return }
-        if player.isSeekable, clock.length > 2 {
-            seek(to: max(clock.length - 1, 0))
-            // libVLC fetches the segment that is on screen now, so the live
-            // clock is re-anchored at the current position, not at 0.
-            liveAnchorPlaybackTime = clock.currentTime
-            liveAnchorRequested = false
-            clock.setLiveMapping(nil)
+        isLivePausedInApp = false
+        jumpToLiveEdge()
+    }
+
+    /// Resumes live playback at the live edge.
+    private func resumeLive() {
+        guard case .live? = item else { return }
+        if state == "error" || liveErrorMessage != nil {
+            retry()
         } else {
-            reload(startAt: 0)
+            jumpToLiveEdge()
         }
+    }
+
+    /// Moves live playback to the newest part of the broadcast.
+    ///
+    /// The loopback playlist is opened again: libVLC starts a live playlist
+    /// at its end (minus the live delay), so whatever playback fell behind is
+    /// skipped without reconnecting to the server. Re-opening the media would
+    /// close the picture-in-picture window (its controller belongs to libVLC's
+    /// video output), so PiP seeks within the window instead when it can.
+    private func jumpToLiveEdge() {
+        guard case .live(let channel)? = item else { return }
+        lastLiveCatchUp = CACurrentMediaTime()
+        liveLagBaseline = nil
+        activateAudioSession()
+
+        if isPictureInPictureActive {
+            if player.isSeekable, clock.length > 2 {
+                seek(to: max(clock.length - 1, 0))
+                // libVLC fetches the segment that is on screen now, so the
+                // live clock is re-anchored at the current position.
+                liveAnchorPlaybackTime = clock.currentTime
+                liveAnchorRequested = false
+                clock.setLiveMapping(nil)
+            }
+            player.play()
+            invalidatePictureInPictureState()
+            return
+        }
+
+        guard let url = liveSession?.playbackURL else {
+            reload(startAt: 0)
+            return
+        }
+        AppLog.playback.notice("live edge: reopening the loopback playlist")
+        stopPlayer()
+        // Buffered captions belong to the old timeline.
+        captions.end()
+        attachPlayer(url: url, item: .live(channel), startAt: 0)
+    }
+
+    /// Live content arrives in real time, so a live position should advance
+    /// with the host clock. The difference is delay that playback collected
+    /// (stalls while buffering, a pause that was resumed in place); once it
+    /// passes `liveLagLimit` playback jumps back to the live edge.
+    private func checkLiveLag(_ position: Double, playing: Bool) {
+        guard case .live? = item, playing else { return }
+        let now = CACurrentMediaTime()
+        guard let baseline = liveLagBaseline else {
+            liveLagBaseline = (now, position)
+            return
+        }
+        let lag = (now - baseline.hostTime) - (position - baseline.position)
+        if lag < 0 {
+            // Ahead of the baseline (a discontinuity, or a late first frame):
+            // the baseline follows the furthest point playback reached.
+            liveLagBaseline = (now, position)
+            return
+        }
+        guard lag > Self.liveLagLimit,
+              now - lastLiveCatchUp > Self.liveCatchUpInterval else {
+            return
+        }
+        AppLog.playback.notice("live lag \(lag, privacy: .public)s: jumping to the live edge")
+        jumpToLiveEdge()
     }
 
     /// Restarts the current item (R shortcut).
@@ -1089,6 +1198,7 @@ final class PlaybackController {
         clock.begin(startAt: startAt, isSeekable: expected.isVideo)
         liveAnchorRequested = false
         liveAnchorPlaybackTime = 0
+        liveLagBaseline = nil
         clock.setLiveMapping(nil)
         updatePlaying(false)
         updatePictureInPictureSnapshot()
@@ -1302,7 +1412,8 @@ final class PlaybackController {
         // still reports the old position for a moment, and the label would
         // jump back. Live counts its time across restarts instead.
         let shown = item?.isVideo == true ? clock.settledTime : time
-        let position = max(Int(monotonicPosition(shown)), 0)
+        let progress = monotonicPosition(shown)
+        let position = max(Int(progress), 0)
         if positionSeconds != position {
             positionSeconds = position
         }
@@ -1317,6 +1428,8 @@ final class PlaybackController {
         updateVideoSize()
         updatePictureInPictureSnapshot()
         updateNowPlaying(force: false)
+
+        checkLiveLag(progress, playing: playing)
     }
 
     /// Logs a jump of the libVLC clock (callbacks come every 250 ms, so more
@@ -1482,18 +1595,51 @@ final class PlaybackController {
                 }
             }
         }
+
+        if activeObserver == nil {
+            activeObserver = center.addObserver(
+                forName: UIApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    self?.applicationDidBecomeActive()
+                }
+            }
+        }
     }
 
     private func handleInterruption(typeRawValue: UInt?, optionsRawValue: UInt?) {
         guard let typeRawValue,
-              let type = AVAudioSession.InterruptionType(rawValue: typeRawValue),
-              type == .ended else {
+              let type = AVAudioSession.InterruptionType(rawValue: typeRawValue) else {
+            return
+        }
+        AppLog.playback.notice("audio interruption \(typeRawValue, privacy: .public) options=\(optionsRawValue ?? 0, privacy: .public)")
+        guard type == .ended else {
+            isInterrupted = true
             return
         }
 
         let options = AVAudioSession.InterruptionOptions(rawValue: optionsRawValue ?? 0)
         guard options.contains(.shouldResume) else { return }
+        isInterrupted = false
         play()
+    }
+
+    /// Back in the app after picture in picture or another app paused live
+    /// playback (or the stream broke meanwhile): live picks up the broadcast
+    /// at its newest part right away. A pause from the app's own controls
+    /// stays paused.
+    private func applicationDidBecomeActive() {
+        guard case .live? = item, !isLivePausedInApp else { return }
+        let interrupted = isInterrupted
+        isInterrupted = false
+        let failed = state == "error" || liveErrorMessage != nil
+        // Still starting (no media yet, or libVLC opening it): nothing to resume.
+        let paused = isPlayerAttached && (player.state == .paused || player.state == .stopped)
+        guard failed || interrupted || paused else { return }
+        AppLog.playback.notice("active: resuming live (failed=\(failed, privacy: .public) interrupted=\(interrupted, privacy: .public) paused=\(paused, privacy: .public))")
+        resumeLive()
     }
 
     /// Background audio keeps playing (the app declares the audio background

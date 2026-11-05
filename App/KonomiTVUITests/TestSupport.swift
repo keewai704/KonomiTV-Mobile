@@ -630,7 +630,9 @@ func dismissKeyboard(in app: XCUIApplication) {
 func tapMenuItem(_ element: XCUIElement, timeout: TimeInterval = 3) {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
-        if element.exists, element.isHittable {
+        // Asking a still animating item for its hittability records a test
+        // failure ("Activation point invalid"), so wait for a frame first.
+        if element.exists, !element.frame.isEmpty, element.isHittable {
             element.tap()
             return
         }

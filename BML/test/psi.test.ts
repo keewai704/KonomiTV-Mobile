@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { PSIArchivedDataParser, TSPacketWriter } from '../src/psi.ts'
-import { encodeChunk } from './psisiarc.ts'
+import { ArchiveEncoder, encodeChunk } from './psisiarc.ts'
 
 /** 18 バイトのダミーセクション (中身は問わない) */
 function section(length: number, seed: number): Uint8Array {
@@ -94,6 +94,45 @@ test('waits for the rest of a chunk and decodes it after the next push', () => {
     parser.push(new Uint8Array([byte]), (_second, _packets, pid) => decoded.push(pid))
   }
   assert.deepEqual(decoded, [0x0000, 0x0011])
+})
+
+test('reads chunks that reuse the previous dictionary', () => {
+  // psisiarc refers to sections of the previous chunk by their dictionary ID
+  // and carries the ones it did not refer to on, as a live archive does from
+  // its second chunk on.
+  const pat = { pid: 0x0000, section: section(16, 1) }
+  const pmt = { pid: 0x1000, section: section(52, 2) }
+  const tot = { pid: 0x0014, section: section(9, 3) }
+  const encoder = new ArchiveEncoder()
+  const first = encoder.encode([pat, pmt], 0)
+  const second = encoder.encode([tot], 1)
+  // pat and pmt are carried at window IDs 1 and 2 now
+  const third = encoder.encode([pmt, pat, tot], 2)
+
+  const decoded = readSections(new Uint8Array([...first, ...second, ...third]))
+  assert.deepEqual(decoded.map((entry) => entry.pid), [0x0000, 0x1000, 0x0014, 0x1000, 0x0000, 0x0014])
+  // The reused entries still hold their own sections (payload after the
+  // 4 byte header and the pointer field).
+  assert.deepEqual(decoded[3].packets.subarray(5, 5 + 52), pmt.section)
+  assert.deepEqual(decoded[4].packets.subarray(5, 5 + 16), pat.section)
+  assert.deepEqual(decoded[5].packets.subarray(5, 5 + 9), tot.section)
+})
+
+test('reads a reused dictionary across pushes', () => {
+  const pat = { pid: 0x0000, section: section(16, 1) }
+  const sdt = { pid: 0x0011, section: section(40, 4) }
+  const encoder = new ArchiveEncoder()
+  const data = new Uint8Array([
+    ...encoder.encode([pat, sdt], 0),
+    ...encoder.encode([sdt, pat], 1),
+    ...encoder.encode([pat], 2),
+  ])
+  const parser = new PSIArchivedDataParser()
+  const decoded: number[] = []
+  for (let offset = 0; offset < data.length; offset += 7) {
+    parser.push(data.subarray(offset, offset + 7), (_second, _packets, pid) => decoded.push(pid))
+  }
+  assert.deepEqual(decoded, [0x0000, 0x0011, 0x0011, 0x0000, 0x0000])
 })
 
 test('drops the stream when the magic is broken', () => {

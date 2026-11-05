@@ -145,6 +145,10 @@ struct RootView: View {
                 .id(model.section)
         }
         .navigationSplitViewStyle(.balanced)
+        // The fullscreen player takes the sidebar's room as well.
+        .onChange(of: model.playback.isFullscreen) { _, fullscreen in
+            columnVisibility = fullscreen ? .detailOnly : .all
+        }
     }
 
     private var sidebarSelection: Binding<AppSection?> {

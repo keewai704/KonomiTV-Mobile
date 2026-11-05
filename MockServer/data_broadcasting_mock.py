@@ -292,75 +292,121 @@ def build_tot(unix_seconds: float) -> bytes:
 # psisiarc
 # ---------------------------------------------------------------------------
 
+class PSIArchiveEncoder:
+    """psisiarc の書庫をチャンクごとに書く。
+
+    psisiarc (psiarchiver.cpp) と同じく、前回のチャンクの辞書にあるセクションは
+    辞書 ID (4096 以上) で参照し、参照しなかった前回のエントリは辞書ウィンドウ
+    に引き継ぐ。実際の放送の書庫は 2 チャンク目以降ほぼ再利用だけになる。
+    """
+
+    #: 引き継ぐ前回の辞書のエントリ数の上限
+    MAX_CARRIED_ENTRIES = 32
+
+    def __init__(self) -> None:
+        # 前回のチャンクの辞書 (辞書 ID 4096 + index の順)
+        self.window: list[tuple[int, bytes]] = []
+
+    def encode(
+        self,
+        sections: list[tuple[int, bytes]],
+        current_time_seconds: float,
+    ) -> bytes:
+        """(PID, セクション) のリストを 1 チャンクにする。
+
+        辞書には重複を除いたセクションを載せ、コードリストでは渡された順に
+        すべてを送出する。
+        """
+        if not sections:
+            raise ValueError("sections must not be empty")
+        for _, section in sections:
+            if len(section) > 4096:
+                raise ValueError("a section does not fit in one psisiarc dictionary entry")
+
+        current: list[tuple[int, bytes]] = []
+        for entry in sections:
+            if entry not in current:
+                current.append(entry)
+        if len(current) > 64:
+            raise ValueError("psisiarc supports at most 64 dictionary entries per chunk here")
+
+        dictionary: list[int] = []
+        new_entries: list[tuple[int, bytes]] = []
+        referenced: set[int] = set()
+        for entry in current:
+            index = next(
+                (i for i, old in enumerate(self.window) if old == entry and i not in referenced),
+                None,
+            )
+            if index is None:
+                dictionary.append(len(entry[1]) - 1)
+                new_entries.append(entry)
+            else:
+                dictionary.append(4096 + index)
+                referenced.add(index)
+        carried = [
+            old for i, old in enumerate(self.window) if i not in referenced
+        ][:self.MAX_CARRIED_ENTRIES]
+        window = current + carried
+
+        # 辞書データサイズは PID リストとセクション集合のバイト数の和
+        dictionary_data_size = sum(2 + len(section) for _, section in new_entries)
+        dictionary_buffer_size = sum(2 + len(section) for _, section in window)
+        time_list_len = 2
+        code_list_len = len(sections)
+
+        out = bytearray()
+        out += struct.pack(
+            "<IIHHHHIII",
+            PSISIARC_MAGIC,
+            PSISIARC_MAGIC2,
+            0,  # 予約 (+8)
+            time_list_len,
+            len(dictionary),
+            len(window),
+            dictionary_data_size,
+            dictionary_buffer_size,
+            code_list_len,
+        )
+        out += b"\x00\x00\x00\x00"  # 予約 (32 バイトのヘッダの残り)
+
+        # タイムリスト: 絶対時刻 + 相対エントリ (コード数 code_list_len)
+        absolute = 0x80000000 | (
+            int(current_time_seconds * TIME_UNITS_PER_SECOND) & 0x3FFFFFFF
+        )
+        out += struct.pack("<I", absolute)
+        out += struct.pack("<HH", 0, code_list_len - 1)
+
+        # 辞書: 前回の辞書 ID の参照、または セクション長 - 1
+        for value in dictionary:
+            out += struct.pack("<H", value)
+        # PID リスト (新規のエントリのみ、0xe000 との OR)
+        for pid, _ in new_entries:
+            out += struct.pack("<H", 0xE000 | (pid & 0x1FFF))
+        # セクション集合 (新規のエントリのみ)
+        for _, section in new_entries:
+            out += section
+        if dictionary_data_size % 2:
+            out += b"\xff"
+
+        # 符号リスト: 辞書 ID (このチャンクの辞書のインデックス + 4096)
+        for entry in sections:
+            out += struct.pack("<H", 4096 + current.index(entry))
+
+        # トレーラー: データ部分が 4 の倍数なら "====" 、それ以外は "=="
+        data_size = len(out) - 32
+        out += b"====" if data_size % 4 == 0 else b"=="
+
+        self.window = window
+        return bytes(out)
+
+
 def encode_psi_archived_data(
     sections: list[tuple[int, bytes]],
     current_time_seconds: float,
 ) -> bytes:
-    """(PID, セクション) のリストを psisiarc の 1 チャンクにする。
-
-    すべてのセクションを新規エントリとして辞書に載せ、直後のコードリストで
-    すべてを送出する。
-    """
-    if not sections:
-        raise ValueError("sections must not be empty")
-    if len(sections) > 64:
-        raise ValueError("psisiarc supports at most 64 dictionary entries per chunk")
-
-    count = len(sections)
-    for _, section in sections:
-        if len(section) > 4096:
-            raise ValueError("a section does not fit in one psisiarc dictionary entry")
-
-    dictionary_data_size = sum(len(section) for _, section in sections)
-    padded_data_size = dictionary_data_size + (dictionary_data_size % 2)
-    time_list_len = 2
-    dictionary_len = count
-    code_list_len = count
-    chunk_size = (
-        32 + time_list_len * 4 + dictionary_len * 2 + padded_data_size + code_list_len * 2
-    )
-    trailer_size = 2 + (2 + chunk_size) % 4
-
-    out = bytearray()
-    out += struct.pack(
-        "<IIHHHHIII",
-        PSISIARC_MAGIC,
-        PSISIARC_MAGIC2,
-        0,  # 予約 (+8)
-        time_list_len,
-        dictionary_len,
-        dictionary_len,
-        dictionary_data_size,
-        dictionary_data_size,
-        code_list_len,
-    )
-    out += b"\x00\x00\x00\x00"  # 予約 (32 バイトのヘッダの残り)
-
-    # タイムリスト: 絶対時刻 + 相対エントリ (コード数 count)
-    absolute = 0x80000000 | (
-        int(current_time_seconds * TIME_UNITS_PER_SECOND) & 0x3FFFFFFF
-    )
-    out += struct.pack("<I", absolute)
-    out += struct.pack("<HH", 0, count - 1)
-
-    # 辞書: セクション長 - 1
-    for _, section in sections:
-        out += struct.pack("<H", len(section) - 1)
-    # 辞書: PID
-    for pid, _ in sections:
-        out += struct.pack("<H", pid & 0x1FFF)
-
-    for _, section in sections:
-        out += section
-    if dictionary_data_size % 2:
-        out += b"\x00"
-
-    # コードリスト: 辞書のインデックス + 4096
-    for index in range(count):
-        out += struct.pack("<H", 4096 + index)
-
-    out += b"\x00" * trailer_size
-    return bytes(out)
+    """(PID, セクション) のリストを、前回の辞書のない psisiarc の 1 チャンクにする。"""
+    return PSIArchiveEncoder().encode(sections, current_time_seconds)
 
 
 class _Context:
@@ -442,25 +488,25 @@ def decode_psi_archived_data(data: bytes) -> list[tuple[float, int, bytes]]:
             position += 32 + time_list_len * 4
 
             if context.time_list_count < 0:
-                # 辞書を読む。読み切れない場合は何も反映せずに待つ
-                # (クライアント側と同じく、辞書の先頭 dictionary_len 件を
-                #  このチャンクのエントリで上書きする)
-                pids = list(context.pids)
-                sections = list(context.sections)
-                if len(pids) < dictionary_window_len:
-                    pids.extend([-1] * (dictionary_window_len - len(pids)))
-                    sections.extend([None] * (dictionary_window_len - len(sections)))
+                # 辞書を読む。読み切れない場合は何も反映せずに待つ。
+                # このチャンクの辞書は新しいリストに作り、4096 以上の値は
+                # 前回の辞書の ID を参照する (参照したものは -1 で印を付ける)
+                previous_pids = list(context.pids)
+                previous_sections = context.sections
+                pids: list[int] = [0] * dictionary_len
+                sections: list[bytes | None] = [None] * dictionary_len
                 section_list_position = 0
 
                 for index in range(dictionary_len):
                     code_or_size = _read_u16(data, position) - 4096
                     position += 2
                     if code_or_size >= 0:
-                        if code_or_size >= len(pids) or pids[code_or_size] < 0:
+                        if (code_or_size >= len(previous_pids)
+                                or previous_pids[code_or_size] < 0):
                             return result
-                        pids[index] = pids[code_or_size]
-                        sections[index] = sections[code_or_size]
-                        pids[code_or_size] = -1
+                        pids[index] = previous_pids[code_or_size]
+                        sections[index] = previous_sections[code_or_size]
+                        previous_pids[code_or_size] = -1
                     else:
                         pids[index] = code_or_size
                         sections[index] = None
@@ -491,16 +537,15 @@ def decode_psi_archived_data(data: bytes) -> list[tuple[float, int, bytes]]:
                     pids[index] = _read_u16(data, position) & 0x1FFF
                     position += 2
 
-                # 辞書ウィンドウの残り (dictionary_len 以降) は前の辞書から引き継ぐ
-                window_index = dictionary_len
-                for previous in range(len(pids)):
-                    if window_index >= dictionary_window_len:
-                        break
-                    if pids[previous] < 0:
-                        continue
-                    pids[window_index] = pids[previous]
-                    sections[window_index] = sections[previous]
-                    window_index += 1
+                # 辞書ウィンドウの残りは、前回の辞書の未参照のエントリを順に引き継ぐ
+                previous = 0
+                while len(pids) < dictionary_window_len:
+                    if previous >= len(previous_pids):
+                        return result
+                    if previous_pids[previous] >= 0:
+                        pids.append(previous_pids[previous])
+                        sections.append(previous_sections[previous])
+                    previous += 1
 
                 context.pids = pids
                 context.sections = sections
@@ -625,13 +670,16 @@ def iter_psi_archived_data(
     interval: float = PSI_ARCHIVED_DATA_INTERVAL,
 ):
     """ライブ PSI/SI アーカイブデータストリーム (エンドレス) を生成する。"""
+    # 1 本のストリームでは辞書を引き継ぐ (毎回同じ PAT / PMT / SDT は 2 回目
+    # から前回の辞書 ID の参照になる)
+    encoder = PSIArchiveEncoder()
     while True:
         now = time.time()
         sections = build_sections(channel, include_data_component, now)
         # 1 チャンクに PAT/PMT/SDT を、続くチャンクに EIT[p/f] と TOT を入れる
         # (クライアント側は複数チャンクの連結をそのまま読める)
-        yield encode_psi_archived_data(sections[:3], now)
-        yield encode_psi_archived_data(sections[3:], now)
+        yield encoder.encode(sections[:3], now)
+        yield encoder.encode(sections[3:], now)
         time.sleep(interval)
 
 

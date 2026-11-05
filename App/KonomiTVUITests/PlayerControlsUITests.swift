@@ -139,6 +139,29 @@ final class PlayerControlsUITests: KonomiTVUITestCase {
         XCTAssertFalse(uiElement(app, "player.skipForward").exists, "ライブにスキップボタンがある")
     }
 
+    // MARK: - Fullscreen
+
+    func testFullscreenHidesPanelAndRestoresIt() {
+        let app = startApp(keepControls: true)
+        openLive(in: app)
+
+        let panel = uiElement(app, "panel.program")
+        XCTAssertTrue(panel.waitForExistence(timeout: TestTimeout.ui), "番組パネルが表示されない")
+
+        tapControl("player.fullscreen", in: app) { !panel.exists }
+        XCTAssertTrue(
+            waitUntil(timeout: TestTimeout.ui) { !panel.exists },
+            "全画面表示にしてもパネルが隠れない"
+        )
+        XCTAssertTrue(uiElement(app, "player.view").exists, "全画面表示で映像が消えた")
+
+        tapControl("player.fullscreen", in: app) { panel.exists }
+        XCTAssertTrue(
+            panel.waitForExistence(timeout: TestTimeout.ui),
+            "全画面表示を終了してもパネルが戻らない"
+        )
+    }
+
     // MARK: - Helpers
 
     private func openVideo(in app: XCUIApplication) {

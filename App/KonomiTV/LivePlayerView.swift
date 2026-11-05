@@ -62,10 +62,12 @@ struct LivePlayerView: View {
 
     var body: some View {
         AdaptivePlayerLayout(
+            isFullscreen: playback.isFullscreen,
             player: { playerArea },
             belowPlayer: { EmptyView() },
             info: { if showsPanel { panel } }
         )
+        .playerFullscreen(playback)
         .navigationTitle(channel.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }

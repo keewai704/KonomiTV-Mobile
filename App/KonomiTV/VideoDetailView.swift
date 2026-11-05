@@ -36,10 +36,12 @@ struct VideoDetailView: View {
 
     var body: some View {
         AdaptivePlayerLayout(
+            isFullscreen: model.playback.isFullscreen,
             player: { playerArea },
             belowPlayer: { sceneStrip },
             info: { info }
         )
+        .playerFullscreen(model.playback)
         .navigationTitle(current.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }

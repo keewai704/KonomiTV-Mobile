@@ -93,6 +93,8 @@ struct LaunchOptions: Sendable {
 
 @main
 struct KonomiTVApp: App {
+    /// Only supplies the orientation lock of the fullscreen player.
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model: AppModel
 
     init() {

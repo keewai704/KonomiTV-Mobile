@@ -138,7 +138,8 @@ class PSIArchivedDataTestCase(unittest.TestCase):
         )
         first = next(stream)
         second = next(stream)
-        sections = dbm.iter_sections(first) + dbm.iter_sections(second)
+        # The second chunk carries the first one's dictionary on.
+        sections = dbm.iter_sections(first + second)
         self.assertEqual(
             [pid for pid, _ in sections],
             [0x0000, 0x1000, 0x0011, 0x0012, 0x0012, 0x0014],
@@ -146,6 +147,42 @@ class PSIArchivedDataTestCase(unittest.TestCase):
         # 番組情報 (EIT[p/f]) はチャンネルの現在/次の番組から作る
         self.assertIn(dbm.arib_text("テスト放送 ニュース・情報"), sections[3][1])
         self.assertIn(dbm.arib_text("テスト放送 アニメ劇場"), sections[4][1])
+
+    def test_stream_reuses_the_previous_dictionary(self) -> None:
+        stream = dbm.iter_psi_archived_data(
+            sample_channel(), include_data_component=True, interval=0
+        )
+        chunks = [next(stream) for _ in range(4)]
+        # The second PAT / PMT / SDT chunk only refers to the first one's
+        # dictionary (IDs from 4096) and carries no section data.
+        third = chunks[2]
+        dictionary_len, window_len, data_size = struct.unpack_from("<HHI", third, 12)
+        self.assertEqual(data_size, 0)
+        self.assertGreater(window_len, dictionary_len)
+        references = struct.unpack_from(f"<{dictionary_len}H", third, 32 + 2 * 4)
+        self.assertTrue(all(value >= 4096 for value in references))
+
+        sections = dbm.iter_sections(b"".join(chunks))
+        self.assertEqual(
+            [pid for pid, _ in sections],
+            [0x0000, 0x1000, 0x0011, 0x0012, 0x0012, 0x0014] * 2,
+        )
+        self.assertEqual(sections[:3], sections[6:9])
+
+    def test_reused_entries_keep_their_sections(self) -> None:
+        encoder = dbm.PSIArchiveEncoder()
+        a, b, c = (0x0000, b"\x00" * 16), (0x0011, b"\x42" * 20), (0x0014, b"\x73" * 9)
+        data = (
+            encoder.encode([a, b], 1767236400.0)
+            + encoder.encode([c], 1767236401.0)
+            # b is now carried at window index 2, a at index 1
+            + encoder.encode([b, a, c], 1767236402.0)
+        )
+        packets = dbm.decode_psi_archived_data(data)
+        payloads = [bytes(chunk[5:5 + 20]) for _, _, chunk in packets]
+        self.assertEqual([pid for _, pid, _ in packets], [0x0000, 0x0011, 0x0014, 0x0011, 0x0000, 0x0014])
+        self.assertEqual(payloads[3], b"\x42" * 20)
+        self.assertEqual(payloads[4][:16], b"\x00" * 16)
 
     def test_stream_without_data_component(self) -> None:
         stream = dbm.iter_psi_archived_data(

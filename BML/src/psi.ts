@@ -141,26 +141,28 @@ export class PSIArchivedDataParser {
     position += 32 + timeListLen * 4
 
     if (context.timeListCount < 0) {
-      // 辞書。辞書の先頭から dictionaryLen 件をこのチャンクのエントリで
-      // 上書きし、再利用するエントリは前のチャンクのセクションを指す
-      const pids = context.pids.slice()
-      const sections = context.sections.slice()
-      while (pids.length < dictionaryWindowLen) {
-        pids.push(-1)
-        sections.push(null)
-      }
+      // 辞書。このチャンクの辞書は新しい配列に作る。値が 4096 以上の
+      // エントリは前回の辞書 (previousPids) の ID を参照し、参照したものは
+      // 前回の辞書に -1 で印を付ける。続けて前回の辞書のうち未参照のものを
+      // 辞書ウィンドウ長まで引き継ぐ (psisiarc の Readme の「辞書」)。
+      // 前回の辞書を書き換えながら読むと、再利用のあるチャンク (実際の
+      // 放送では 2 チャンク目以降のほぼすべて) を読めない
+      const previousPids = context.pids
+      const previousSections = context.sections
+      const pids: number[] = []
+      const sections: (Uint8Array | null)[] = []
       let sectionListPosition = 0
 
       for (let index = 0; index < dictionaryLen; index++, position += 2) {
         const codeOrSize = readU16(view, data, position) - 4096
         if (codeOrSize >= 0) {
-          if (codeOrSize >= pids.length || pids[codeOrSize] < 0) {
+          if (codeOrSize >= previousPids.length || previousPids[codeOrSize] < 0) {
             context.position = data.byteLength
             return
           }
-          pids[index] = pids[codeOrSize]
-          sections[index] = sections[codeOrSize]
-          pids[codeOrSize] = -1
+          pids[index] = previousPids[codeOrSize]
+          sections[index] = previousSections[codeOrSize]
+          previousPids[codeOrSize] = -1
         } else {
           pids[index] = codeOrSize
           sections[index] = null
@@ -196,14 +198,17 @@ export class PSIArchivedDataParser {
         position += 2
       }
 
-      // 辞書ウィンドウの残りは前の辞書から引き継ぐ
-      let windowIndex = dictionaryLen
-      for (let previous = 0; previous < pids.length && windowIndex < dictionaryWindowLen; previous++) {
-        if (pids[previous] < 0) {
+      // 辞書ウィンドウの残りは前回の辞書の未参照のエントリを順に引き継ぐ
+      for (let windowIndex = dictionaryLen, previous = 0; windowIndex < dictionaryWindowLen; previous++) {
+        if (previous >= previousPids.length) {
+          context.position = data.byteLength
+          return
+        }
+        if (previousPids[previous] < 0) {
           continue
         }
-        pids[windowIndex] = pids[previous]
-        sections[windowIndex] = sections[previous]
+        pids[windowIndex] = previousPids[previous]
+        sections[windowIndex] = previousSections[previous]
         windowIndex++
       }
 

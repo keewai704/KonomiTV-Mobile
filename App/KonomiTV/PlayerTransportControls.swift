@@ -6,7 +6,8 @@ import SwiftUI
 /// `AVPlayerViewController` used to draw these. They are native SwiftUI on top
 /// of the VLC drawable now: play / pause, ±10 s and ±30 s skips on recorded and
 /// saved video, a seek bar with elapsed and remaining time, the ライブ button on
-/// live channels, mute, the AirPlay route picker and picture in picture.
+/// live channels (live shows no clock: it always plays the newest part), mute,
+/// the AirPlay route picker, picture in picture and fullscreen.
 /// Layout only depends on what the item offers, never on the device type.
 struct PlayerTransportControls: View {
     let playback: PlaybackController
@@ -42,6 +43,7 @@ struct PlayerTransportControls: View {
 
     private var topRow: some View {
         HStack(spacing: 18) {
+            fullscreenButton
             Spacer(minLength: 0)
             muteButton
             airPlayPicker
@@ -51,53 +53,56 @@ struct PlayerTransportControls: View {
         }
     }
 
+    @ViewBuilder
     private var bottomRow: some View {
-        VStack(spacing: 6) {
-            if playback.canSeek {
-                seekRow
-            }
-            HStack(spacing: 16) {
-                if playback.canSeek {
-                    skipButton(
-                        seconds: -30,
-                        symbol: "gobackward.30",
-                        identifier: "player.skipBack30",
-                        label: "30秒戻る"
-                    )
-                    skipButton(
-                        seconds: -10,
-                        symbol: "gobackward.10",
-                        identifier: "player.skipBack",
-                        label: "10秒戻る"
-                    )
-                } else {
+        if playback.canSeek {
+            videoBottomRow
+        } else {
+            // Live: the ライブ button on the leading edge, play / pause in the
+            // middle of the row.
+            ZStack {
+                playPauseButton
+                HStack {
                     liveEdgeButton
+                    Spacer(minLength: 0)
                 }
+            }
+        }
+    }
+
+    private var videoBottomRow: some View {
+        VStack(spacing: 6) {
+            seekRow
+            HStack(spacing: 16) {
+                skipButton(
+                    seconds: -30,
+                    symbol: "gobackward.30",
+                    identifier: "player.skipBack30",
+                    label: "30秒戻る"
+                )
+                skipButton(
+                    seconds: -10,
+                    symbol: "gobackward.10",
+                    identifier: "player.skipBack",
+                    label: "10秒戻る"
+                )
 
                 Spacer(minLength: 0)
                 playPauseButton
                 Spacer(minLength: 0)
 
-                if playback.canSeek {
-                    skipButton(
-                        seconds: 10,
-                        symbol: "goforward.10",
-                        identifier: "player.skipForward",
-                        label: "10秒進む"
-                    )
-                    skipButton(
-                        seconds: 30,
-                        symbol: "goforward.30",
-                        identifier: "player.skipForward30",
-                        label: "30秒進む"
-                    )
-                } else {
-                    Text(Self.timeLabel(Double(playback.positionSeconds)))
-                        .font(.footnote.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(width: 52, alignment: .trailing)
-                        .accessibilityHidden(true)
-                }
+                skipButton(
+                    seconds: 10,
+                    symbol: "goforward.10",
+                    identifier: "player.skipForward",
+                    label: "10秒進む"
+                )
+                skipButton(
+                    seconds: 30,
+                    symbol: "goforward.30",
+                    identifier: "player.skipForward30",
+                    label: "30秒進む"
+                )
             }
         }
     }
@@ -180,6 +185,18 @@ struct PlayerTransportControls: View {
             playback.togglePictureInPicture()
         }
         .disabled(!playback.isPictureInPictureAvailable && !playback.isPictureInPictureActive)
+    }
+
+    private var fullscreenButton: some View {
+        controlButton(
+            symbol: playback.isFullscreen
+                ? "arrow.down.right.and.arrow.up.left"
+                : "arrow.up.left.and.arrow.down.right",
+            identifier: "player.fullscreen",
+            label: playback.isFullscreen ? "全画面表示を終了" : "全画面表示"
+        ) {
+            playback.toggleFullscreen()
+        }
     }
 
     private var liveEdgeButton: some View {

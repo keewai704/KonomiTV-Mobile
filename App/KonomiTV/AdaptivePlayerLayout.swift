@@ -11,9 +11,11 @@ import SwiftUI
 ///
 /// Both arrangements share one `AnyLayout`, so switching between them keeps
 /// the player's identity: the player host view controller is not recreated and
-/// playback continues while the window is resized.
+/// playback continues while the window is resized. Fullscreen keeps it too:
+/// the player then fills the whole screen and the rest is left out.
 struct AdaptivePlayerLayout<Player: View, BelowPlayer: View, Info: View>: View {
     private let threshold: CGFloat
+    private let isFullscreen: Bool
     private let player: Player
     private let belowPlayer: BelowPlayer
     private let info: Info
@@ -22,17 +24,19 @@ struct AdaptivePlayerLayout<Player: View, BelowPlayer: View, Info: View>: View {
 
     init(
         threshold: CGFloat = 900,
+        isFullscreen: Bool = false,
         @ViewBuilder player: () -> Player,
         @ViewBuilder belowPlayer: () -> BelowPlayer,
         @ViewBuilder info: () -> Info
     ) {
         self.threshold = threshold
+        self.isFullscreen = isFullscreen
         self.player = player()
         self.belowPlayer = belowPlayer()
         self.info = info()
     }
 
-    private var isWide: Bool { width >= threshold }
+    private var isWide: Bool { width >= threshold && !isFullscreen }
 
     private var layout: AnyLayout {
         isWide
@@ -45,20 +49,26 @@ struct AdaptivePlayerLayout<Player: View, BelowPlayer: View, Info: View>: View {
             VStack(spacing: 0) {
                 player
                     .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, maxHeight: isFullscreen ? .infinity : nil)
                     .background(Color.black)
 
-                belowPlayer
+                if !isFullscreen {
+                    belowPlayer
+                }
             }
             .frame(width: isWide ? max(width * 0.65, 320) : nil)
 
-            ScrollView {
-                info
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(isWide ? 20 : 16)
+            if !isFullscreen {
+                ScrollView {
+                    info
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(isWide ? 20 : 16)
+                }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: isFullscreen ? .center : .top)
+        .background(isFullscreen ? Color.black : Color.clear)
+        .ignoresSafeArea(edges: isFullscreen ? .all : [])
         .background(widthReader)
     }
 
