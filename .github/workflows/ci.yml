@@ -216,6 +216,29 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      # Screenshots the tests keep (LayoutScreenshotUITests), as PNG files
+      # named after their attachments (manifest.json maps the names).
+      - name: Export screenshots
+        if: always()
+        env:
+          RESULT_BUNDLE: ${{ runner.temp }}/TestResults-${{ matrix.slug }}.xcresult
+        run: |
+          if [ -d "$RESULT_BUNDLE" ]; then
+            mkdir -p "$RUNNER_TEMP/screenshots"
+            xcrun xcresulttool export attachments \
+              --path "$RESULT_BUNDLE" \
+              --output-path "$RUNNER_TEMP/screenshots" || true
+          fi
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ matrix.slug }}
+          path: ${{ runner.temp }}/screenshots
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4

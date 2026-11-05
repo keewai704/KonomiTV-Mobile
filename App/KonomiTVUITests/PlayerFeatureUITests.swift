@@ -143,8 +143,8 @@ final class PlayerFeatureUITests: KonomiTVUITestCase {
         tapWhenHittable(row, in: app)
 
         XCTAssertTrue(
-            // The bar is named after the navigation title; on compact widths
-            // the toolbar buttons leave no room to draw the title itself.
+            // The bar is named after the navigation title; in a narrow
+            // window the toolbar buttons leave no room to draw the title.
             waitUntil(timeout: TestTimeout.playback) {
                 app.navigationBars["NHK Eテレ"].exists
             },

@@ -48,10 +48,10 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable, Sendable {
     }
 }
 
-/// Tabs of the compact (iPhone) layout.
+/// Tabs of the tab bar interface (windows without the sidebar).
 ///
-/// マイページ collects the sections that the regular width layout shows in the
-/// sidebar but the tab bar has no room for.
+/// マイページ collects the sections that the sidebar shows but the tab bar has
+/// no room for.
 enum CompactTab: String, CaseIterable, Hashable, Sendable {
     case live
     case videos
@@ -232,9 +232,9 @@ final class AppModel {
     private(set) var user: User?
     private(set) var token: String?
 
-    /// Section shown by the regular width sidebar.
+    /// Section shown by the sidebar.
     var section: AppSection = .live
-    /// Tab shown by the compact width tab bar.
+    /// Tab shown by the tab bar.
     var compactTab: CompactTab = .live
 
     /// Navigation paths, so picture in picture restore (and anything else) can
@@ -400,7 +400,7 @@ final class AppModel {
 
     // MARK: - Sections
 
-    /// Sections of the regular width sidebar. キャプチャ needs the captures
+    /// Sections of the sidebar. キャプチャ needs the captures
     /// library, so it disappears on a v0.14.1 server. オフライン additionally
     /// stays visible while videos are saved, so a library remains reachable
     /// when the server is down.

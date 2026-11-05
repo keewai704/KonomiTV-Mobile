@@ -133,9 +133,15 @@ final class PlaybackController {
     /// True while the player is actually advancing. The comment overlay freezes
     /// its animations when playback pauses.
     private(set) var isPlaying = false
+    /// Fullscreen chosen with the player's button.
+    var isFullscreenRequested = false
+    /// Set by the player screen while its window is landscape below the large
+    /// short side (`WindowLayout.Shape.landscape`, an iPhone turned sideways or
+    /// a low Stage Manager window): the player is always fullscreen then.
+    var isFullscreenForced = false
     /// Whether the player fills the screen (the player screens hide their bars
-    /// and panels, and an iPhone turns to landscape).
-    var isFullscreen = false
+    /// and panels).
+    var isFullscreen: Bool { isFullscreenRequested || isFullscreenForced }
 
     /// Data broadcasting (BML) of the live player: the WKWebView page plus the
     /// native state around it (remote keys, video plane).
@@ -475,7 +481,6 @@ final class PlaybackController {
         liveLagBaseline = nil
         isLivePausedInApp = false
         isInterrupted = false
-        isFullscreen = false
         comments.isPlaying = false
         comments.isPictureInPictureActive = false
         comments.reset()
@@ -567,9 +572,10 @@ final class PlaybackController {
         }
     }
 
-    /// Enters or leaves fullscreen (the player's button).
+    /// Enters or leaves fullscreen (the player's button; a landscape window
+    /// below the large short side is always fullscreen).
     func toggleFullscreen() {
-        isFullscreen.toggle()
+        isFullscreenRequested.toggle()
     }
 
     /// Shows or hides the data broadcasting screen (the live player's d

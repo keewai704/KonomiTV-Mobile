@@ -7,7 +7,7 @@ import KonomiKit
 struct LiveChannelsView: View {
     let model: AppModel
 
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.windowLayout) private var windowLayout
 
     @State private var channels: LiveChannels?
     @State private var selection: ChannelSelection?
@@ -24,7 +24,7 @@ struct LiveChannelsView: View {
     @State private var showsFilterSheet = false
     @State private var filterRevision = 0
 
-    private var isCompact: Bool { horizontalSizeClass == .compact }
+    private var isCompact: Bool { windowLayout.isCompact }
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)

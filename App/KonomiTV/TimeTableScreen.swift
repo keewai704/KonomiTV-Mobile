@@ -107,7 +107,7 @@ private struct TimeTableOffsetKey: PreferenceKey {
 struct TimeTableScreen: View {
     let model: AppModel
 
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.windowLayout) private var windowLayout
 
     @State private var channels: LiveChannels?
     @State private var table: TimeTable?
@@ -126,7 +126,7 @@ struct TimeTableScreen: View {
 
     // MARK: - Geometry
 
-    private var isRegular: Bool { horizontalSizeClass == .regular }
+    private var isRegular: Bool { windowLayout.usesSidebar }
     private var hourHeight: CGFloat { isRegular ? 200 : 120 }
     private var columnWidth: CGFloat { isRegular ? 150 : 112 }
     private var timeScaleWidth: CGFloat { isRegular ? 54 : 40 }

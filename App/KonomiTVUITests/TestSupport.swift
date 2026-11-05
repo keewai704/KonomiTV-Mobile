@@ -11,8 +11,8 @@ enum TestTimeout {
     static let playback: TimeInterval = 45
 }
 
-/// A section of the app, reachable from the sidebar (regular width) or from the
-/// tab bar plus the マイページ hub (compact width).
+/// A section of the app, reachable from the sidebar (large window) or from the
+/// tab bar plus the マイページ hub (any other window).
 enum TestSection: String, CaseIterable {
     case live
     case timetable
@@ -418,7 +418,7 @@ func waitForLabel(
     return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
 }
 
-/// Whether the app is showing the regular-width sidebar layout.
+/// Whether the app is showing the sidebar layout (a large window).
 @MainActor
 func isRegularLayout(_ app: XCUIApplication, timeout: TimeInterval = TestTimeout.ui) -> Bool {
     let sidebar = uiElement(app, "sidebar")
@@ -454,8 +454,8 @@ func mainNavigationExists(in app: XCUIApplication, timeout: TimeInterval = TestT
 
 // MARK: - Navigation and interaction
 
-/// Opens a section on both layouts: the sidebar row on regular widths, the tab
-/// (plus a マイページ row for the sections without a tab) on compact widths.
+/// Opens a section on both layouts: the sidebar row in a large window, the tab
+/// (plus a マイページ row for the sections without a tab) in any other window.
 @MainActor
 func openSection(
     _ section: TestSection,
@@ -504,7 +504,7 @@ func openSection(
     row.tap()
 }
 
-/// Taps the navigation bar back button (compact and regular widths).
+/// Taps the navigation bar back button (both interfaces).
 @MainActor
 func navigateBack(in app: XCUIApplication, timeout: TimeInterval = TestTimeout.ui) {
     let identified = app.navigationBars.buttons.matching(identifier: "BackButton").firstMatch
@@ -573,8 +573,8 @@ func replaceText(
     element.typeText(text)
 }
 
-/// The screen's search field. On iPad it sits in the toolbar and can be
-/// collapsed into a search button when the toolbar is short of room.
+/// The screen's search field. In the sidebar interface it sits in the toolbar
+/// and can be collapsed into a search button when the toolbar is short of room.
 @MainActor
 func findSearchField(in app: XCUIApplication, timeout: TimeInterval = TestTimeout.ui) -> XCUIElement {
     let field = app.searchFields.firstMatch

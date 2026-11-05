@@ -1,9 +1,10 @@
 import UIKit
 import XCTest
 
-/// Adaptive navigation: sidebar for regular widths (iPad), tab bar plus the
-/// マイページ hub for compact widths (iPhone), and rotation on iPhone keeps the
-/// selection.
+/// Adaptive navigation: the sidebar for large windows (short side 700pt or
+/// more), the tab bar plus the マイページ hub for the others, and rotation keeps
+/// the selected section. The expectations come from the size of the window, not
+/// from the kind of device.
 final class LayoutUITests: KonomiTVUITestCase {
     func testAdaptiveNavigationMatchesWindowSize() {
         let app = startApp()
@@ -18,10 +19,12 @@ final class LayoutUITests: KonomiTVUITestCase {
             },
             "メイン画面のナビゲーションが表示されない"
         )
+        let largeWindow = isLargeWindow(app)
 
         if sidebar.exists {
-            XCTAssertFalse(liveTab.exists, "レギュラー幅ではタブ項目を表示しない")
-            XCTAssertFalse(tabBar.exists, "レギュラー幅ではタブバーを表示しない")
+            XCTAssertTrue(largeWindow, "大画面ではないウインドウにサイドバーがある")
+            XCTAssertFalse(liveTab.exists, "大画面ではタブ項目を表示しない")
+            XCTAssertFalse(tabBar.exists, "大画面ではタブバーを表示しない")
 
             openSection(.videos, in: app)
             XCTAssertTrue(
@@ -32,10 +35,11 @@ final class LayoutUITests: KonomiTVUITestCase {
                 uiElement(app, "sidebar.settings").exists,
                 "サイドバーに設定がない"
             )
-            XCTAssertFalse(tabBar.exists, "レギュラー幅ではタブバーを表示しない")
+            XCTAssertFalse(tabBar.exists, "大画面ではタブバーを表示しない")
         } else {
-            XCTAssertTrue(tabBar.waitForExistence(timeout: TestTimeout.ui), "コンパクト幅ではタブバーを表示する")
-            XCTAssertTrue(uiElement(app, "tab.mypage").exists, "コンパクト幅ではマイページタブを表示する")
+            XCTAssertFalse(largeWindow, "大画面のウインドウにタブバーがある")
+            XCTAssertTrue(tabBar.waitForExistence(timeout: TestTimeout.ui), "大画面ではないウインドウではタブバーを表示する")
+            XCTAssertTrue(uiElement(app, "tab.mypage").exists, "大画面ではないウインドウではマイページタブを表示する")
 
             openSection(.videos, in: app)
             XCTAssertTrue(
@@ -51,10 +55,13 @@ final class LayoutUITests: KonomiTVUITestCase {
         }
     }
 
-    func testRotationKeepsSelectedSectionOnIPhone() throws {
+    /// 回転しても選択中の画面が残ること。大画面 (短い辺が 700pt 以上) は
+    /// 縦向きでも横向きでもサイドバーのままなので、このテストは回転で
+    /// ナビゲーションが変わるウインドウ (iPhone・Split View など) でだけ動かす。
+    func testRotationKeepsSelectedSectionInSmallWindow() throws {
         let app = startApp()
-        let regularLayout = isRegularLayout(app)
-        try XCTSkipIf(regularLayout, "レギュラー幅 (iPad) では回転テストをスキップする")
+        let largeWindow = isLargeWindow(app)
+        try XCTSkipIf(largeWindow, "大画面 (短い辺が 700pt 以上) のウインドウでは回転テストをスキップする")
 
         openSection(.videos, in: app)
         XCTAssertTrue(
@@ -67,11 +74,16 @@ final class LayoutUITests: KonomiTVUITestCase {
             uiElement(app, "videos.home").waitForExistence(timeout: TestTimeout.ui),
             "横向きにした後でビデオ画面が失われた"
         )
+        // 横向きにしても短い辺は 700pt 未満なので、タブバーのまま。
+        let landscapeWindow = app.windows.firstMatch.frame.size
+        XCTAssertLessThan(
+            min(landscapeWindow.width, landscapeWindow.height),
+            700,
+            "横向きのウインドウが大画面になった (サイドバーになるはず)"
+        )
         XCTAssertTrue(
-            waitUntil(timeout: TestTimeout.ui) {
-                app.tabBars.firstMatch.exists || uiElement(app, "sidebar").exists
-            },
-            "横向きにした後でナビゲーションが失われた"
+            app.tabBars.firstMatch.waitForExistence(timeout: TestTimeout.ui),
+            "横向きにした後でタブバーが失われた"
         )
 
         rotate(.portrait, in: app)
@@ -83,5 +95,14 @@ final class LayoutUITests: KonomiTVUITestCase {
             app.tabBars.firstMatch.waitForExistence(timeout: TestTimeout.ui),
             "縦向きに戻した後でタブバーが失われた"
         )
+    }
+
+    // MARK: - Helpers
+
+    /// Whether the window is large (short side 700pt or more), which gets the
+    /// sidebar interface: read from the frame, not from the device.
+    private func isLargeWindow(_ app: XCUIApplication) -> Bool {
+        let size = app.windows.firstMatch.frame.size
+        return min(size.width, size.height) >= 700
     }
 }

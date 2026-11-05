@@ -14,6 +14,7 @@ struct PlayerTransportControls: View {
     /// Called for every interaction so the auto-hide timer restarts.
     let onInteraction: () -> Void
 
+    @Environment(\.dismiss) private var dismiss
     @State private var isScrubbing = false
     @State private var scrubPosition: Double = 0
 
@@ -43,7 +44,14 @@ struct PlayerTransportControls: View {
 
     private var topRow: some View {
         HStack(spacing: 18) {
-            fullscreenButton
+            // A landscape window below the large short side (an iPhone turned
+            // sideways) is always fullscreen, so there is nothing to toggle;
+            // with the navigation bar hidden, the way back takes its place.
+            if playback.isFullscreenForced {
+                backButton
+            } else {
+                fullscreenButton
+            }
             Spacer(minLength: 0)
             muteButton
             airPlayPicker
@@ -189,13 +197,19 @@ struct PlayerTransportControls: View {
 
     private var fullscreenButton: some View {
         controlButton(
-            symbol: playback.isFullscreen
+            symbol: playback.isFullscreenRequested
                 ? "arrow.down.right.and.arrow.up.left"
                 : "arrow.up.left.and.arrow.down.right",
             identifier: "player.fullscreen",
-            label: playback.isFullscreen ? "全画面表示を終了" : "全画面表示"
+            label: playback.isFullscreenRequested ? "全画面表示を終了" : "全画面表示"
         ) {
             playback.toggleFullscreen()
+        }
+    }
+
+    private var backButton: some View {
+        controlButton(symbol: "chevron.backward", identifier: "player.back", label: "戻る") {
+            dismiss()
         }
     }
 

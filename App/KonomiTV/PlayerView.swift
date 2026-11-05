@@ -34,7 +34,11 @@ struct PlayerView: View {
 
     var body: some View {
         ZStack {
+            // In fullscreen the picture extends under the status bar, the
+            // Dynamic Island and the home indicator; the controls stay inside
+            // the safe area.
             PlayerRepresentable(playback: playback)
+                .ignoresSafeArea(edges: playback.isFullscreen ? .all : [])
                 .accessibilityIdentifier("player.view")
 
             tapSurface
@@ -50,7 +54,9 @@ struct PlayerView: View {
 
             statusLabel
         }
-        .background(Color.black)
+        .background {
+            Color.black.ignoresSafeArea(edges: playback.isFullscreen ? .all : [])
+        }
         .animation(.easeInOut(duration: 0.2), value: areControlsVisible)
         .onAppear { scheduleAutoHide() }
         .onDisappear { autoHideTask?.cancel() }

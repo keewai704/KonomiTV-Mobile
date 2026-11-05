@@ -2,27 +2,37 @@ import SwiftUI
 import KonomiKit
 
 /// Chooses between the first run setup flow and the main interface, and
-/// between a tab bar plus マイページ hub (compact widths) and a sidebar
-/// (regular widths).
+/// between a tab bar plus マイページ hub and a sidebar.
+///
+/// The choice follows the size and the aspect ratio of the window
+/// (`WindowLayout`), not the device: the window is measured here and handed to
+/// every screen in the environment.
 struct RootView: View {
     @Bindable var model: AppModel
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var windowLayout = WindowLayout()
 
     var body: some View {
         Group {
-            if model.isConfigured {
+            if !windowLayout.isMeasured {
+                // One layout pass, so the first frame already has the right
+                // interface for the window.
+                Color.clear
+            } else if model.isConfigured {
                 mainInterface
             } else {
                 SetupView(model: model)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .measuringWindow(into: $windowLayout)
+        .environment(\.windowLayout, windowLayout)
         .task {
             await model.restoreSession()
         }
     }
 
-    private var isCompact: Bool { horizontalSizeClass == .compact }
+    private var isCompact: Bool { windowLayout.isCompact }
 
     @ViewBuilder
     private var mainInterface: some View {
@@ -80,7 +90,7 @@ struct RootView: View {
             .accessibilityIdentifier(identifier)
     }
 
-    // MARK: - Compact (iPhone, narrow windows)
+    // MARK: - Tab bar (windows without the sidebar)
 
     private var compactInterface: some View {
         TabView(selection: compactTabSelection) {
@@ -99,8 +109,8 @@ struct RootView: View {
     }
 
     /// Keeps the sidebar selection in sync with the tab bar, so switching
-    /// between compact and regular widths (rotation, Split View) stays on the
-    /// same section.
+    /// between the two interfaces (rotation, Split View) stays on the same
+    /// section.
     private var compactTabSelection: Binding<CompactTab> {
         Binding(
             get: { model.compactTab },
@@ -123,7 +133,7 @@ struct RootView: View {
             .accessibilityIdentifier("tab.\(tab.rawValue)")
     }
 
-    // MARK: - Regular (iPad, Split View, Stage Manager)
+    // MARK: - Sidebar (large windows)
 
     private var regularInterface: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {

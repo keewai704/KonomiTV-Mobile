@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// マイページ: the compact width hub that lists the sections without a tab.
+/// マイページ: the tab bar hub that lists the sections without a tab.
 struct MyPageView: View {
     let model: AppModel
 

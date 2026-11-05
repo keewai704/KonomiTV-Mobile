@@ -179,7 +179,7 @@ struct LivePlayerView: View {
             }
 
             // 主音声 / 副音声 share the menu so the toolbar keeps room for
-            // every control on a compact width.
+            // every control in a narrow window.
             if playback.hasSecondaryAudio {
                 Section("音声") {
                     Picker("音声", selection: Binding(
@@ -322,7 +322,7 @@ struct LivePlayerView: View {
             // データ放送のリモコン (BML があるチャンネルのみ)
             if dataBroadcasting.isFeatureAvailable {
                 // データ放送: the web client's d button. In the panel row rather than
-                // the toolbar, which overflows into a menu on compact widths.
+                // the toolbar, which overflows into a menu in a narrow window.
                 Button {
                     toggleDataBroadcasting()
                 } label: {

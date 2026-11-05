@@ -112,7 +112,10 @@ final class PlayerHostViewController: UIViewController {
 
     private func applyVideoPlaneLayout() {
         let bounds = view.bounds
-        var target = bounds
+        // The picture is 16:9 in the middle of the view: the view is larger
+        // than the picture in fullscreen (the whole screen), and comments and
+        // captions belong on the picture, not on the black bars.
+        var target = Self.pictureRect(in: bounds)
         if let videoPlaneRect {
             let rect = videoPlaneRect.intersection(bounds)
             if rect.width >= 1, rect.height >= 1 {
@@ -124,6 +127,22 @@ final class PlayerHostViewController: UIViewController {
             guard let subview, subview.frame != target else { continue }
             subview.frame = target
         }
+    }
+
+    /// The largest 16:9 rect centered in bounds.
+    static func pictureRect(in bounds: CGRect) -> CGRect {
+        guard bounds.width > 0, bounds.height > 0 else { return bounds }
+        let ratio: CGFloat = 16.0 / 9.0
+        var size = CGSize(width: bounds.width, height: bounds.width / ratio)
+        if size.height > bounds.height {
+            size = CGSize(width: bounds.height * ratio, height: bounds.height)
+        }
+        return CGRect(
+            x: bounds.midX - size.width / 2,
+            y: bounds.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        ).integral
     }
 
     // MARK: - Picture in picture
