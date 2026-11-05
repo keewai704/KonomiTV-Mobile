@@ -338,10 +338,15 @@ struct OfflineVideoPlayerView: View {
             return
         }
         content = video
+        // The watch history can be ahead of what was saved (a save still
+        // downloading): such a position would play only the end, so the saved
+        // part starts from the beginning instead.
+        let resume = model.resumePosition(for: program)
+        let startAt = resume < video.durationSeconds - 5 ? resume : 0
         model.playback.playOffline(
             video,
             directory: model.offline.playbackDirectory(for: video),
-            startAt: model.resumePosition(for: program)
+            startAt: startAt
         )
         startComments(videoID: video.videoID)
     }
