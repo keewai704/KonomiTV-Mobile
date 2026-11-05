@@ -198,14 +198,6 @@ final class PlaybackController {
     /// milliseconds: the web client's live buffer (4 s). libVLC still buffers
     /// at least 6 s before playing then.
     private static let liveDelay = 4000
-    /// Live TV is watched as it airs: playback that has collected more delay
-    /// than this (seconds) behind the broadcast jumps back to the live edge.
-    private static let liveLagLimit: Double = 5
-    /// At most one automatic jump in this many seconds, so a connection that
-    /// cannot keep up does not restart the picture over and over. Opening a
-    /// live stream counts as a jump: libVLC raises its own delay while the
-    /// first segments arrive, and that start-up delay is not lag to skip.
-    private static let liveCatchUpInterval: CFTimeInterval = 30
     /// Recorded video goes through the loopback proxy; a deeper buffer makes
     /// seeking smoother and costs nothing but memory.
     private static let videoNetworkCaching = 3000
@@ -258,11 +250,6 @@ final class PlaybackController {
     /// current position after a live-edge seek.
     @ObservationIgnored private var liveAnchorPlaybackTime: Double = 0
 
-    /// Live only: host time and position at which playback was last on time
-    /// with the broadcast (see `checkLiveLag`).
-    @ObservationIgnored private var liveLagBaseline: (hostTime: CFTimeInterval, position: Double)?
-    /// Host time of the last automatic jump to the live edge.
-    @ObservationIgnored private var lastLiveCatchUp: CFTimeInterval = 0
     /// True while live playback is paused from the app's own controls. Any
     /// other pause (picture in picture, another app's audio, the PiP window
     /// closed) is resumed when the app comes back.
@@ -497,7 +484,6 @@ final class PlaybackController {
         isRestoringFromPictureInPicture = false
         didDisableVideoTracks = false
         liveAnchorRequested = false
-        liveLagBaseline = nil
         isLivePausedInApp = false
         isInterrupted = false
         comments.isPlaying = false
@@ -656,8 +642,6 @@ final class PlaybackController {
     /// video output), so PiP seeks within the window instead when it can.
     private func jumpToLiveEdge() {
         guard case .live(let channel)? = item else { return }
-        lastLiveCatchUp = CACurrentMediaTime()
-        liveLagBaseline = nil
         activateAudioSession()
 
         if isPictureInPictureActive {
@@ -683,32 +667,6 @@ final class PlaybackController {
         // Buffered captions belong to the old timeline.
         captions.end()
         attachPlayer(url: url, item: .live(channel), startAt: 0)
-    }
-
-    /// Live content arrives in real time, so a live position should advance
-    /// with the host clock. The difference is delay that playback collected
-    /// (stalls while buffering, a pause that was resumed in place); once it
-    /// passes `liveLagLimit` playback jumps back to the live edge.
-    private func checkLiveLag(_ position: Double, playing: Bool) {
-        guard case .live? = item, playing else { return }
-        let now = CACurrentMediaTime()
-        guard let baseline = liveLagBaseline else {
-            liveLagBaseline = (now, position)
-            return
-        }
-        let lag = (now - baseline.hostTime) - (position - baseline.position)
-        if lag < 0 {
-            // Ahead of the baseline (a discontinuity, or a late first frame):
-            // the baseline follows the furthest point playback reached.
-            liveLagBaseline = (now, position)
-            return
-        }
-        guard lag > Self.liveLagLimit,
-              now - lastLiveCatchUp > Self.liveCatchUpInterval else {
-            return
-        }
-        AppLog.playback.notice("live lag \(lag, privacy: .public)s: jumping to the live edge")
-        jumpToLiveEdge()
     }
 
     /// Restarts the current item (R shortcut).
@@ -1272,10 +1230,6 @@ final class PlaybackController {
         clock.begin(startAt: startAt, isSeekable: expected.isVideo)
         liveAnchorRequested = false
         liveAnchorPlaybackTime = 0
-        liveLagBaseline = nil
-        if case .live = expected {
-            lastLiveCatchUp = CACurrentMediaTime()
-        }
         clock.setLiveMapping(nil)
         updatePlaying(false)
         updatePictureInPictureSnapshot()
@@ -1505,8 +1459,6 @@ final class PlaybackController {
         updateVideoSize()
         updatePictureInPictureSnapshot()
         updateNowPlaying(force: false)
-
-        checkLiveLag(progress, playing: playing)
     }
 
     /// Logs a jump of the libVLC clock (callbacks come every 250 ms, so more
