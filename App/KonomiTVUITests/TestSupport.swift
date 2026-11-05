@@ -674,6 +674,15 @@ func tapWhenHittable(
     var keyboardDismissAttempts = 0
     while Date() < deadline {
         if element.exists, element.isHittable {
+            // A row scrolled under the navigation bar still counts as
+            // hittable, but the bar takes the tap: pull the list down first.
+            let navigationBar = app.navigationBars.firstMatch
+            if navigationBar.exists, element.frame.midY <= navigationBar.frame.maxY {
+                let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+                start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 200)))
+                RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+                continue
+            }
             element.tap()
             return
         }

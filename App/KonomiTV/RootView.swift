@@ -157,7 +157,7 @@ struct RootView: View {
             }
             .accessibilityIdentifier("sidebar")
         } detail: {
-            sectionStack(model.section)
+            sectionStack(model.section, path: sidebarPath(for: model.section))
                 // A fresh stack per section, so screens pushed in one section
                 // do not stay on top after switching to another.
                 .id(model.section)
@@ -184,8 +184,11 @@ struct RootView: View {
 
     /// Each section owns its navigation path on `AppModel`, so picture in
     /// picture restore can push the screen that owns the playback.
-    private func sectionStack(_ section: AppSection) -> some View {
-        NavigationStack(path: path(for: section)) {
+    private func sectionStack(
+        _ section: AppSection,
+        path: Binding<[SectionRoute]>? = nil
+    ) -> some View {
+        NavigationStack(path: path ?? self.path(for: section)) {
             root(for: section)
                 .navigationDestination(for: SectionRoute.self) { route in
                     destination(for: route)
@@ -202,6 +205,22 @@ struct RootView: View {
                     destination(for: route)
                 }
         }
+    }
+
+    /// The path of the sidebar's detail stack. Switching section replaces
+    /// that stack, and the stack that goes away writes an empty path back:
+    /// the write is dropped once another section is selected, so the section
+    /// keeps its screens (a running player among them) for its return.
+    private func sidebarPath(for section: AppSection) -> Binding<[SectionRoute]> {
+        let path = self.path(for: section)
+        return Binding(
+            get: { path.wrappedValue },
+            set: { newValue in
+                if model.section == section {
+                    path.wrappedValue = newValue
+                }
+            }
+        )
     }
 
     private func path(for section: AppSection) -> Binding<[SectionRoute]> {

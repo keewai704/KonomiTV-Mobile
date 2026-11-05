@@ -143,8 +143,14 @@ final class ReservationUITests: KonomiTVUITestCase {
         XCTAssertTrue(nextDay.waitForExistence(timeout: TestTimeout.ui), "翌日ボタンが表示されない")
         nextDay.tap()
 
+        // The next day's cells load (and settle) after the tap.
         let reserved = reservedProgramIDs()
-        guard let programID = firstUnreservedProgramID(in: app, reserved: reserved) else {
+        var found: String?
+        _ = waitUntil(timeout: TestTimeout.ui) {
+            found = self.firstUnreservedProgramID(in: app, reserved: reserved)
+            return found != nil
+        }
+        guard let programID = found else {
             XCTFail("予約していない番組セルが見つからない")
             return
         }

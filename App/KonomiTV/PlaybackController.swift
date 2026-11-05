@@ -202,7 +202,9 @@ final class PlaybackController {
     /// than this (seconds) behind the broadcast jumps back to the live edge.
     private static let liveLagLimit: Double = 5
     /// At most one automatic jump in this many seconds, so a connection that
-    /// cannot keep up does not restart the picture over and over.
+    /// cannot keep up does not restart the picture over and over. Opening a
+    /// live stream counts as a jump: libVLC raises its own delay while the
+    /// first segments arrive, and that start-up delay is not lag to skip.
     private static let liveCatchUpInterval: CFTimeInterval = 30
     /// Recorded video goes through the loopback proxy; a deeper buffer makes
     /// seeking smoother and costs nothing but memory.
@@ -1271,6 +1273,9 @@ final class PlaybackController {
         liveAnchorRequested = false
         liveAnchorPlaybackTime = 0
         liveLagBaseline = nil
+        if case .live = expected {
+            lastLiveCatchUp = CACurrentMediaTime()
+        }
         clock.setLiveMapping(nil)
         updatePlaying(false)
         updatePictureInPictureSnapshot()
