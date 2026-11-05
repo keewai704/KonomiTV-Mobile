@@ -251,6 +251,15 @@ final class AppModel {
     /// Path of the compact マイページ hub.
     var mypagePath: [SectionRoute] = []
 
+    /// Every route of every stack. The root view reads it with one `onChange`,
+    /// so a navigation change anywhere (a popped player screen) is seen at
+    /// once, whichever section or interface it happened in.
+    var openRoutes: [SectionRoute] {
+        livePath + videosPath + mylistPath + historyPath + capturesPath
+            + reservationsPath + offlinePath + timetablePath + settingsPath
+            + mypagePath
+    }
+
     /// Client settings (My List, watch history, pinned channels and the other
     /// typed keys). Persisted locally; synced with the server when logged in and
     /// `syncSettings` is on.
@@ -364,6 +373,11 @@ final class AppModel {
         playback.onRestore = { [weak self] item in
             self?.restore(item)
         }
+        // PlaybackController stays independent of navigation: it only asks
+        // whether the player screen of its item is still open.
+        playback.isPlayerRouteOpen = { [weak self] item in
+            self?.isPlayerRouteOpen(for: item) ?? false
+        }
         playback.onVideoProgress = { [weak self] video, position in
             self?.handleVideoProgress(video: video, position: position)
         }
@@ -372,9 +386,58 @@ final class AppModel {
         }
     }
 
+    /// Whether a navigation stack still shows the player screen of `item`.
+    ///
+    /// Leaving the player by switching tab, sidebar section or window interface
+    /// keeps the route in its path, so the playback keeps running and the
+    /// screen can be returned to with the same player (see
+    /// `PlaybackController.viewDisappeared(for:)`). The live screen switches
+    /// channels in place, so its route keeps the channel it was opened with and
+    /// any live route holds a live playback; recorded and saved videos are
+    /// matched by program.
+    func isPlayerRouteOpen(for item: PlaybackItem) -> Bool {
+        for route in openRoutes {
+            switch item {
+            case .live:
+                if case .live = route { return true }
+            case .video(let video), .offline(let video):
+                switch route {
+                case .video(let other), .offline(let other):
+                    if other.id == video.id { return true }
+                default:
+                    break
+                }
+            }
+        }
+        return false
+    }
+
+    /// Called by the root view after any navigation path changed: a player
+    /// screen that was popped (the back button, the swipe gesture, a section
+    /// switch that rebuilt its stack) stops the playback, while a screen that
+    /// is only hidden or covered keeps it running.
+    func navigationPathsDidChange() {
+        playback.stopIfScreenClosed()
+    }
+
     /// Brings the screen that owns `item` back to the front, used when the
     /// user taps the picture-in-picture restore button.
     func restore(_ item: PlaybackItem) {
+        // The restore puts the screen in the section it belongs to, so player
+        // screens that are still open elsewhere (the マイページ hub and the
+        // オフライン section share the saved video screen, for example) are
+        // closed with it.
+        livePath = Self.playerRoutesClosed(livePath)
+        videosPath = Self.playerRoutesClosed(videosPath)
+        mylistPath = Self.playerRoutesClosed(mylistPath)
+        historyPath = Self.playerRoutesClosed(historyPath)
+        capturesPath = Self.playerRoutesClosed(capturesPath)
+        reservationsPath = Self.playerRoutesClosed(reservationsPath)
+        offlinePath = Self.playerRoutesClosed(offlinePath)
+        timetablePath = Self.playerRoutesClosed(timetablePath)
+        settingsPath = Self.playerRoutesClosed(settingsPath)
+        mypagePath = Self.playerRoutesClosed(mypagePath)
+
         switch item {
         case .video(let video):
             section = .videos
@@ -393,6 +456,16 @@ final class AppModel {
             compactTab = .live
             mypagePath = []
             livePath = [.live(channel)]
+        }
+    }
+
+    /// The path without its player screens.
+    private static func playerRoutesClosed(_ path: [SectionRoute]) -> [SectionRoute] {
+        path.filter { route in
+            switch route {
+            case .live, .video, .offline: return false
+            default: return true
+            }
         }
     }
 

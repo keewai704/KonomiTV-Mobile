@@ -76,6 +76,12 @@ final class PlaybackController {
     /// AppModel uses it to select the section and push the matching screen.
     @ObservationIgnored var onRestore: (@MainActor (PlaybackItem) -> Void)?
 
+    /// Whether a navigation stack of `AppModel` still shows the player screen
+    /// of an item. Set by AppModel, so the controller stays independent of
+    /// navigation: it only asks whether the screen of the running item is open
+    /// (see `viewDisappeared(for:)`).
+    @ObservationIgnored var isPlayerRouteOpen: (@MainActor (PlaybackItem) -> Bool)?
+
     /// Called for every position tick of a recorded program, so AppModel can
     /// keep the watch history up to date.
     @ObservationIgnored var onVideoProgress: (@MainActor (RecordedProgram, Double) -> Void)?
@@ -172,6 +178,10 @@ final class PlaybackController {
         if case .live? = item { return true }
         return false
     }
+
+    /// Size of libVLC's video output view next to the size of the drawable it
+    /// has to fill, read by the layout UI test (`playback.videoOutput`).
+    var videoOutputDescription: String { hostViewController.videoOutputDescription }
 
     /// libVLC has handed its picture-in-picture window controller to the
     /// drawable, so the PiP button can start it.
@@ -270,6 +280,9 @@ final class PlaybackController {
 
     /// Item whose detail screen is currently on screen.
     @ObservationIgnored private var visibleItem: PlaybackItem?
+    /// A screen that just disappeared, and the deferred check whether leaving
+    /// it closed the player (see `viewDisappeared(for:)`).
+    @ObservationIgnored private var pendingScreenClosedCheck: (item: PlaybackItem, task: Task<Void, Never>)?
     /// Set between a PiP restore request and the resulting PiP stop, so the
     /// stop does not tear down the playback that was just restored.
     @ObservationIgnored private var isRestoringFromPictureInPicture = false
@@ -447,6 +460,10 @@ final class PlaybackController {
         }
 
         pendingStartPosition = 0
+        // A parked "did leaving the screen close it?" check belongs to the
+        // playback that is stopping.
+        pendingScreenClosedCheck?.task.cancel()
+        pendingScreenClosedCheck = nil
         keepAliveTask?.cancel()
         keepAliveTask = nil
         backgroundTask?.cancel()
@@ -726,6 +743,13 @@ final class PlaybackController {
     // MARK: - Screen visibility
 
     func viewAppeared(for playbackItem: PlaybackItem) {
+        // A screen that shows the running item again arrived before the parked
+        // disappear of the old one was judged: returning to the player must
+        // never stop the playback that is already running.
+        if let pending = pendingScreenClosedCheck, pending.item == playbackItem {
+            pending.task.cancel()
+            pendingScreenClosedCheck = nil
+        }
         visibleItem = playbackItem
         // Coming back from picture in picture (or the background) restarts the
         // data broadcasting page.
@@ -734,15 +758,57 @@ final class PlaybackController {
 
     /// Called when the detail screen goes away.
     ///
-    /// Playback keeps running while PiP is active; otherwise it is stopped.
-    /// The guard ignores the disappear of a screen that is no longer the
-    /// current item (SwiftUI can deliver it after the next screen appeared).
+    /// Switching tab or sidebar section, pushing another screen on top of the
+    /// player or moving the window between the tab bar and the sidebar
+    /// interfaces only hides the screen: the navigation path keeps its route,
+    /// playback keeps running (audio included, like background playback) and
+    /// returning to the screen reuses the running player, because `play`
+    /// returns early for the same item. Only a closed screen (its route popped
+    /// from the path, the back button) stops the playback, while PiP keeps it
+    /// running as well.
+    ///
+    /// The decision waits one main actor turn: SwiftUI updates the navigation
+    /// path binding of a popped screen with the pop and can deliver
+    /// `onDisappear` before it has landed. The guard ignores the disappear of a
+    /// screen that is no longer the current item (SwiftUI can deliver it after
+    /// the next screen appeared).
     func viewDisappeared(for playbackItem: PlaybackItem) {
         guard let current = item, current == playbackItem else { return }
         if visibleItem == playbackItem {
             visibleItem = nil
         }
+        pendingScreenClosedCheck?.task.cancel()
+        pendingScreenClosedCheck = nil
         guard !isPictureInPictureActive else { return }
+
+        let task = Task { @MainActor [weak self] in
+            // Let the navigation path update of this screen land first.
+            await Task.yield()
+            guard !Task.isCancelled, let self else { return }
+            if let pending = self.pendingScreenClosedCheck, pending.item == playbackItem {
+                self.pendingScreenClosedCheck = nil
+            }
+            self.stopIfScreenClosed(playbackItem)
+        }
+        pendingScreenClosedCheck = (playbackItem, task)
+    }
+
+    /// Stops the playback when no navigation stack shows the player screen of
+    /// the item any more.
+    ///
+    /// `AppModel` calls it after any navigation path changed, which covers a
+    /// pop whose path update reaches the screen after its `onDisappear`. An
+    /// item without navigation information (a screen that never reported
+    /// appearing) keeps the old behavior and stops.
+    func stopIfScreenClosed(_ playbackItem: PlaybackItem? = nil) {
+        guard let current = item else { return }
+        if let playbackItem, current != playbackItem { return }
+        // A screen that is on screen right now keeps its playback even when the
+        // path it was pushed from is not known yet.
+        guard visibleItem != current else { return }
+        guard !isPictureInPictureActive else { return }
+        guard isPlayerRouteOpen?(current) != true else { return }
+        AppLog.playback.notice("player screen closed: stopping \(current.logName, privacy: .public)")
         stop()
     }
 

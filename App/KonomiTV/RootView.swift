@@ -30,6 +30,13 @@ struct RootView: View {
         .task {
             await model.restoreSession()
         }
+        // A popped player screen ends playback even when its `onDisappear`
+        // arrives before the pop has reached the navigation path. Switching tab
+        // or section leaves every route in place, so playback keeps running
+        // there (see `PlaybackController.viewDisappeared(for:)`).
+        .onChange(of: model.openRoutes) { _, _ in
+            model.navigationPathsDidChange()
+        }
     }
 
     private var isCompact: Bool { windowLayout.isCompact }
@@ -62,6 +69,7 @@ struct RootView: View {
                 identifier: "playback.pip"
             )
             statusText(String(playback.pictureInPictureStartCount), identifier: "playback.pipStarts")
+            statusText(playback.videoOutputDescription, identifier: "playback.videoOutput")
             statusText(
                 playback.isPictureInPictureSupported ? "true" : "false",
                 identifier: "playback.pipSupported"

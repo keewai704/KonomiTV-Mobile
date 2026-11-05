@@ -190,8 +190,9 @@ final class PlayerPictureInPictureMediaController: NSObject, @unchecked Sendable
 /// The view libVLC renders the video into.
 ///
 /// libVLC adds its `AVSampleBufferDisplayLayer` view as a subview and positions
-/// it itself (letterboxing included), so this is a plain container. It also
-/// carries the picture-in-picture selectors libVLC looks for.
+/// it itself (letterboxing included), so this is a plain container that keeps
+/// that view at its own size (see `layoutSubviews()`). It also carries the
+/// picture-in-picture selectors libVLC looks for.
 ///
 /// It does not declare `VLCDrawable`: that protocol's `bounds` is a method,
 /// which UIView's `bounds` property cannot witness in Swift. libVLC never
@@ -202,6 +203,10 @@ final class PlayerDrawableView: UIView, PlayerPictureInPictureDrawable {
     /// Shared with libVLC's PiP window controller.
     let pipMedia = PlayerPictureInPictureMediaController()
 
+    /// Size of this drawable in the previous layout pass; the video output
+    /// view libVLC added is stretched from it to the new bounds.
+    private var lastLayoutSize: CGSize = .zero
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
@@ -211,6 +216,51 @@ final class PlayerDrawableView: UIView, PlayerPictureInPictureDrawable {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Keeps libVLC's video output at the size of this drawable.
+    ///
+    /// libVLC adds its own video output view (an `AVSampleBufferDisplayLayer`
+    /// backed view) as a subview, positions it once and leaves the autoresizing
+    /// mask empty. Resizing this drawable alone (a fullscreen toggle, a window
+    /// resize in Split View or Stage Manager, a rotation) therefore left the
+    /// picture at its old size until the next load. A subview or layer that
+    /// filled the previous bounds follows the new ones; anything libVLC placed
+    /// smaller (a letterboxed picture, the BML video plane) is left as libVLC
+    /// positioned it.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+
+        let newBounds = bounds
+        let previous = lastLayoutSize
+        lastLayoutSize = newBounds.size
+        guard newBounds.width >= 1, newBounds.height >= 1 else { return }
+
+        // No animated stretching: the video output has to be at its final size
+        // in this pass.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for subview in subviews where tracks(previous: previous, frame: subview.frame) {
+            subview.frame = newBounds
+        }
+        // Layers libVLC added to this view's own layer. The backing layer of a
+        // subview follows its view (above) and is left out, so the two never
+        // disagree.
+        let subviewLayers = Set(subviews.map(\.layer))
+        for sublayer in layer.sublayers ?? [] {
+            guard !subviewLayers.contains(sublayer),
+                  tracks(previous: previous, frame: sublayer.frame) else { continue }
+            sublayer.frame = newBounds
+        }
+        CATransaction.commit()
+    }
+
+    /// Whether a rect filled this drawable in the previous layout pass (or
+    /// fills it now, for the first pass after libVLC added its view).
+    private func tracks(previous: CGSize, frame: CGRect) -> Bool {
+        let reference = previous.width >= 1 && previous.height >= 1 ? previous : bounds.size
+        guard reference.width >= 1, reference.height >= 1 else { return false }
+        return frame.width >= reference.width - 0.5 && frame.height >= reference.height - 0.5
     }
 
     // MARK: - PlayerPictureInPictureDrawable (VLCPictureInPictureDrawable)

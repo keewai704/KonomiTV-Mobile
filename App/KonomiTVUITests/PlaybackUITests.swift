@@ -1,6 +1,7 @@
+import UIKit
 import XCTest
 
-/// 再生: バックグラウンド再生とピクチャ・イン・ピクチャ。
+/// 再生: バックグラウンド再生、ピクチャ・イン・ピクチャ、画面の移動と回転。
 ///
 /// 再生はアプリ全体で 1 台の PlaybackController（VLCKit の VLCMediaPlayer）と
 /// 共有の PlayerHostViewController が所有するため、画面を離れても PiP と
@@ -106,6 +107,98 @@ final class PlaybackUITests: KonomiTVUITestCase {
         )
     }
 
+    // MARK: - Switching screens
+
+    /// 再生中にほかのタブ（大画面ではサイドバーのほかのセクション）へ移って
+    /// 戻っても、再生は止まらずに同じストリームのまま続く。
+    ///
+    /// 画面を離れることは再生の停止ではない（バックグラウンド再生と同じ扱い）。
+    /// 新しいストリームが始まったかどうかは、モックサーバーが数えているライブ
+    /// ストリームの接続回数（`/__mock/stats` の `live_total`）で判定する:
+    /// 再生を作り直すと、ライブの MPEG-TS ストリームへの接続もやり直しになる。
+    func testSwitchingSectionKeepsLivePlaybackRunning() {
+        let app = startApp(disableAutoPiP: true)
+        openLive(in: app)
+
+        let streamsBefore = MockServerControl.intValue("live_total")
+        XCTAssertGreaterThan(streamsBefore, 0, "ライブのストリームが始まっていない")
+        let positionBefore = position(in: app)
+
+        openSection(.videos, in: app)
+
+        // ほかのセクションを開いている間も再生は続く。
+        let state = uiElement(app, "playback.state")
+        XCTAssertTrue(
+            waitForLabel(state, equals: "playing", timeout: TestTimeout.ui),
+            "セクションを移ると再生が止まる (状態: \(state.label))"
+        )
+
+        openSection(.live, in: app)
+
+        XCTAssertTrue(
+            uiElement(app, "player.view").waitForExistence(timeout: TestTimeout.ui),
+            "テレビに戻ってもプレイヤーが表示されない"
+        )
+        let playerState = uiElement(app, "player.state")
+        XCTAssertTrue(
+            waitForLabel(playerState, equals: "playing", timeout: TestTimeout.playback),
+            "テレビに戻ると再生が playing にならない (状態: \(playerState.label))"
+        )
+        XCTAssertEqual(
+            MockServerControl.intValue("live_total"),
+            streamsBefore,
+            "テレビに戻ると新しいストリームが始まっている"
+        )
+        XCTAssertTrue(
+            waitForPlaybackPosition(above: positionBefore + 3, in: app),
+            "テレビに戻ると再生位置が振り出しに戻っている (移る前: \(positionBefore) 秒, 現在: \(currentPosition(in: app)) 秒)"
+        )
+    }
+
+    // MARK: - Window size
+
+    /// 再生中にウインドウの大きさが変わっても（回転・Split View・Stage Manager・
+    /// 全画面表示）、libVLC の映像出力がプレイヤーの大きさに追従すること。
+    ///
+    /// 映像出力のビューは libVLC が自分で `PlayerDrawableView` に足すもので、
+    /// 親の大きさが変わっても自動では追従しない。`playback.videoOutput` は
+    /// 「映像出力の大きさ / 描画先の大きさ」を返すので、回転の前後で両者が
+    /// 一致しているかを見る。
+    func testVideoOutputFollowsWindowResize() {
+        let app = startApp(disableAutoPiP: true)
+        openLive(in: app)
+
+        rotate(.portrait, in: app)
+
+        let output = uiElement(app, "playback.videoOutput")
+        XCTAssertTrue(
+            output.waitForExistence(timeout: TestTimeout.ui),
+            "映像出力の大きさが取得できない"
+        )
+        XCTAssertTrue(
+            waitUntil(timeout: TestTimeout.playback) { output.label != "-" },
+            "libVLC の映像出力のビューが取得できない"
+        )
+        XCTAssertTrue(
+            waitUntil(timeout: TestTimeout.ui) { self.videoOutputFillsDrawable(output.label) },
+            "映像出力がプレイヤーの大きさになっていない (映像出力/描画先: \(output.label))"
+        )
+        let before = output.label
+
+        rotate(.landscapeLeft, in: app)
+
+        XCTAssertTrue(
+            waitUntil(timeout: TestTimeout.ui) {
+                let current = output.label
+                return current != before && self.videoOutputFillsDrawable(current)
+            },
+            "ウインドウを横向きにしても映像出力がプレイヤーの大きさに追従しない (前: \(before), 現在: \(output.label))"
+        )
+
+        // 後続のテストのために縦向きに戻す。
+        rotate(.portrait, in: app)
+    }
+
     // MARK: - Stopping
 
     func testLeavingPlayerWithoutPiPStopsPlayback() {
@@ -168,6 +261,19 @@ final class PlaybackUITests: KonomiTVUITestCase {
 
     private func currentPosition(in app: XCUIApplication) -> Int {
         intLabel(of: "playback.position", in: app) ?? -1
+    }
+
+    /// Whether "640x360/640x360" says that libVLC's video output view fills the
+    /// drawable (one point of tolerance for rounding).
+    private func videoOutputFillsDrawable(_ description: String) -> Bool {
+        let sides = description.split(separator: "/").map { $0.split(separator: "x") }
+        guard sides.count == 2, sides[0].count == 2, sides[1].count == 2,
+              let outputWidth = Double(sides[0][0]), let outputHeight = Double(sides[0][1]),
+              let drawableWidth = Double(sides[1][0]), let drawableHeight = Double(sides[1][1]),
+              drawableWidth >= 1, drawableHeight >= 1 else {
+            return false
+        }
+        return abs(outputWidth - drawableWidth) <= 1 && abs(outputHeight - drawableHeight) <= 1
     }
 
     private func waitForPlaybackPosition(

@@ -122,10 +122,21 @@ final class PlayerHostViewController: UIViewController {
                 target = rect
             }
         }
-        let subviews: [UIView?] = [videoView, captionOverlay, commentOverlay]
-        for subview in subviews {
-            guard let subview, subview.frame != target else { continue }
-            subview.frame = target
+        if videoView.frame != target {
+            if videoView.frame.size != target.size {
+                // The drawable passes the new size on to libVLC's video output
+                // view in its own layout pass; ask for that pass now, so the
+                // picture never keeps the size of the previous window.
+                videoView.setNeedsLayout()
+            }
+            videoView.frame = target
+        }
+        // Both overlays lay themselves out from their bounds (captions and
+        // danmaku follow the letterboxed picture).
+        let overlays: [UIView?] = [captionOverlay, commentOverlay]
+        for overlay in overlays {
+            guard let overlay, overlay.frame != target else { continue }
+            overlay.frame = target
         }
     }
 
@@ -143,6 +154,24 @@ final class PlayerHostViewController: UIViewController {
             width: size.width,
             height: size.height
         ).integral
+    }
+
+    // MARK: - Video output
+
+    /// Size of the view libVLC renders into, next to the size of the drawable
+    /// it has to fill ("1280x720/1280x720"; "-" before libVLC added its view).
+    ///
+    /// The layout UI test reads it through `playback.videoOutput` and asserts
+    /// that a window resize (rotation, Split View, Stage Manager, fullscreen)
+    /// resizes the picture with the player.
+    var videoOutputDescription: String {
+        let largest = videoView.subviews.max {
+            $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height
+        }
+        guard let largest else { return "-" }
+        let drawable = videoView.bounds.size
+        return "\(Int(largest.frame.width.rounded()))x\(Int(largest.frame.height.rounded()))"
+            + "/\(Int(drawable.width.rounded()))x\(Int(drawable.height.rounded()))"
     }
 
     // MARK: - Picture in picture

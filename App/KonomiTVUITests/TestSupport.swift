@@ -682,6 +682,9 @@ func tapWhenHittable(
             dismissKeyboard(in: app)
         } else {
             app.swipeUp()
+            // A tap while the list still decelerates only stops the scroll, so
+            // the swipe has to settle before the next check taps.
+            RunLoop.current.run(until: Date().addingTimeInterval(1.0))
         }
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
     }
