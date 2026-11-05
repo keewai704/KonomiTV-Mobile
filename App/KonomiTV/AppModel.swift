@@ -116,11 +116,12 @@ enum MypageRow: String, CaseIterable, Identifiable, Hashable, Sendable {
     var systemImage: String { section.systemImage }
 }
 
-/// Screens a section's navigation stack can push.
+/// A screen pushed on a navigation stack.
 ///
 /// The same route type is used by every section, so a screen (the timetable
 /// from the TV screen, a series episode from a video detail) can push another
-/// screen wherever it is shown.
+/// screen wherever it is shown. `homeSection` says which section's stack owns
+/// a screen when the window switches between the tab bar and the sidebar.
 enum SectionRoute: Hashable, Sendable {
     case live(LiveChannel)
     case video(RecordedProgram)
@@ -147,6 +148,35 @@ enum SectionRoute: Hashable, Sendable {
     case maintenance
     case serverLogs(String)
     case about
+
+    /// The section whose side of the navigation a screen belongs to.
+    ///
+    /// The compact (tab bar) interface reaches the sections without a tab
+    /// through the マイページ hub, so a screen has to move between the hub's
+    /// stack and the section's stack when the window switches interfaces.
+    var homeSection: AppSection {
+        switch self {
+        case .live:
+            return .live
+        case .video, .videoList, .seriesList, .series:
+            return .videos
+        case .timetable:
+            return .timetable
+        case .mylist:
+            return .mylist
+        case .history:
+            return .history
+        case .captures, .captureProgram:
+            return .captures
+        case .reservations, .reservation, .reservationConditions:
+            return .reservations
+        case .offlineList, .offline:
+            return .offline
+        case .settings, .pinnedChannels, .accountSettings, .adminUsers, .serverSettings,
+             .maintenance, .serverLogs, .about:
+            return .settings
+        }
+    }
 }
 
 /// Broadcast type (or the pinned channels) selected by the channel pickers.
@@ -320,6 +350,9 @@ final class AppModel {
     /// Seconds between position updates of an existing history entry.
     @ObservationIgnored private let watchedHistoryUpdateIntervalSeconds: Double = 10
     @ObservationIgnored private var pendingSettingsUpload: Task<Void, Never>?
+    /// The deferred check whether leaving a screen closed the player (see
+    /// `navigationPathsDidChange()`).
+    @ObservationIgnored private var navigationCheckTask: Task<Void, Never>?
 
     // Watch history bookkeeping for the video that is currently playing.
     @ObservationIgnored private var watchedVideoID: Int?
@@ -412,12 +445,106 @@ final class AppModel {
         return false
     }
 
+    /// Whether the window currently shows the tab bar interface. Set by
+    /// `RootView`, so the stacks' path bindings know which interface is on
+    /// screen (see `RootView.interfaceDidChange`).
+    private(set) var showsCompactInterface = true
+
     /// Called by the root view after any navigation path changed: a player
     /// screen that was popped (the back button, the swipe gesture, a section
     /// switch that rebuilt its stack) stops the playback, while a screen that
     /// is only hidden or covered keeps it running.
+    ///
+    /// The decision waits one main actor turn: switching between the tab bar
+    /// and the sidebar tears the old stacks down and builds the new ones one
+    /// layout pass later, and the screens move between stacks meanwhile.
     func navigationPathsDidChange() {
-        playback.stopIfScreenClosed()
+        navigationCheckTask?.cancel()
+        let task = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled, let self else { return }
+            self.playback.stopIfScreenClosed()
+        }
+        navigationCheckTask = task
+    }
+
+    /// The navigation path of a section's stack.
+    func path(for section: AppSection) -> [SectionRoute] {
+        switch section {
+        case .live: return livePath
+        case .timetable: return timetablePath
+        case .videos: return videosPath
+        case .mylist: return mylistPath
+        case .history: return historyPath
+        case .captures: return capturesPath
+        case .reservations: return reservationsPath
+        case .offline: return offlinePath
+        case .settings: return settingsPath
+        }
+    }
+
+    /// Replaces the navigation path of a section's stack.
+    func setPath(_ path: [SectionRoute], for section: AppSection) {
+        switch section {
+        case .live: livePath = path
+        case .timetable: timetablePath = path
+        case .videos: videosPath = path
+        case .mylist: mylistPath = path
+        case .history: historyPath = path
+        case .captures: capturesPath = path
+        case .reservations: reservationsPath = path
+        case .offline: offlinePath = path
+        case .settings: settingsPath = path
+        }
+    }
+
+    /// Applies a switch between the tab bar and the sidebar interface.
+    ///
+    /// The screen the user was looking at has to stay on screen, and a running
+    /// player (its screen is a route of one of the stacks) must not disappear:
+    /// that would stop the playback. The tab bar shows テレビ and ビデオ with
+    /// their own tab and everything else through the マイページ hub, while the
+    /// sidebar shows one section at a time. So the screens of the interface
+    /// that goes away are moved into the stack the new interface shows:
+    ///
+    /// - tab bar → sidebar: the hub's screens belong to the section of the
+    ///   screen they show, so they become that section's stack.
+    /// - sidebar → tab bar: a section with a tab keeps its stack; any other
+    ///   section's screens move into the hub's stack and the hub is selected.
+    func interfaceDidChange(isCompact: Bool) {
+        guard isCompact != showsCompactInterface else { return }
+        showsCompactInterface = isCompact
+        if isCompact {
+            // テレビ / ビデオ have a tab of their own and keep their stack.
+            if section == .live || section == .videos {
+                compactTab = section == .live ? .live : .videos
+                return
+            }
+            // The section the sidebar shows has no tab of its own: the hub
+            // shows it. Its screens move there, so the screen (a player among
+            // them) stays on screen.
+            let screens = path(for: section)
+            guard compactTab == .mypage || !screens.isEmpty else { return }
+            compactTab = .mypage
+            guard !screens.isEmpty else { return }
+            mypagePath = screens
+            setPath([], for: section)
+        } else {
+            switch compactTab {
+            case .live:
+                section = .live
+            case .videos:
+                section = .videos
+            case .mypage:
+                let screens = mypagePath
+                guard !screens.isEmpty else { return }
+                // The screen on top decides which section's stack shows them.
+                let section = screens.compactMap(\.homeSection).last ?? .settings
+                self.section = section
+                setPath(screens, for: section)
+                mypagePath = []
+            }
+        }
     }
 
     /// Brings the screen that owns `item` back to the front, used when the

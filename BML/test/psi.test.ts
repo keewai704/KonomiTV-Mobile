@@ -135,10 +135,78 @@ test('reads a reused dictionary across pushes', () => {
   assert.deepEqual(decoded, [0x0000, 0x0011, 0x0011, 0x0000, 0x0000])
 })
 
-test('drops the stream when the magic is broken', () => {
+test('drops a chunk whose magic is broken', () => {
   const broken = encodeChunk([{ pid: 0x0000, section: section(16, 1) }], 0)
   broken[0] = 0
   assert.deepEqual(readSections(broken), [])
+})
+
+test('reads the stream again after a broken chunk', () => {
+  // 実放送のアーカイブは psisiarc のプロセスが入れ替わったり配信が途切れたり
+  // して、チャンクの繋ぎ目が壊れることがある。壊れたチャンクのあとも読み続け、
+  // 読み込み中のまま止まらないこと。
+  const pat = { pid: 0x0000, section: section(16, 1) }
+  const sdt = { pid: 0x0011, section: section(40, 2) }
+  const tot = { pid: 0x0014, section: section(9, 3) }
+  const broken = encodeChunk([{ pid: 0x0120, section: section(80, 4) }], 1)
+  broken[0] = 0x00
+  broken[1] = 0x11
+  const data = new Uint8Array([
+    ...encodeChunk([pat], 0),
+    ...broken,
+    ...encodeChunk([sdt, tot], 2),
+  ])
+  const parser = new PSIArchivedDataParser()
+  const decoded: number[] = []
+  parser.push(data, (_second, _packets, pid) => decoded.push(pid))
+  assert.deepEqual(decoded, [0x0000, 0x0011, 0x0014])
+  assert.equal(parser.droppedChunks, 1)
+})
+
+test('reads the stream again after a chunk that reuses a lost dictionary', () => {
+  // psisiarc が入れ替わると、辞書 ID (4096 以上) が前のチャンクの辞書にない
+  // ことがある。そのチャンクだけ捨てて、次のチャンクから読み直すこと。
+  const pat = { pid: 0x0000, section: section(16, 1) }
+  const sdt = { pid: 0x0011, section: section(40, 2) }
+  const encoder = new ArchiveEncoder()
+  const first = encoder.encode([pat], 0)
+  // 辞書の先頭の値を、前の辞書にない ID (4096 + 9) への参照にする
+  const second = encoder.encode([sdt], 1)
+  const headerStart = 32 + 2 * 4
+  second[headerStart] = (4096 + 9) & 0xff
+  second[headerStart + 1] = ((4096 + 9) >> 8) & 0xff
+  const third = encodeChunk([{ pid: 0x0014, section: section(9, 3) }], 2)
+
+  const parser = new PSIArchivedDataParser()
+  const decoded: number[] = []
+  parser.push(
+    new Uint8Array([...first, ...second, ...third]),
+    (_second, _packets, pid) => decoded.push(pid),
+  )
+  assert.deepEqual(decoded, [0x0000, 0x0014])
+  assert.equal(parser.droppedChunks, 1)
+  // 読み飛ばしは reset() で 0 に戻る
+  parser.reset()
+  assert.equal(parser.droppedChunks, 0)
+})
+
+test('finds the next chunk even when the broken chunk is split over pushes', () => {
+  const pat = { pid: 0x0000, section: section(16, 1) }
+  const sdt = { pid: 0x0011, section: section(40, 2) }
+  const broken = encodeChunk([{ pid: 0x0120, section: section(80, 3) }], 1)
+  broken[0] = 0x47
+  const data = new Uint8Array([
+    ...encodeChunk([pat], 0),
+    ...broken,
+    ...encodeChunk([sdt], 2),
+  ])
+  const parser = new PSIArchivedDataParser()
+  const decoded: number[] = []
+  for (let offset = 0; offset < data.length; offset += 5) {
+    parser.push(data.subarray(offset, offset + 5), (_second, _packets, pid) => decoded.push(pid))
+  }
+  assert.deepEqual(decoded, [0x0000, 0x0011])
+  assert.equal(parser.droppedChunks, 1)
 })
 
 test('TS packet writer sets PID, payload unit start and continuity counter', () => {

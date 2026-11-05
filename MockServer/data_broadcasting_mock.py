@@ -8,7 +8,7 @@ KonomiTV のライブ PSI/SI アーカイブデータストリーミング API �
 形式は Web クライアント側の LivePSIArchivedDataDecoder.ts (EDCB Legacy WebUI の
 util.lua / script.js の移植) に合わせている:
 
-* 32 バイトのヘッダ (マジック 0x50737363 / 0x0d0a9a0a、各リストの長さ)
+* 32 バイトのヘッダ (マジック "Pssc" + 0x0D 0x0A 0x9A 0x0A、各リストの長さ)
 * タイムリスト (4 バイト × time_list_len): 1 件目は絶対時刻 (0x80000000 | t)、
   2 件目以降は (差分, コード数 - 1)
 * 辞書 (新規セクションは 4 バイト = セクション長 - 1 と PID、再利用は 2 バイト)
@@ -20,12 +20,17 @@ util.lua / script.js の移植) に合わせている:
 from __future__ import annotations
 
 import datetime
+import functools
 import struct
 import time
 
-# EDCB の psisiarc のマジック (リトルエンディアンで読む)
-PSISIARC_MAGIC = 0x50737363
-PSISIARC_MAGIC2 = 0x0D0A9A0A
+# psisiarc の書庫のマジックナンバー (8 バイトそのまま)
+# ref: psisiarc の Readme.txt 「マジックナンバー: Pssc\x0d\x0a\x9a\x0a」
+# 公式の読み取り (EDCB の script.js, KonomiTV の LivePSIArchivedDataDecoder.ts)
+# はこの 8 バイトだけをビッグエンディアンで読み、0x50737363 / 0x0D0A9A0A と
+# 比べている (ほかのフィールドはリトルエンディアン)。書庫には ASCII の
+# "Pssc" と 0x0D 0x0A 0x9A 0x0A がそのまま入る。
+PSISIARC_MAGIC = b"Pssc\r\n\x9a\n"
 
 # タイムリストの 1 秒あたりの単位 (クライアント側の sec 計算に合わせる)
 TIME_UNITS_PER_SECOND = 11250
@@ -289,6 +294,165 @@ def build_tot(unix_seconds: float) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# データカルーセル (DSM-CC / BML)
+# ---------------------------------------------------------------------------
+#
+# 実放送のデータ放送は、PMT が指すデータコンポーネント (地上波は
+# component_tag 0x40) の PID に DSM-CC のデータカルーセルを流す。受信機
+# (web-bml) は DII (DownloadInfoIndication, table_id 0x3B) でモジュールの
+# 一覧を受け取り、DDB (DownloadDataBlock, table_id 0x3C) でモジュールの
+# ブロックを集めて 1 つのモジュールを組み立て、その中の startup.bml を
+# 起動文書として表示する。ここではそのカルーセルを合成する
+# (STD-B24 第三分冊 第三編 6.2)。
+
+#: DSM-CC の DSF 転送ブロックサイズ (実放送と同じ 4066)
+DSMCC_BLOCK_SIZE = 4066
+#: 地上波のエントリコンポーネント (component_tag)
+ENTRY_COMPONENT_TAG = 0x40
+#: エントリモジュール (startup.bml を持つモジュール)
+ENTRY_MODULE_ID = 0x0000
+#: モジュールのバージョン
+MODULE_VERSION = 1
+#: データイベント ID (download_id の上位 4 ビット)
+DATA_EVENT_ID = 0
+#: DII の transaction_id (変わると受信機はモジュール一覧を取り直す)
+DII_TRANSACTION_ID = 1
+
+#: 起動文書 (startup.bml, EUC-JP)。実放送の BML は A プロファイルでは EUC-JP。
+BML_STARTUP_DOCUMENT = """<?xml version="1.0" encoding="EUC-JP"?>
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=EUC-JP"/>
+<title>KonomiTV モックデータ放送</title>
+<style type="text/css">
+body { background-color: #101820; color: #ffffff; }
+</style>
+</head>
+<body>
+<div id="panel">KonomiTV モックのデータ放送です。</div>
+<!-- 実放送のモジュールは画像などを含んで大きい。ここでは DDB が複数の
+     ブロックに分かれることを再現するために、この文書をパディングする。-->
+<!--PADDING-->
+</body>
+</html>
+"""
+
+
+def bml_startup_document(padding: int = 5000) -> bytes:
+    """起動文書 (startup.bml) のバイト列。"""
+    return BML_STARTUP_DOCUMENT.replace("PADDING", "x" * padding).encode("euc-jp")
+
+
+def build_module(files: list[tuple[str, str, bytes]]) -> bytes:
+    """モジュール (STD-B24 第二分冊 第二編 第9章) を MIME のマルチパートで組み立てる。
+
+    モジュールは 1 本のエンティティで、各ファイルは Content-Location と
+    Content-Type を持つ body-part として入る。web-bml は Content-Type が
+    multipart/mixed のモジュールをこの形として読む。
+    """
+    boundary = "KONOMI-BML-MODULE"
+    out = bytearray()
+    out += f'Content-Type: multipart/mixed; boundary="{boundary}"\r\n'.encode("ascii")
+    out += b"\r\n"
+    for location, content_type, body in files:
+        out += f"--{boundary}\r\n".encode("ascii")
+        out += f"Content-Location: {location}\r\n".encode("ascii")
+        out += f"Content-Type: {content_type}\r\n".encode("ascii")
+        out += b"\r\n"
+        out += body
+        out += b"\r\n"
+    out += f"--{boundary}--\r\n".encode("ascii")
+    return bytes(out)
+
+
+def _dsmcc_message_header(message_id: int, identifier: int, body: bytes) -> bytes:
+    """dsmccMessageHeader / dsmccDownloadDataHeader + メッセージ本体。"""
+    return (
+        bytes([0x11, 0x03])                   # protocolDiscriminator, dsmccType
+        + struct.pack(">H", message_id)
+        + struct.pack(">I", identifier)        # transactionId / downloadId
+        + bytes([0x00, 0x00])                  # reserved, adaptationLength
+        + struct.pack(">H", len(body))
+        + body
+    )
+
+
+def _dsmcc_section(
+    table_id: int,
+    body: bytes,
+    section_number: int = 0,
+    last_section_number: int = 0,
+) -> bytes:
+    """DSM-CC のセクション (ロング形式 + CRC32) を組み立てる。"""
+    section_length = 5 + len(body) + 4
+    header = bytes([
+        table_id,
+        0xB0 | ((section_length >> 8) & 0x0F),
+        section_length & 0xFF,
+        0x00, 0x00,           # table_id_extension (DII / DDB では未使用)
+        0xC1,                 # reserved=11, version=0, current_next_indicator=1
+        section_number & 0xFF,
+        last_section_number & 0xFF,
+    ])
+    section = header + body
+    return section + struct.pack(">I", crc32_mpeg(section))
+
+
+def build_dii(module_size: int, module_version: int = MODULE_VERSION) -> bytes:
+    """DII (DownloadInfoIndication, table_id 0x3B)。
+
+    エントリモジュール 1 本を持つ。モジュールの Type 記述子 (タグ 0x01) に
+    multipart/mixed を書く (実放送と同じ)。
+    """
+    type_descriptor = descriptor(0x01, b"multipart/mixed")
+    body = struct.pack(">I", (DATA_EVENT_ID << 28) | 1)   # downloadId
+    body += struct.pack(">H", DSMCC_BLOCK_SIZE)          # blockSize
+    body += bytes([0x00, 0x00])                          # windowSize, ackPeriod
+    body += struct.pack(">I", 0)                         # tCDownloadWindow
+    body += struct.pack(">I", 0)                         # tCDownloadScenario
+    body += struct.pack(">H", 0)                         # compatibilityDescriptorLength
+    body += struct.pack(">H", 1)                         # numberOfModules
+    body += struct.pack(">H", ENTRY_MODULE_ID)
+    body += struct.pack(">I", module_size)
+    body += bytes([module_version, len(type_descriptor)]) + type_descriptor
+    body += struct.pack(">H", 0)                         # privateDataLength
+    message = _dsmcc_message_header(0x1002, DII_TRANSACTION_ID, body)
+    return _dsmcc_section(0x3B, message)
+
+
+def build_ddb(module: bytes, block_number: int, module_version: int = MODULE_VERSION) -> bytes:
+    """DDB (DownloadDataBlock, table_id 0x3C) の 1 ブロック。"""
+    start = block_number * DSMCC_BLOCK_SIZE
+    block = module[start:start + DSMCC_BLOCK_SIZE]
+    total_blocks = (len(module) + DSMCC_BLOCK_SIZE - 1) // DSMCC_BLOCK_SIZE
+    body = struct.pack(">H", ENTRY_MODULE_ID)
+    body += bytes([module_version, 0x00])                 # moduleVersion, reserved
+    body += struct.pack(">H", block_number)
+    body += block
+    message = _dsmcc_message_header(0x1003, (DATA_EVENT_ID << 28) | 1, body)
+    return _dsmcc_section(
+        0x3C, message,
+        section_number=block_number & 0xFF,
+        last_section_number=max(total_blocks - 1, 0) & 0xFF,
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def data_carousel_sections() -> tuple[bytes, tuple[bytes, ...]]:
+    """データカルーセルの 1 周期 (DII と DDB)。
+
+    起動文書 (startup.bml) を 1 本持つモジュールを、実放送と同じ
+    DSF 転送ブロック (4066 バイト) に分けて各ブロックを DDB にする。
+    """
+    module = build_module([
+        ("startup.bml", "application/x-arib-bml", bml_startup_document()),
+    ])
+    blocks = (len(module) + DSMCC_BLOCK_SIZE - 1) // DSMCC_BLOCK_SIZE
+    return build_dii(len(module)), tuple(build_ddb(module, index) for index in range(blocks))
+
+
+# ---------------------------------------------------------------------------
 # psisiarc
 # ---------------------------------------------------------------------------
 
@@ -356,10 +520,9 @@ class PSIArchiveEncoder:
         code_list_len = len(sections)
 
         out = bytearray()
+        out += PSISIARC_MAGIC
         out += struct.pack(
-            "<IIHHHHIII",
-            PSISIARC_MAGIC,
-            PSISIARC_MAGIC2,
+            "<HHHHIII",
             0,  # 予約 (+8)
             time_list_len,
             len(dictionary),
@@ -469,8 +632,7 @@ def decode_psi_archived_data(data: bytes) -> list[tuple[float, int, bytes]]:
             code_list_len = _read_u32(data, position + 24)
 
             if (
-                _read_u32(data, position) != PSISIARC_MAGIC
-                or _read_u32(data, position + 4) != PSISIARC_MAGIC2
+                data[position:position + 8] != PSISIARC_MAGIC
                 or dictionary_window_len < dictionary_len
                 or dictionary_buffer_size < dictionary_data_size
                 or dictionary_window_len > 65536 - 4096
@@ -641,7 +803,30 @@ def build_sections(
     present = _event_from_program(channel.get("program_present"), 100)
     following = _event_from_program(channel.get("program_following"), 101)
 
-    sections: list[tuple[int, bytes]] = [
+    return [section for chunk in build_section_chunks(
+        channel, include_data_component, current_time,
+    ) for section in chunk]
+
+
+def build_section_chunks(
+    channel: dict,
+    include_data_component: bool,
+    current_time: float | None = None,
+) -> list[list[tuple[int, bytes]]]:
+    """1 周期ぶんのセクションを 2 チャンクに分けて返す。
+
+    1 チャンク目に PAT / PMT / SDT とデータカルーセルの DII を、2 チャンク目に
+    EIT[p/f] / TOT とデータカルーセルの DDB (モジュールのブロック) を入れる。
+    実放送のアーカイブも、1 秒ぶんに届いたセクションがまとめて 1 チャンクに
+    なる (クライアントは複数チャンクの連結をそのまま読める)。
+    """
+    now = time.time() if current_time is None else current_time
+    service_id = int(channel.get("service_id") or 1024)
+    network_id = int(channel.get("network_id") or 0)
+    present = _event_from_program(channel.get("program_present"), 100)
+    following = _event_from_program(channel.get("program_following"), 101)
+
+    first: list[tuple[int, bytes]] = [
         (0x0000, build_pat(service_id, 0x1000)),
         (0x1000, build_pmt(
             service_id,
@@ -653,15 +838,23 @@ def build_sections(
             service_name=str(channel.get("name") or "KonomiTV Mock"),
         )),
     ]
+    second: list[tuple[int, bytes]] = []
     for section in build_eit_present_following(
         service_id,
         network_id,
         present=present,
         following=following,
     ):
-        sections.append((0x0012, section))
-    sections.append((0x0014, build_tot(now)))
-    return sections
+        second.append((0x0012, section))
+    second.append((0x0014, build_tot(now)))
+
+    if include_data_component:
+        dii, ddbs = data_carousel_sections()
+        first.append((DATA_COMPONENT_PID, dii))
+        for ddb in ddbs:
+            second.append((DATA_COMPONENT_PID, ddb))
+
+    return [first, second]
 
 
 def iter_psi_archived_data(
@@ -675,11 +868,8 @@ def iter_psi_archived_data(
     encoder = PSIArchiveEncoder()
     while True:
         now = time.time()
-        sections = build_sections(channel, include_data_component, now)
-        # 1 チャンクに PAT/PMT/SDT を、続くチャンクに EIT[p/f] と TOT を入れる
-        # (クライアント側は複数チャンクの連結をそのまま読める)
-        yield encoder.encode(sections[:3], now)
-        yield encoder.encode(sections[3:], now)
+        for chunk in build_section_chunks(channel, include_data_component, now):
+            yield encoder.encode(chunk, now)
         time.sleep(interval)
 
 

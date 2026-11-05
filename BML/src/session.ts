@@ -97,6 +97,12 @@ export class DataBroadcastingSession {
   private packetWriter = new TSPacketWriter()
   private tsStream: TSReaderLike | null = null
   private psiRequest: AbortController | null = null
+  /** 直前に報告した、捨てたチャンクの数 (同じ数を何度も報告しない) */
+  private lastReportedDroppedChunks = 0
+  /** BML ブラウザが文書を読み終えたか (load を受けたか) */
+  private isBrowserLoaded = false
+  /** stop() 済みか (止めたページからネイティブへ報告しない) */
+  private isStopped = false
   private greg: string[] = new Array(64).fill('')
 
   constructor(config: BMLPageConfig, bridge: Bridge = new Bridge()) {
@@ -111,6 +117,9 @@ export class DataBroadcastingSession {
   start(): void {
     this.isVisible = true
     this.lastReportedState = ''
+    this.isBrowserLoaded = false
+    this.isStopped = false
+    this.lastReportedDroppedChunks = 0
     this.setState('loading')
     try {
       seedReceiverInfo(this.config.receiverInfo)
@@ -133,6 +142,8 @@ export class DataBroadcastingSession {
     this.tsStream = null
     this.parser.reset()
     this.packetWriter.reset()
+    this.isBrowserLoaded = false
+    this.lastReportedDroppedChunks = 0
 
     const browser = this.browser
     this.browser = null
@@ -146,6 +157,9 @@ export class DataBroadcastingSession {
     }
     this.bridge.videoRect(null, this.pageSize)
     this.setState('invisible')
+    // 以降の遅れて届いた応答 (取得の失敗など) は新しいページの状態を
+    // 壊さないように報告しない。
+    this.isStopped = true
   }
 
   // MARK: - ネイティブからの操作
@@ -250,6 +264,7 @@ export class DataBroadcastingSession {
 
     browser.addEventListener('load', (event) => {
       const resolution = event.detail.resolution
+      this.isBrowserLoaded = true
       this.bmlWidth = resolution.width
       this.bmlHeight = resolution.height
       this.applyScale()
@@ -441,10 +456,19 @@ export class DataBroadcastingSession {
     })
 
     // ライブ PSI/SI アーカイブデータストリーミング API (エンドレス)
+    //
+    // ここで起きた失敗を握り潰すと、ページは loading のまま何も報告しなくなり、
+    // アプリのデータ放送ボタンが永遠に読み込み中になる。エラーは必ず報告する。
     fetch(url, { signal: controller.signal }).then(async (response) => {
-      if (!response.ok || response.body == null) {
-        this.bridge.error('データ放送', `PSI/SI アーカイブデータを取得できませんでした。(HTTP ${response.status})`, 'E300')
-        this.setState('error')
+      if (!response.ok) {
+        this.reportFailure(
+          `PSI/SI アーカイブデータを取得できませんでした。(HTTP ${response.status})`,
+          'E300', true,
+        )
+        return
+      }
+      if (response.body == null) {
+        this.reportFailure('PSI/SI アーカイブデータの応答が空でした。', 'E301', true)
         return
       }
       const reader = response.body.getReader()
@@ -455,26 +479,67 @@ export class DataBroadcastingSession {
           return
         }
         if (result.done) {
+          // 配信が終わった (ライブストリームが止まった)。まだ何も表示できて
+          // いなければエラーとして報告する (読み込み中のまま固まらせない)。
+          this.reportFailure('PSI/SI アーカイブデータの配信が終了しました。', 'E302', false)
           break
         }
-        this.parser.push(result.value, (second, packets, pid) => {
-          const pcr = Math.floor(second * 90000)
-          if (lastPCR !== pcr) {
-            this.browser?.emitMessage({ type: 'pcr', pcrBase: pcr, pcrExtension: 0 })
-            lastPCR = pcr
-          }
-          this.packetWriter.setHeader(packets, pid)
-          this.tsStream?.push(packets)
-        })
+        try {
+          this.parser.push(result.value, (second, packets, pid) => {
+            const pcr = Math.floor(second * 90000)
+            if (lastPCR !== pcr) {
+              this.browser?.emitMessage({ type: 'pcr', pcrBase: pcr, pcrExtension: 0 })
+              lastPCR = pcr
+            }
+            this.packetWriter.setHeader(packets, pid)
+            this.tsStream?.push(packets)
+          })
+        } catch (error) {
+          // 1 チャンクの失敗でストリーム全体を止めない (壊れたチャンクの
+          // 読み飛ばしは psi.ts が行う。ここに来るのは想定外の不具合)。
+          const message = error instanceof Error ? error.message : String(error)
+          // 読み取り中の辞書は信用できないので捨てる (次のチャンクから読み直す)
+          this.parser.reset()
+          this.reportFailure(`PSI/SI アーカイブデータを読めませんでした。(${message})`, 'E303', false)
+        }
+        if (this.parser.droppedChunks > this.lastReportedDroppedChunks) {
+          const dropped = this.parser.droppedChunks - this.lastReportedDroppedChunks
+          this.lastReportedDroppedChunks = this.parser.droppedChunks
+          this.bridge.log(`PSI/SI アーカイブデータの壊れたチャンクを ${dropped} 個読み飛ばしました。`)
+        }
       }
-    }).catch(() => {
-      // abort や通信断は何もしない
+    }).catch((error) => {
+      // abort はチャンネル切り替え・停止なので何もしない
+      if (controller.signal.aborted) {
+        return
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      this.reportFailure(`PSI/SI アーカイブデータに接続できませんでした。(${message})`, 'E304', true)
     }).finally(() => {
       if (this.tsStream === tsStream) {
         tsStream.close()
         this.tsStream = null
       }
     })
+  }
+
+  /**
+   * データの取得の失敗を報告する。
+   *
+   * BML ブラウザがまだ文書を読み終えていない (ページが loading のまま) なら
+   * エラーとして状態を進め、アプリのボタンが読み込み中のまま止まらないようにする。
+   * 既にデータ放送を表示できている場合は記録だけにする (表示中の画面を
+   * エラーで潰さない)。
+   */
+  private reportFailure(message: string, code: string, fatal: boolean): void {
+    if (this.isStopped) {
+      return
+    }
+    this.bridge.log(`${message} (${code})`)
+    if (fatal || !this.isBrowserLoaded) {
+      this.bridge.error('データ放送', message, code)
+      this.setState('error')
+    }
   }
 
   /** デコード結果を BML ブラウザに送る。 */

@@ -41,8 +41,12 @@ final class DataBroadcastingController {
     /// Current state of the data broadcasting page.
     private(set) var state: State = .off {
         didSet {
-            if state != oldValue {
-                AppLog.dataBroadcasting.notice("state \(oldValue.rawValue, privacy: .public) -> \(self.state.rawValue, privacy: .public)")
+            guard state != oldValue else { return }
+            AppLog.dataBroadcasting.notice("state \(oldValue.rawValue, privacy: .public) -> \(self.state.rawValue, privacy: .public)")
+            if state == .loading {
+                restartLoadingTimeout()
+            } else {
+                cancelLoadingTimeout()
             }
         }
     }
@@ -70,6 +74,18 @@ final class DataBroadcastingController {
     @ObservationIgnored private var isPageStarted = false
     /// Last size the page was told about (layout callbacks are frequent).
     @ObservationIgnored private var lastPageSize: CGSize = .zero
+    /// Timer that ends a load the page never finishes (see `loadingTimeout`).
+    @ObservationIgnored private var loadingTimeoutTask: Task<Void, Never>?
+
+    /// How long the page may stay in `.loading` before the app reports an error.
+    ///
+    /// The page posts `loading` as soon as its bundle runs and `ready` /
+    /// `unavailable` once the first PSI/SI archived data arrived (the server
+    /// waits up to 10 seconds for its archiver, and the carousel needs another
+    /// second or two), so this only fires when the page is really stuck and
+    /// would otherwise leave the remote's button spinning forever.
+    private static let loadingTimeoutSeconds = 30
+    private static var loadingTimeout: Duration { .seconds(loadingTimeoutSeconds) }
 
     private struct LiveSession {
         let channel: LiveChannel
@@ -125,6 +141,9 @@ final class DataBroadcastingController {
 
     /// Starts data broadcasting for a live channel (channel or quality change).
     func begin(channel: LiveChannel, client: APIClient, profile: StreamingProfile) {
+        AppLog.dataBroadcasting.notice(
+            "begin \(channel.displayChannelID, privacy: .public) \(profile.apiQuality(isRadioChannel: channel.isRadioChannel), privacy: .public)"
+        )
         end()
         // A radio channel has no video and no BML carousel.
         guard !channel.isRadioChannel else {
@@ -213,6 +232,9 @@ final class DataBroadcastingController {
 
         isPageStarted = true
         state = .loading
+        // `state` only restarts the timer when it changed, so a page that is
+        // reloaded while it is still loading (attach after begin) gets one too.
+        restartLoadingTimeout()
         errorMessage = nil
         enabledKeys = ["d"]
         setVideoRect(nil)
@@ -235,6 +257,7 @@ final class DataBroadcastingController {
 
     private func stopPage() {
         isPageStarted = false
+        cancelLoadingTimeout()
         page?.unload()
         setVideoRect(nil)
         enabledKeys = ["d"]
@@ -245,9 +268,29 @@ final class DataBroadcastingController {
 
     /// The page could not be loaded at all (a WebKit failure, not a BML error).
     func pageDidFail(_ message: String) {
+        cancelLoadingTimeout()
+        AppLog.dataBroadcasting.error("page failed: \(message, privacy: .public)")
         errorMessage = message
         state = .error
         setVideoRect(nil)
+    }
+
+    // MARK: - Loading timeout
+
+    /// Starts (or restarts) the timer that ends a load the page never finishes.
+    private func restartLoadingTimeout() {
+        loadingTimeoutTask?.cancel()
+        loadingTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.loadingTimeout)
+            guard !Task.isCancelled, let self, self.state == .loading else { return }
+            AppLog.dataBroadcasting.error("page stayed in loading for \(Self.loadingTimeoutSeconds)s")
+            self.pageDidFail("データ放送の読み込みがタイムアウトしました。")
+        }
+    }
+
+    private func cancelLoadingTimeout() {
+        loadingTimeoutTask?.cancel()
+        loadingTimeoutTask = nil
     }
 
     // MARK: - Page messages
@@ -277,9 +320,14 @@ final class DataBroadcastingController {
                 .compactMap { $0 as? String }
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
+            AppLog.dataBroadcasting.error("page error: \(self.errorMessage ?? "-", privacy: .public)")
             state = .error
         case "log":
-            break
+            // The page's own diagnostics (dropped PSI/SI chunks, failed
+            // requests) belong in the device log next to the state changes.
+            if let text = message["message"] as? String {
+                AppLog.dataBroadcasting.notice("page: \(text, privacy: .public)")
+            }
         default:
             break
         }

@@ -25,7 +25,15 @@ struct RootView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .measuringWindow(into: $windowLayout)
+        // The interface follows the window: a rotation, a Split View or Stage
+        // Manager resize moves the screens between the tab bar's stacks and the
+        // sidebar's stack, so the screen (and the player) the user is looking at
+        // stays where it is. This runs before the tree is rebuilt with the new
+        // layout, so the stacks that go away cannot write their empty paths
+        // over the screens that moved.
+        .measuringWindow(into: $windowLayout) { layout in
+            model.interfaceDidChange(isCompact: layout.isCompact)
+        }
         .environment(\.windowLayout, windowLayout)
         .task {
             await model.restoreSession()
@@ -102,11 +110,11 @@ struct RootView: View {
 
     private var compactInterface: some View {
         TabView(selection: compactTabSelection) {
-            sectionStack(.live)
+            sectionStack(.live, path: compactPath(for: .live, tab: .live))
                 .tabItem { tabLabel(for: .live) }
                 .tag(CompactTab.live)
 
-            sectionStack(.videos)
+            sectionStack(.videos, path: compactPath(for: .videos, tab: .videos))
                 .tabItem { tabLabel(for: .videos) }
                 .tag(CompactTab.videos)
 
@@ -199,7 +207,7 @@ struct RootView: View {
     /// The compact マイページ tab: a hub that pushes the sections the tab bar
     /// has no room for.
     private var mypageStack: some View {
-        NavigationStack(path: $model.mypagePath) {
+        NavigationStack(path: compactPath($model.mypagePath, tab: .mypage)) {
             MyPageView(model: model)
                 .navigationDestination(for: SectionRoute.self) { route in
                     destination(for: route)
@@ -207,18 +215,39 @@ struct RootView: View {
         }
     }
 
+    /// The path of a stack of the tab bar interface.
+    ///
+    /// Only the tab that is on screen may write its path. SwiftUI writes an
+    /// empty path back when it tears a stack down (the window switched to the
+    /// sidebar, another tab was selected), and that write would drop the screen
+    /// the user is looking at - a playing player among them - and stop its
+    /// playback.
+    private func compactPath(for section: AppSection, tab: CompactTab) -> Binding<[SectionRoute]> {
+        compactPath(self.path(for: section), tab: tab)
+    }
+
+    private func compactPath(_ path: Binding<[SectionRoute]>, tab: CompactTab) -> Binding<[SectionRoute]> {
+        Binding(
+            get: { path.wrappedValue },
+            set: { newValue in
+                guard model.showsCompactInterface, model.compactTab == tab else { return }
+                path.wrappedValue = newValue
+            }
+        )
+    }
+
     /// The path of the sidebar's detail stack. Switching section replaces
     /// that stack, and the stack that goes away writes an empty path back:
-    /// the write is dropped once another section is selected, so the section
-    /// keeps its screens (a running player among them) for its return.
+    /// the write is dropped once another section is selected or the window
+    /// switched to the tab bar, so the section keeps its screens (a running
+    /// player among them) for its return.
     private func sidebarPath(for section: AppSection) -> Binding<[SectionRoute]> {
         let path = self.path(for: section)
         return Binding(
             get: { path.wrappedValue },
             set: { newValue in
-                if model.section == section {
-                    path.wrappedValue = newValue
-                }
+                guard !model.showsCompactInterface, model.section == section else { return }
+                path.wrappedValue = newValue
             }
         )
     }

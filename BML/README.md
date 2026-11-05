@@ -20,7 +20,8 @@ KonomiTV for iOS のデータ放送画面です。[web-bml](https://github.com/t
 | `src/storage.ts` | localStorage / sessionStorage の代替と受信機情報 (郵便番号・都道府県) のシード |
 | `src/index.html` | ページ本体 (透明・スクロールなし) |
 | `fonts/` | web-bml 用フォント (Kosugi / Kosugi Maru, Apache License 2.0) |
-| `test/` | node:test による単体テスト (psisiarc のパーサ・メッセージ・EIT[p/f]・モックのデータ) |
+| `test/` | node:test による単体テスト (psisiarc のパーサ・メッセージ・EIT[p/f]・データカルーセル・モックのデータ) |
+| `test/fixtures/psi-archived-data.bin` | モックサーバーと同じ生成器で作る psisiarc の書庫 (3 周期・辞書の再利用・カルーセル入り) |
 
 ## ビルド
 
@@ -35,6 +36,25 @@ npm run build          # App/KonomiTV/Resources/BML に出力
 npm test               # node:test (nix shell nixpkgs#nodejs_22 -c npm test)
 npm run typecheck      # tsc --noEmit
 ```
+
+テスト用のフィクスチャ (`test/fixtures/psi-archived-data.bin`) は
+`MockServer/make_psi_fixture.py` がモックサーバーの生成器から作ります
+(リポジトリのルートで `python3 MockServer/make_psi_fixture.py`。`--check` で
+差分の有無だけ確認できます)。
+
+## psisiarc の書庫の読み取りで気をつけること
+
+- マジックナンバーは 8 バイトの `"Pssc\r\n\x9a\n"` で、公式の読み取り
+  ([EDCB の script.js](https://github.com/xtne6f/EDCB/blob/work-plus-s-230212/ini/HttpPublic/legacy/script.js)、
+  KonomiTV の `LivePSIArchivedDataDecoder.ts`) はこの 8 バイトだけを
+  ビッグエンディアンで読んで `0x50737363` / `0x0d0a9a0a` と比べます
+  (ほかのフィールドはすべてリトルエンディアン)。ここをリトルエンディアンで
+  読むと、実サーバーの書庫はどのチャンクも読めずデータ放送が止まります。
+- 2 チャンク目以降の辞書は前のチャンクの辞書 (ID 4096 以上) を参照します。
+  辞書を読みながら前の辞書を書き換えると、再利用のあるチャンクを読めません。
+- 壊れたチャンク (psisiarc の入れ替わり・配信の途切れ) は、次のマジックまで
+  読み飛ばして読み続けます。読めないまま何も届かないと、ページは
+  `loading` のまま止まってしまいます。
 
 `web-bml` は `47fec53cd66734d6cba0fff3c6dfcfc150043109`、`esbuild` は
 `0.25.10` に固定しています。ビルドは決定的 (minify のみ) なので、同じ

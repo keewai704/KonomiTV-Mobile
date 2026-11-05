@@ -200,6 +200,83 @@ final class PlaybackUITests: KonomiTVUITestCase {
         rotate(.portrait, in: app)
     }
 
+    // MARK: - Rotating the window
+
+    /// ライブ再生中に回転しても（縦 → 横 → 縦）、プレイヤーは表示されたまま
+    /// 再生が続き、ストリームが作り直されないこと。
+    ///
+    /// 回転でウィンドウの形が変わると（iPhone の縦横、Split View、Stage
+    /// Manager）、タブバーとサイドバーのインターフェースが入れ替わり、画面は
+    /// 別のナビゲーションのスタックへ移る。そのときに再生画面の経路（ルート）
+    /// が失われると、再生が止まって振り出しに戻る。
+    func testRotationKeepsLivePlaybackRunning() {
+        let app = startApp(disableAutoPiP: true)
+        openLive(in: app)
+
+        let streamsBefore = MockServerControl.intValue("live_total")
+        XCTAssertGreaterThan(streamsBefore, 0, "ライブのストリームが始まっていない")
+        let positionBefore = position(in: app)
+
+        for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
+            rotate(orientation, in: app)
+
+            XCTAssertTrue(
+                uiElement(app, "player.view").waitForExistence(timeout: TestTimeout.ui),
+                "回転 ((orientation.rawValue)) のあとでプレイヤーが表示されない"
+            )
+            let state = uiElement(app, "player.state")
+            XCTAssertTrue(
+                waitForLabel(state, equals: "playing", timeout: TestTimeout.playback),
+                "回転 ((orientation.rawValue)) のあとで再生が止まる (状態: \(state.label))"
+            )
+            XCTAssertEqual(
+                MockServerControl.intValue("live_total"),
+                streamsBefore,
+                "回転 ((orientation.rawValue)) でライブのストリームが作り直されている"
+            )
+        }
+
+        XCTAssertTrue(
+            waitForPlaybackPosition(above: positionBefore + 3, in: app),
+            "回転のあとでライブの再生位置が振り出しに戻っている (回転前: \(positionBefore) 秒, 現在: \(currentPosition(in: app)) 秒)"
+        )
+    }
+
+    /// 録画ビデオの再生中に回転しても、プレイヤーは表示されたまま再生が続き、
+    /// 再生位置が 0 に戻らないこと。
+    func testRotationKeepsRecordedPlaybackPosition() {
+        let app = startApp(disableAutoPiP: true)
+        openVideo(in: app)
+
+        // 再生位置が動き出すまで待ってから基準にする（0 秒との区別がつくように）。
+        let started = position(in: app)
+        XCTAssertTrue(
+            waitForPlaybackPosition(above: started + 2, in: app),
+            "録画ビデオの再生位置が進まない (現在: \(currentPosition(in: app)) 秒)"
+        )
+        let positionBefore = currentPosition(in: app)
+
+        for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
+            rotate(orientation, in: app)
+
+            XCTAssertTrue(
+                uiElement(app, "player.view").waitForExistence(timeout: TestTimeout.ui),
+                "回転 ((orientation.rawValue)) のあとでプレイヤーが表示されない"
+            )
+            let state = uiElement(app, "player.state")
+            XCTAssertTrue(
+                waitForLabel(state, equals: "playing", timeout: TestTimeout.playback),
+                "回転 ((orientation.rawValue)) のあとで再生が止まる (状態: \(state.label))"
+            )
+            let current = currentPosition(in: app)
+            XCTAssertGreaterThanOrEqual(
+                current,
+                positionBefore - 2,
+                "回転 ((orientation.rawValue)) で再生位置が振り出しに戻っている (回転前: \(positionBefore) 秒, 現在: \(current) 秒)"
+            )
+        }
+    }
+
     // MARK: - Stopping
 
     func testLeavingPlayerWithoutPiPStopsPlayback() {

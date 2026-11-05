@@ -2534,9 +2534,10 @@ class MockHandler(BaseHTTPRequestHandler):
 
         Mirrors LiveStreamsRouter.LivePSIArchivedDataAPI: an endless
         application/octet-stream response of psisiarc chunks with the
-        channel's PAT / PMT / SDT / EIT[p/f] / TOT. With the data_component
-        switch the PMT advertises a BML data component (there is no DSM-CC
-        carousel behind it, so the app stays in its loading state).
+        channel's PAT / PMT / SDT / EIT[p/f] / TOT, and with the
+        data_component switch the PMT advertises a BML data component plus the
+        DSM-CC data carousel behind it (DII / DDB with a startup.bml), so the
+        page reaches `state: ready` like it does with a real server.
         """
         channel = find_channel(fixtures["channels"], display_channel_id)
         if channel is None:

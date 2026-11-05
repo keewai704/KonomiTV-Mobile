@@ -199,6 +199,16 @@ extension DataBroadcastingWebView: WKNavigationDelegate {
             self.controller?.pageDidFail(message)
         }
     }
+
+    /// WebKit killed the page's content process (a real BML application caches a
+    /// lot of modules, and iOS reclaims memory aggressively). The page cannot
+    /// report anything any more, so without this the remote's button would stay
+    /// in its loading state forever.
+    nonisolated func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        MainActor.assumeIsolated {
+            self.controller?.pageDidFail("データ放送のページが停止しました。")
+        }
+    }
 }
 
 // MARK: - Message bridge
@@ -370,6 +380,12 @@ final class BMLSchemeHandler: NSObject, @preconcurrency WKURLSchemeHandler,
         guard let proxy = requests.first(where: { $0.value.schemeTask === schemeTask })?.value else {
             return
         }
+        // WebKit gave up on the request (the page went away, or it timed the
+        // request out): with the data broadcasting page this ends the endless
+        // PSI/SI archived data stream, so it belongs in the device log.
+        AppLog.dataBroadcasting.notice(
+            "scheme task stopped: \(schemeTask.request.url?.path ?? "-", privacy: .public)"
+        )
         proxy.cancel()
         requests.removeValue(forKey: proxy.dataTask.taskIdentifier)
     }
@@ -402,6 +418,9 @@ final class BMLSchemeHandler: NSObject, @preconcurrency WKURLSchemeHandler,
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         guard let proxy = finish(task) else { return }
         if let error, !proxy.isStopped {
+            AppLog.dataBroadcasting.error(
+                "request failed: \(task.originalRequest?.url?.path ?? "-", privacy: .public) \(error.localizedDescription, privacy: .public)"
+            )
             proxy.fail(error)
         } else {
             proxy.complete()

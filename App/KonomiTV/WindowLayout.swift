@@ -30,6 +30,19 @@ struct WindowLayout: Equatable, Sendable {
 
     var isMeasured: Bool { size.width > 0 && size.height > 0 }
 
+    /// Applies a measured window size.
+    ///
+    /// A `GeometryReader` reports a zero size while the window is being
+    /// replaced (rotation, Split View resizing, Stage Manager, the switch
+    /// between the tab bar and the sidebar). Taking that value would flip
+    /// `isMeasured` back to false, and `RootView` would drop the whole
+    /// interface for its placeholder, player screen and playback included, so
+    /// the last real size is kept instead.
+    mutating func update(size newSize: CGSize) {
+        guard newSize.width >= 1, newSize.height >= 1 else { return }
+        size = newSize
+    }
+
     /// Width divided by height (above 1 is wider than tall). Zero until it is
     /// measured.
     var aspectRatio: CGFloat {
@@ -76,7 +89,16 @@ extension EnvironmentValues {
 
 extension View {
     /// Measures the window (this view should fill it) into `layout`.
-    func measuringWindow(into layout: Binding<WindowLayout>) -> some View {
+    ///
+    /// `onUpdate` runs with the measured layout as soon as a real size is
+    /// known, *before* the view tree is rebuilt with it: the navigation has to
+    /// move its screens between the tab bar and the sidebar before the stacks of
+    /// the interface that goes away are torn down (a torn down stack writes an
+    /// empty path back, which would drop the screen).
+    func measuringWindow(
+        into layout: Binding<WindowLayout>,
+        onUpdate: ((WindowLayout) -> Void)? = nil
+    ) -> some View {
         background {
             GeometryReader { proxy in
                 let size = CGSize(
@@ -84,9 +106,13 @@ extension View {
                     height: proxy.size.height + proxy.safeAreaInsets.top + proxy.safeAreaInsets.bottom
                 )
                 Color.clear
-                    .onAppear { layout.wrappedValue.size = size }
+                    .onAppear {
+                        layout.wrappedValue.update(size: size)
+                        onUpdate?(layout.wrappedValue)
+                    }
                     .onChange(of: size) { _, newValue in
-                        layout.wrappedValue.size = newValue
+                        layout.wrappedValue.update(size: newValue)
+                        onUpdate?(layout.wrappedValue)
                     }
             }
         }

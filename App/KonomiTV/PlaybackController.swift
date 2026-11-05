@@ -149,6 +149,27 @@ final class PlaybackController {
     /// and panels).
     var isFullscreen: Bool { isFullscreenRequested || isFullscreenForced }
 
+    /// The player screen that appeared last (`PlayerFullscreenModifier`).
+    ///
+    /// A layout change (the window switching between the tab bar and the
+    /// sidebar, a rotation) shows two player screens for a moment; the screen
+    /// that goes away must not clear the fullscreen state of the one that
+    /// stays.
+    @ObservationIgnored private(set) var playerScreenToken: UUID?
+
+    /// Called by a player screen when it appeared.
+    func playerScreenDidAppear(token: UUID) {
+        playerScreenToken = token
+    }
+
+    /// Called by a player screen when it went away.
+    func playerScreenDidDisappear(token: UUID) {
+        guard playerScreenToken == token else { return }
+        playerScreenToken = nil
+        isFullscreenRequested = false
+        isFullscreenForced = false
+    }
+
     /// Data broadcasting (BML) of the live player: the WKWebView page plus the
     /// native state around it (remote keys, video plane).
     let dataBroadcasting = DataBroadcastingController()
@@ -269,6 +290,11 @@ final class PlaybackController {
 
     /// Item whose detail screen is currently on screen.
     @ObservationIgnored private var visibleItem: PlaybackItem?
+    /// Number of screens that reported appearing. A layout change (the window
+    /// switching between the tab bar and the sidebar, a rotation) shows the
+    /// player screen of the new interface before the old one goes away, and the
+    /// old screen's `viewDisappeared` must not clear the new one.
+    @ObservationIgnored private var screenAppearanceCount = 0
     /// A screen that just disappeared, and the deferred check whether leaving
     /// it closed the player (see `viewDisappeared(for:)`).
     @ObservationIgnored private var pendingScreenClosedCheck: (item: PlaybackItem, task: Task<Void, Never>)?
@@ -465,6 +491,9 @@ final class PlaybackController {
         item = nil
         client = nil
         state = "idle"
+        isFullscreenRequested = false
+        isFullscreenForced = false
+        playerScreenToken = nil
         errorDetail = nil
         positionSeconds = 0
         liveTimeOffset = 0
@@ -710,6 +739,7 @@ final class PlaybackController {
             pending.task.cancel()
             pendingScreenClosedCheck = nil
         }
+        screenAppearanceCount += 1
         visibleItem = playbackItem
         // Coming back from picture in picture (or the background) restarts the
         // data broadcasting page.
@@ -734,19 +764,24 @@ final class PlaybackController {
     /// the next screen appeared).
     func viewDisappeared(for playbackItem: PlaybackItem) {
         guard let current = item, current == playbackItem else { return }
-        if visibleItem == playbackItem {
-            visibleItem = nil
-        }
         pendingScreenClosedCheck?.task.cancel()
         pendingScreenClosedCheck = nil
         guard !isPictureInPictureActive else { return }
 
+        let appearances = screenAppearanceCount
         let task = Task { @MainActor [weak self] in
             // Let the navigation path update of this screen land first.
             await Task.yield()
             guard !Task.isCancelled, let self else { return }
             if let pending = self.pendingScreenClosedCheck, pending.item == playbackItem {
                 self.pendingScreenClosedCheck = nil
+            }
+            // A screen that appeared after this one went away (the next
+            // interface of a layout change showing the same player) is the
+            // visible one: leaving this screen is not leaving the player.
+            guard self.screenAppearanceCount == appearances else { return }
+            if self.visibleItem == playbackItem {
+                self.visibleItem = nil
             }
             self.stopIfScreenClosed(playbackItem)
         }

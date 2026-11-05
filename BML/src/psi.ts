@@ -7,7 +7,7 @@
  * 移植) と同じ手順で、届いたチャンクからヘッダなしの TS パケット列を作る。
  *
  * 形式:
- *   32 バイトのヘッダ (マジック 0x50737363 / 0x0d0a9a0a、各リストの長さ)
+ *   32 バイトのヘッダ (マジック "Pssc\r\n\x9a\n"、各リストの長さ)
  *   タイムリスト (4 バイト × time_list_len): 絶対時刻 + (差分, コード数 - 1)
  *   辞書 (新規セクションは 4 バイト、再利用は 2 バイト)
  *   セクション本体 (偶数バイト境界までパディング)
@@ -15,8 +15,18 @@
  *   4 バイト境界までのトレーラー
  */
 
-const MAGIC_1 = 0x50737363
-const MAGIC_2 = 0x0d0a9a0a
+/**
+ * チャンクの先頭のマジック "Pssc\r\n\x9a\n" (psisiarc の Readme の
+ * 「マジックナンバー: Pssc\x0d\x0a\x9a\x0a」)。
+ *
+ * ここだけはバイト列をそのまま比べる。psisiarc はこの 8 バイトをそのまま
+ * 書く (ASCII の "Pssc" と 0x0d 0x0a 0x9a 0x0a) のに対し、公式の読み取り
+ * (EDCB の script.js、KonomiTV の LivePSIArchivedDataDecoder.ts) は他の
+ * フィールドと違ってこの 8 バイトだけビッグエンディアンで読んで
+ * 0x50737363 / 0x0d0a9a0a と比べている。リトルエンディアンで読むと実放送の
+ * 書庫はマジックが一致せず、どのチャンクも読めなくなる。
+ */
+const MAGIC_BYTES = [0x50, 0x73, 0x73, 0x63, 0x0d, 0x0a, 0x9a, 0x0a]
 /** タイムリストの 1 秒あたりの単位 */
 export const TIME_UNITS_PER_SECOND = 11250
 
@@ -60,11 +70,25 @@ export type PSISectionCallback = (second: number, packets: Uint8Array, pid: numb
 export class PSIArchivedDataParser {
   private context: ParserContext = createContext()
   private pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
+  private droppedChunkCount = 0
+
+  /**
+   * 壊れたチャンクを捨てた回数。
+   *
+   * 実放送のアーカイブは psisiarc のプロセスが入れ替わったり (API リクエストの
+   * 都度起動される)、配信が途切れたりして、チャンクの繋ぎ目が壊れることがある。
+   * その場合は次のマジックまで読み飛ばして読み続ける (捨てたまま何も届かないと
+   * ページは loading のまま止まってしまう)。
+   */
+  get droppedChunks(): number {
+    return this.droppedChunkCount
+  }
 
   /** 受信済みのデータをすべて捨てる。 */
   reset(): void {
     this.context = createContext()
     this.pending = new Uint8Array(0)
+    this.droppedChunkCount = 0
   }
 
   /** 受信したチャンクを読み、完成したセクションを callback に渡す。 */
@@ -90,7 +114,14 @@ export class PSIArchivedDataParser {
         sections: context.sections.slice(),
       }
       try {
-        this.readChunk(view, data, callback)
+        if (!this.readChunk(view, data, callback)) {
+          // 壊れたチャンク: 辞書ごと捨てて、次のチャンクの先頭まで読み飛ばす
+          // (必ず 1 バイト以上進む。同じ位置で失敗し続けると止まらない)
+          this.resynchronize(data, context.position + context.trailerSize + 1)
+          if (this.context.position >= data.byteLength) {
+            break
+          }
+        }
       } catch (error) {
         this.context = snapshot
         if (error instanceof IncompleteDataError) {
@@ -106,8 +137,39 @@ export class PSIArchivedDataParser {
     return rest
   }
 
-  /** 1 チャンクを読む。途中で切れていれば IncompleteDataError を投げる。 */
-  private readChunk(view: DataView, data: Uint8Array, callback: PSISectionCallback): void {
+  /**
+   * 壊れたチャンクを捨て、次のチャンクの先頭 (マジック) まで進める。
+   *
+   * 見つからなければ残りをすべて捨てる (次の push で継ぎ足して探し直す)。
+   */
+  private resynchronize(data: Uint8Array, from: number): void {
+    this.context = createContext()
+    for (let index = Math.max(from, 1); index + MAGIC_BYTES.length <= data.byteLength; index++) {
+      let matched = true
+      for (let offset = 0; offset < MAGIC_BYTES.length; offset++) {
+        if (data[index + offset] !== MAGIC_BYTES[offset]) {
+          matched = false
+          break
+        }
+      }
+      if (matched) {
+        // 次のチャンクの先頭が見つかった: そこまでを捨てたことにする
+        this.droppedChunkCount += 1
+        this.context.position = index
+        return
+      }
+    }
+    // まだ見つからない: ここまでのデータを捨てて、次の push で探し直す
+    this.context.position = data.byteLength
+  }
+
+  /**
+   * 1 チャンクを読む。
+   *
+   * 途中で切れていれば IncompleteDataError を投げ、壊れていれば false を返す
+   * (呼び出し側が次のチャンクまで読み飛ばす)。
+   */
+  private readChunk(view: DataView, data: Uint8Array, callback: PSISectionCallback): boolean {
     const context = this.context
     let position = context.position + context.trailerSize
 
@@ -119,15 +181,13 @@ export class PSIArchivedDataParser {
     const codeListLen = readU32(view, data, position + 24)
 
     if (
-      readU32(view, data, position) !== MAGIC_1
-      || readU32(view, data, position + 4) !== MAGIC_2
+      !hasMagic(data, position)
       || dictionaryWindowLen < dictionaryLen
       || dictionaryBufferSize < dictionaryDataSize
       || dictionaryWindowLen > 65536 - 4096
     ) {
-      // 壊れたデータ: ここから先は読まない
-      context.position = data.byteLength
-      return
+      // 壊れたデータ: 呼び出し側が次のチャンクまで読み飛ばす
+      return false
     }
 
     // 辞書と本体のぶん (新規エントリは PID の 2 バイトが増える)
@@ -157,8 +217,8 @@ export class PSIArchivedDataParser {
         const codeOrSize = readU16(view, data, position) - 4096
         if (codeOrSize >= 0) {
           if (codeOrSize >= previousPids.length || previousPids[codeOrSize] < 0) {
-            context.position = data.byteLength
-            return
+            // 前回の辞書にないエントリを参照している (psisiarc が入れ替わった)
+            return false
           }
           pids[index] = previousPids[codeOrSize]
           sections[index] = previousSections[codeOrSize]
@@ -201,8 +261,8 @@ export class PSIArchivedDataParser {
       // 辞書ウィンドウの残りは前回の辞書の未参照のエントリを順に引き継ぐ
       for (let windowIndex = dictionaryLen, previous = 0; windowIndex < dictionaryWindowLen; previous++) {
         if (previous >= previousPids.length) {
-          context.position = data.byteLength
-          return
+          // 辞書ウィンドウを前回の辞書から復元できない
+          return false
         }
         if (previousPids[previous] < 0) {
           continue
@@ -247,7 +307,8 @@ export class PSIArchivedDataParser {
             const packets = context.sections[code]
             const pid = context.pids[code]
             if (packets == null || pid == null) {
-              throw new IncompleteDataError()
+              // 辞書にないコード (壊れたコードリスト)
+              return false
             }
             callback(second, packets, pid)
           }
@@ -264,7 +325,21 @@ export class PSIArchivedDataParser {
     context.timeListCount = -1
     context.codeListPosition = 0
     context.currTime = -1
+    return true
   }
+}
+
+/** position にチャンクのマジックがあるか。 */
+function hasMagic(data: Uint8Array, position: number): boolean {
+  if (position + MAGIC_BYTES.length > data.byteLength) {
+    throw new IncompleteDataError()
+  }
+  for (let offset = 0; offset < MAGIC_BYTES.length; offset++) {
+    if (data[position + offset] !== MAGIC_BYTES[offset]) {
+      return false
+    }
+  }
+  return true
 }
 
 function readU16(view: DataView, data: Uint8Array, position: number): number {

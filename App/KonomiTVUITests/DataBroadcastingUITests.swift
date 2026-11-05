@@ -80,9 +80,15 @@ final class DataBroadcastingUITests: KonomiTVUITestCase {
     }
 
     /// With the mock server's data component switch the page finds BML in the
-    /// PMT: the app keeps its loading state (the mock has no carousel) and
-    /// offers the toggle and the remote.
-    func testDataComponentChannelShowsToggleAndRemote() {
+    /// PMT and loads the startup document from the DSM-CC carousel: the app
+    /// reaches its ready state (no spinner any more) and offers the toggle and
+    /// the remote.
+    ///
+    /// The carousel is what makes the page report `ready`: web-bml needs the
+    /// DII / DDB of the entry component (0x40) and the startup.bml inside the
+    /// module, exactly like on a real server (see
+    /// `MockServer/data_broadcasting_mock.py`).
+    func testDataComponentChannelReachesReady() {
         MockServerControl.setConfig(["data_component": true])
 
         let app = startApp()
@@ -92,15 +98,20 @@ final class DataBroadcastingUITests: KonomiTVUITestCase {
         XCTAssertTrue(state.waitForExistence(timeout: TestTimeout.playback), "データ放送の状態が取得できない")
         XCTAssertTrue(
             waitUntil(timeout: TestTimeout.playback) {
-                ["loading", "ready", "visible"].contains(self.bmlState(in: app))
+                ["ready", "visible"].contains(self.bmlState(in: app))
             },
-            "データ放送のあるチャンネルで読み込みが始まらない (現在: \(bmlState(in: app)))"
+            "データ放送のあるチャンネルで読み込みが終わらない (現在: \(bmlState(in: app)))"
         )
 
         let toggle = uiElement(app, "player.dataBroadcasting")
         XCTAssertTrue(
             toggle.waitForExistence(timeout: TestTimeout.ui),
             "データ放送ボタンが表示されない"
+        )
+        XCTAssertNotEqual(
+            toggle.value as? String,
+            "読み込み中",
+            "読み込みが終わってもデータ放送ボタンが読み込み中のまま"
         )
 
         // The toggle also opens the remote so the BML screen can be operated.
@@ -115,6 +126,20 @@ final class DataBroadcastingUITests: KonomiTVUITestCase {
                 "リモコンのキー \(key) が表示されない"
             )
         }
+
+        // The tap above also hides the BML screen (the web client's d button),
+        // and the page reports it: it is running, not stuck loading.
+        XCTAssertTrue(
+            waitUntil(timeout: TestTimeout.ui) {
+                self.bmlState(in: app) == "invisible"
+            },
+            "データ放送の表示を切り替えられない (現在: \(bmlState(in: app)))"
+        )
+        XCTAssertNotEqual(
+            toggle.value as? String,
+            "読み込み中",
+            "データ放送の表示を切り替えたあとで読み込み中に戻った"
+        )
     }
 
     /// Turning the setting off stops the app from loading anything: the page is

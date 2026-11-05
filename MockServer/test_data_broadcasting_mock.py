@@ -112,11 +112,12 @@ class PSIArchivedDataTestCase(unittest.TestCase):
 
     def test_magic_and_header(self) -> None:
         data = dbm.encode_psi_archived_data(self.sections(), 1767236400.0)
-        magic1, magic2, _, time_list_len, dictionary_len, window_len, data_size, buffer_size, code_list_len = (
-            struct.unpack_from("<IIHHHHIII", data, 0)
+        magic, _, time_list_len, dictionary_len, window_len, data_size, buffer_size, code_list_len = (
+            struct.unpack_from("<8sHHHHIII", data, 0)
         )
-        self.assertEqual(magic1, 0x50737363)
-        self.assertEqual(magic2, 0x0D0A9A0A)
+        # 実放送の書庫と同じ 8 バイト (ASCII の "Pssc" + 0x0D 0x0A 0x9A 0x0A)。
+        # 公式の読み取りはこの 8 バイトだけビッグエンディアンで読む。
+        self.assertEqual(magic, b"Pssc\r\n\x9a\n")
         self.assertEqual(time_list_len, 2)
         self.assertEqual(dictionary_len, len(self.sections()))
         self.assertEqual(window_len, dictionary_len)
@@ -142,18 +143,19 @@ class PSIArchivedDataTestCase(unittest.TestCase):
         sections = dbm.iter_sections(first + second)
         self.assertEqual(
             [pid for pid, _ in sections],
-            [0x0000, 0x1000, 0x0011, 0x0012, 0x0012, 0x0014],
+            [0x0000, 0x1000, 0x0011, 0x0120, 0x0012, 0x0012, 0x0014, 0x0120, 0x0120],
         )
         # 番組情報 (EIT[p/f]) はチャンネルの現在/次の番組から作る
-        self.assertIn(dbm.arib_text("テスト放送 ニュース・情報"), sections[3][1])
-        self.assertIn(dbm.arib_text("テスト放送 アニメ劇場"), sections[4][1])
+        eits = [section for pid, section in sections if pid == 0x0012]
+        self.assertIn(dbm.arib_text("テスト放送 ニュース・情報"), eits[0])
+        self.assertIn(dbm.arib_text("テスト放送 アニメ劇場"), eits[1])
 
     def test_stream_reuses_the_previous_dictionary(self) -> None:
         stream = dbm.iter_psi_archived_data(
             sample_channel(), include_data_component=True, interval=0
         )
         chunks = [next(stream) for _ in range(4)]
-        # The second PAT / PMT / SDT chunk only refers to the first one's
+        # The second PAT / PMT / SDT / DII chunk only refers to the first one's
         # dictionary (IDs from 4096) and carries no section data.
         third = chunks[2]
         dictionary_len, window_len, data_size = struct.unpack_from("<HHI", third, 12)
@@ -162,12 +164,12 @@ class PSIArchivedDataTestCase(unittest.TestCase):
         references = struct.unpack_from(f"<{dictionary_len}H", third, 32 + 2 * 4)
         self.assertTrue(all(value >= 4096 for value in references))
 
+        # 1 周期は 2 チャンク: PAT / PMT / SDT / DII (データ放送) と
+        # EIT[p/f] × 2 / TOT / DDB × 2 (モジュールのブロック)
+        cycle = [0x0000, 0x1000, 0x0011, 0x0120, 0x0012, 0x0012, 0x0014, 0x0120, 0x0120]
         sections = dbm.iter_sections(b"".join(chunks))
-        self.assertEqual(
-            [pid for pid, _ in sections],
-            [0x0000, 0x1000, 0x0011, 0x0012, 0x0012, 0x0014] * 2,
-        )
-        self.assertEqual(sections[:3], sections[6:9])
+        self.assertEqual([pid for pid, _ in sections], cycle * 2)
+        self.assertEqual(sections[:len(cycle)], sections[len(cycle):])
 
     def test_reused_entries_keep_their_sections(self) -> None:
         encoder = dbm.PSIArchiveEncoder()
@@ -183,6 +185,32 @@ class PSIArchivedDataTestCase(unittest.TestCase):
         self.assertEqual([pid for _, pid, _ in packets], [0x0000, 0x0011, 0x0014, 0x0011, 0x0000, 0x0014])
         self.assertEqual(payloads[3], b"\x42" * 20)
         self.assertEqual(payloads[4][:16], b"\x00" * 16)
+
+    def test_data_carousel_sections(self) -> None:
+        dii, ddbs = dbm.data_carousel_sections()
+        self.assertEqual(dii[0], 0x3B)
+        self.assertEqual(dbm.crc32_mpeg(dii), 0)
+        for ddb in ddbs:
+            self.assertEqual(ddb[0], 0x3C)
+            self.assertEqual(dbm.crc32_mpeg(ddb), 0)
+            # DDB のセクション長は DSF 転送ブロック (4066) + ヘッダ + CRC
+            self.assertLessEqual(len(ddb), 3 + 0xFFF)
+
+        # DII はモジュール 1 本 (component 0x40 / module 0x0000) を指し、
+        # そのモジュールは startup.bml を 1 ファイル持つ
+        self.assertIn(struct.pack(">H", dbm.ENTRY_MODULE_ID), dii)
+        self.assertIn(struct.pack(">H", 1), dii)  # numberOfModules
+        module = dbm.build_module([
+            ("startup.bml", "application/x-arib-bml", b"<html></html>"),
+        ])
+        self.assertIn(b"Content-Location: startup.bml", module)
+        self.assertIn(b"multipart/mixed", module)
+        # 起動文書は EUC-JP (A プロファイルの BML) で、複数の DDB ブロックに
+        # 分かれる大きさを持つ
+        document = dbm.bml_startup_document()
+        self.assertTrue(document.startswith(b"<?xml"))
+        self.assertGreater(len(document), dbm.DSMCC_BLOCK_SIZE)
+        document.decode("euc-jp")
 
     def test_stream_without_data_component(self) -> None:
         stream = dbm.iter_psi_archived_data(

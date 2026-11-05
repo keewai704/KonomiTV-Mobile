@@ -16,6 +16,10 @@ private struct PlayerFullscreenModifier: ViewModifier {
     let playback: PlaybackController
 
     @Environment(\.windowLayout) private var windowLayout
+    /// Identifies this player screen, so the teardown of an older screen (a
+    /// layout change has two player screens for a moment) does not clear the
+    /// fullscreen state of the new one.
+    @State private var screenToken = UUID()
 
     private var isFullscreen: Bool { playback.isFullscreen }
 
@@ -26,14 +30,14 @@ private struct PlayerFullscreenModifier: ViewModifier {
             .statusBarHidden(isFullscreen)
             .persistentSystemOverlays(isFullscreen ? .hidden : .automatic)
             .onAppear {
+                playback.playerScreenDidAppear(token: screenToken)
                 playback.isFullscreenForced = windowLayout.forcesFullscreenPlayer
             }
             .onChange(of: windowLayout.forcesFullscreenPlayer) { _, forced in
                 playback.isFullscreenForced = forced
             }
             .onDisappear {
-                playback.isFullscreenRequested = false
-                playback.isFullscreenForced = false
+                playback.playerScreenDidDisappear(token: screenToken)
             }
     }
 }

@@ -55,8 +55,8 @@ export class ArchiveEncoder {
     const u16 = (value: number) => out.push(value & 0xff, (value >> 8) & 0xff)
     const u32 = (value: number) => out.push(value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >>> 24) & 0xff)
 
-    u32(0x50737363)
-    u32(0x0d0a9a0a)
+    // マジック "Pssc\r\n\x9a\n" は psisiarc がそのままのバイト列で書く
+    out.push(0x50, 0x73, 0x73, 0x63, 0x0d, 0x0a, 0x9a, 0x0a)
     u16(0) // 予約
     u16(timeListLen)
     u16(dictionary.length)
