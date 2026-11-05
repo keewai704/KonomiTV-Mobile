@@ -118,6 +118,7 @@ jobs:
             slug: ipad-pro-13-inch-m5
             only-testing: >-
               -only-testing:KonomiTVUITests/LayoutUITests
+              -only-testing:KonomiTVUITests/LayoutScreenshotUITests
               -only-testing:KonomiTVUITests/PlaybackUITests
               -only-testing:KonomiTVUITests/TimeTableUITests
     steps:

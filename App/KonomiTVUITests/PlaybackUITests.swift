@@ -160,10 +160,11 @@ final class PlaybackUITests: KonomiTVUITestCase {
     /// 再生中にウインドウの大きさが変わっても（回転・Split View・Stage Manager・
     /// 全画面表示）、libVLC の映像出力がプレイヤーの大きさに追従すること。
     ///
-    /// 映像出力のビューは libVLC が自分で `PlayerDrawableView` に足すもので、
-    /// 親の大きさが変わっても自動では追従しない。`playback.videoOutput` は
-    /// 「映像出力の大きさ / 描画先の大きさ」を返すので、回転の前後で両者が
-    /// 一致しているかを見る。
+    /// libVLC のウインドウのビューは自分では `PlayerDrawableView` に追従しない
+    /// (描画先が `PlayerDrawableView` 側で引き伸ばす)。`playback.videoOutput` は
+    /// 「映像の大きさ / 描画先の大きさ」を返すので、回転の前後で映像が描画先に
+    /// 追従しているかを見る。映像はレターボックスされるので、映像と描画先が
+    /// 一致するのではなく、映像が描画先の対辺に接していることを確かめる。
     func testVideoOutputFollowsWindowResize() {
         let app = startApp(disableAutoPiP: true)
         openLive(in: app)
@@ -263,8 +264,10 @@ final class PlaybackUITests: KonomiTVUITestCase {
         intLabel(of: "playback.position", in: app) ?? -1
     }
 
-    /// Whether "640x360/640x360" says that libVLC's video output view fills the
-    /// drawable (one point of tolerance for rounding).
+    /// Whether "640x360/1280x720" says that the picture libVLC draws fills the
+    /// drawable: it may be letterboxed inside libVLC's window view (which fills
+    /// the drawable), so it has to touch two opposite edges, two points of
+    /// tolerance each for rounding.
     private func videoOutputFillsDrawable(_ description: String) -> Bool {
         let sides = description.split(separator: "/").map { $0.split(separator: "x") }
         guard sides.count == 2, sides[0].count == 2, sides[1].count == 2,
@@ -273,7 +276,7 @@ final class PlaybackUITests: KonomiTVUITestCase {
               drawableWidth >= 1, drawableHeight >= 1 else {
             return false
         }
-        return abs(outputWidth - drawableWidth) <= 1 && abs(outputHeight - drawableHeight) <= 1
+        return abs(outputWidth - drawableWidth) <= 2 || abs(outputHeight - drawableHeight) <= 2
     }
 
     private func waitForPlaybackPosition(

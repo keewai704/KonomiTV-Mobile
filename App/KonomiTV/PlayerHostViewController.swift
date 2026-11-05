@@ -124,9 +124,10 @@ final class PlayerHostViewController: UIViewController {
         }
         if videoView.frame != target {
             if videoView.frame.size != target.size {
-                // The drawable passes the new size on to libVLC's video output
-                // view in its own layout pass; ask for that pass now, so the
-                // picture never keeps the size of the previous window.
+                // The drawable stretches libVLC's window view to the new size
+                // in its own layout pass (and libVLC then re-places the picture
+                // inside it); ask for that pass now, so the picture never keeps
+                // the size of the previous window.
                 videoView.setNeedsLayout()
             }
             videoView.frame = target
@@ -158,19 +159,24 @@ final class PlayerHostViewController: UIViewController {
 
     // MARK: - Video output
 
-    /// Size of the view libVLC renders into, next to the size of the drawable
-    /// it has to fill ("1280x720/1280x720"; "-" before libVLC added its view).
+    /// Size of libVLC's picture view, next to the size of the drawable it is
+    /// drawn into ("1280x720/1280x720"; "-" before libVLC added its views).
     ///
-    /// The layout UI test reads it through `playback.videoOutput` and asserts
-    /// that a window resize (rotation, Split View, Stage Manager, fullscreen)
-    /// resizes the picture with the player.
+    /// `PlayerDrawableView` keeps libVLC's window view at its own size, so the
+    /// drawable's subview is always the drawable and says nothing about the
+    /// picture. The picture is the view libVLC frames inside that window view,
+    /// one level further down, and it is letterboxed there. The layout UI test
+    /// reads this through `playback.videoOutput` and asserts that a window
+    /// resize (rotation, Split View, Stage Manager, fullscreen) resizes the
+    /// picture with the player.
     var videoOutputDescription: String {
-        let largest = videoView.subviews.max {
-            $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height
-        }
-        guard let largest else { return "-" }
+        let picture = videoView.subviews
+            .flatMap(\.subviews)
+            .max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+        guard let picture else { return "-" }
+        let frame = picture.convert(picture.bounds, to: videoView)
         let drawable = videoView.bounds.size
-        return "\(Int(largest.frame.width.rounded()))x\(Int(largest.frame.height.rounded()))"
+        return "\(Int(frame.width.rounded()))x\(Int(frame.height.rounded()))"
             + "/\(Int(drawable.width.rounded()))x\(Int(drawable.height.rounded()))"
     }
 

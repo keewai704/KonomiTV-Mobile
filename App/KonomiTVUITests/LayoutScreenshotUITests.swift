@@ -56,17 +56,17 @@ final class LayoutScreenshotUITests: KonomiTVUITestCase {
                 XCTAssertTrue(waitUntil(timeout: TestTimeout.ui) { !panel.exists }, "\(name): 常に全画面のウインドウでプレイヤーが全画面にならない")
                 XCTAssertFalse(uiElement(app, "player.fullscreen").exists, "\(name): 常に全画面のウインドウに全画面ボタンがある")
                 XCTAssertTrue(uiElement(app, "player.back").exists, "\(name): 常に全画面のウインドウに戻るボタンがない")
-                attachScreenshot("\(screen)-\(name)-fullscreen", of: app)
+                attachScreenshot("\(screen)-\(name)-fullscreen")
                 continue
             }
 
             XCTAssertTrue(panel.waitForExistence(timeout: TestTimeout.ui), "\(name): 通常表示で情報が表示されない")
-            attachScreenshot("\(screen)-\(name)-normal", of: app)
+            attachScreenshot("\(screen)-\(name)-normal")
 
             tapFullscreen(in: app) { !panel.exists }
             XCTAssertTrue(waitUntil(timeout: TestTimeout.ui) { !panel.exists }, "\(name): 全画面表示で情報が隠れない")
             waitSeconds(1)
-            attachScreenshot("\(screen)-\(name)-fullscreen", of: app)
+            attachScreenshot("\(screen)-\(name)-fullscreen")
 
             tapFullscreen(in: app) { panel.exists }
             XCTAssertTrue(panel.waitForExistence(timeout: TestTimeout.ui), "\(name): 全画面表示を終了できない")
@@ -101,8 +101,11 @@ final class LayoutScreenshotUITests: KonomiTVUITestCase {
         }
     }
 
-    private func attachScreenshot(_ name: String, of app: XCUIApplication) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+    /// `app.screenshot()` は iOS 26 のシミュレータの横向きで、縦向きの
+    /// フレームバッファを横向きのキャンバスに貼った画像を返す (映像が写らない)。
+    /// 画面そのものを撮る。
+    private func attachScreenshot(_ name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)

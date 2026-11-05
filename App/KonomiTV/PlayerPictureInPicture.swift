@@ -189,10 +189,13 @@ final class PlayerPictureInPictureMediaController: NSObject, @unchecked Sendable
 
 /// The view libVLC renders the video into.
 ///
-/// libVLC adds its `AVSampleBufferDisplayLayer` view as a subview and positions
-/// it itself (letterboxing included), so this is a plain container that keeps
-/// that view at its own size (see `layoutSubviews()`). It also carries the
-/// picture-in-picture selectors libVLC looks for.
+/// libVLC adds its own window view (`VLCVideoUIView`) as a subview of this
+/// drawable and places the letterboxed picture inside it. That window view is
+/// created when the video output opens, with the bounds this drawable had at
+/// that moment, and is only added to the hierarchy later; its autoresizing mask
+/// therefore cannot repair a resize in between, so this container stretches it
+/// to its own bounds (see `didAddSubview(_:)` and `layoutSubviews()`). It also
+/// carries the picture-in-picture selectors libVLC looks for.
 ///
 /// It does not declare `VLCDrawable`: that protocol's `bounds` is a method,
 /// which UIView's `bounds` property cannot witness in Swift. libVLC never
@@ -202,10 +205,6 @@ final class PlayerPictureInPictureMediaController: NSObject, @unchecked Sendable
 final class PlayerDrawableView: UIView, PlayerPictureInPictureDrawable {
     /// Shared with libVLC's PiP window controller.
     let pipMedia = PlayerPictureInPictureMediaController()
-
-    /// Size of this drawable in the previous layout pass; the video output
-    /// view libVLC added is stretched from it to the new bounds.
-    private var lastLayoutSize: CGSize = .zero
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -218,49 +217,40 @@ final class PlayerDrawableView: UIView, PlayerPictureInPictureDrawable {
         fatalError("init(coder:) has not been implemented")
     }
 
-    /// Keeps libVLC's video output at the size of this drawable.
-    ///
-    /// libVLC adds its own video output view (an `AVSampleBufferDisplayLayer`
-    /// backed view) as a subview, positions it once and leaves the autoresizing
-    /// mask empty. Resizing this drawable alone (a fullscreen toggle, a window
-    /// resize in Split View or Stage Manager, a rotation) therefore left the
-    /// picture at its old size until the next load. A subview or layer that
-    /// filled the previous bounds follows the new ones; anything libVLC placed
-    /// smaller (a letterboxed picture, the BML video plane) is left as libVLC
-    /// positioned it.
-    override func layoutSubviews() {
-        super.layoutSubviews()
-
-        let newBounds = bounds
-        let previous = lastLayoutSize
-        lastLayoutSize = newBounds.size
-        guard newBounds.width >= 1, newBounds.height >= 1 else { return }
-
-        // No animated stretching: the video output has to be at its final size
-        // in this pass.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        for subview in subviews where tracks(previous: previous, frame: subview.frame) {
-            subview.frame = newBounds
-        }
-        // Layers libVLC added to this view's own layer. The backing layer of a
-        // subview follows its view (above) and is left out, so the two never
-        // disagree.
-        let subviewLayers = Set(subviews.map(\.layer))
-        for sublayer in layer.sublayers ?? [] {
-            guard !subviewLayers.contains(sublayer),
-                  tracks(previous: previous, frame: sublayer.frame) else { continue }
-            sublayer.frame = newBounds
-        }
-        CATransaction.commit()
+    /// Stretches libVLC's window view, which libVLC creates with the bounds
+    /// this drawable had when the video output opened and only adds here later
+    /// (the drawable is usually resized in between, e.g. from zero to the final
+    /// size). Its autoresizing mask only follows deltas from the moment it
+    /// becomes a subview, so the stale frame has to be replaced here.
+    override func didAddSubview(_ subview: UIView) {
+        super.didAddSubview(subview)
+        stretch(subview)
     }
 
-    /// Whether a rect filled this drawable in the previous layout pass (or
-    /// fills it now, for the first pass after libVLC added its view).
-    private func tracks(previous: CGSize, frame: CGRect) -> Bool {
-        let reference = previous.width >= 1 && previous.height >= 1 ? previous : bounds.size
-        guard reference.width >= 1, reference.height >= 1 else { return false }
-        return frame.width >= reference.width - 0.5 && frame.height >= reference.height - 0.5
+    /// Keeps libVLC's window view at the size of this drawable.
+    ///
+    /// libVLC's window view reports `bounds.size * contentScaleFactor` from its
+    /// own layout to the video output, which computes the letterboxed place and
+    /// frames its picture view from it. Stretching the window view to these
+    /// bounds is therefore what makes the picture follow a fullscreen toggle, a
+    /// window resize in Split View or Stage Manager, and a rotation; the picture
+    /// stays where libVLC put it inside the window view. No sublayers are
+    /// touched: the picture is a view, nested one level deeper.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        for subview in subviews where subview.frame != bounds {
+            stretch(subview)
+        }
+    }
+
+    /// Fills these bounds with `subview` without animating the change, and asks
+    /// it to lay its own contents out again at the new size.
+    private func stretch(_ subview: UIView) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        subview.frame = bounds
+        CATransaction.commit()
+        subview.setNeedsLayout()
     }
 
     // MARK: - PlayerPictureInPictureDrawable (VLCPictureInPictureDrawable)

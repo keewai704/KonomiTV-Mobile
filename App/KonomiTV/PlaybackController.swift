@@ -179,8 +179,8 @@ final class PlaybackController {
         return false
     }
 
-    /// Size of libVLC's video output view next to the size of the drawable it
-    /// has to fill, read by the layout UI test (`playback.videoOutput`).
+    /// Size of libVLC's picture view next to the size of the drawable it is
+    /// drawn into, read by the layout UI test (`playback.videoOutput`).
     var videoOutputDescription: String { hostViewController.videoOutputDescription }
 
     /// libVLC has handed its picture-in-picture window controller to the
